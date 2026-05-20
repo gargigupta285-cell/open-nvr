@@ -133,7 +133,7 @@ examples/intrusion-detection/
 ## Tests
 
 ```bash
-pip install -e ".[dev]"
+uv pip install -e ".[dev]"          # or: pip install -e ".[dev]"
 PYTHONPATH=. pytest tests/
 ```
 

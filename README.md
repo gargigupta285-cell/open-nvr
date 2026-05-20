@@ -6,7 +6,7 @@ Bring AI to the Edge. Own Your Security. Deploy Anywhere.
 ## What you get
 
 - **Live multi-camera NVR** — ONVIF / RTSP ingest, HLS playback, event recording via MediaMTX.
-- **Pluggable AI pipeline** — person detection, face recognition, scene captioning out of the box; add your own via the [AI Adapter SDK](https://github.com/open-nvr/ai-adapter).
+- **Pluggable AI pipeline** — person detection, face recognition, scene captioning out of the box; add your own via the [AI Adapter SDK](https://github.com/open-nvr/ai-adapter). Curious *why* there's an adapter layer at all instead of loading models directly? See [Why use ai-adapter](https://github.com/open-nvr/ai-adapter#why-use-ai-adapter-vs-loading-your-model-directly) — short version: audit chain + fingerprint drift detection + sovereignty enforcement + operator-controlled permissions, none of which `from ultralytics import YOLO` gives you.
 - **Self-hosted, privacy-first** — your footage never leaves your hardware unless *you* wire it up.
 - **Secure-by-Design defaults** — no shipped default password, no placeholder secrets accepted, MediaMTX bound to loopback only, recording-path traversal refused. See [SECURITY_ARCHITECTURE.md](docs/SECURITY_ARCHITECTURE.md) for the offline-first design and its mapping to [Zenodo DOI 10.5281/zenodo.17261761](https://doi.org/10.5281/zenodo.17261761).
 - **Cross-platform** — Windows, macOS, Linux (bridge or host networking).

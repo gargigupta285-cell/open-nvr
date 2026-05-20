@@ -7,6 +7,8 @@
 > up; this document is the load-bearing artefact reviewers should
 > critique before any adapter migration begins.
 >
+> **New here? Read [Why use ai-adapter](https://github.com/open-nvr/ai-adapter#why-use-ai-adapter-vs-loading-your-model-directly) first.** This document is the *what* — the wire shapes every adapter must speak. The README explains the *why*: which cross-cutting concerns (audit chain, fingerprint drift, sovereignty enforcement, operator-controlled permissions) earn the layer's keep, with a worked comparison vs `from ultralytics import YOLO` and a data-flow diagram for the intrusion-detection example.
+>
 > **What lives outside this doc.** NATS event bus (B1), Redis caches
 > (B2), MCP server (D1), pgvector + RAG (D2/D3), example apps
 > (C1/C2). Each is named in the milestone plan and will get its own
@@ -917,7 +919,7 @@ adapter URL; it exercises every endpoint, asserts wire shapes
 roundtrip, and reports pass/fail/warn:
 
 ```bash
-pip install opennvr-adapter-conformance
+uv add --dev opennvr-adapter-conformance     # or: pip install opennvr-adapter-conformance
 opennvr-adapter-conformance http://localhost:9001
 ```
 
