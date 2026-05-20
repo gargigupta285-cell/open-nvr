@@ -192,6 +192,45 @@ def test_ws_mode_fires_alert_for_in_zone_detection(tmp_path):
     assert detector.recorder.alerts == fired
 
 
+def test_ws_mode_alerts_use_session_correlation_id(tmp_path):
+    """Regression for A2.5b peer-review H1: when a stream client
+    surfaces a session correlation_id via the ``__session_correlation_id``
+    response key, alerts MUST reference that value (not the per-step
+    uuid step() generated). Otherwise alerts fail to join back to
+    KAI-C's per-session ``stream.opened`` audit row."""
+
+    class _SessionAwareFake(_FakeStreamClient):
+        # Pretend this is the SESSION correlation_id KAI-C audited.
+        SESSION_ID = "session-corr-abc123"
+
+        def infer_frame(self, *, frame_bytes, correlation_id):
+            response = super().infer_frame(
+                frame_bytes=frame_bytes,
+                correlation_id=correlation_id,
+            )
+            response["__session_correlation_id"] = self.SESSION_ID
+            return response
+
+    detector, _ = _build_ws_detector(
+        tmp_path, now=_dt.datetime(2026, 5, 19, 10, 0),
+    )
+    # Replace the factory mid-test so we get the session-aware fake.
+    fakes_by_id: dict[str, _SessionAwareFake] = {}
+
+    def factory(camera_id: str) -> _SessionAwareFake:
+        fake = _SessionAwareFake(camera_id)
+        fake.next_detections = [_detection("person", x=0.45, y=0.45)]
+        fakes_by_id[camera_id] = fake
+        return fake  # type: ignore[return-value]
+
+    detector._stream_client_factory = factory
+    fired = detector.step(detector._config.cameras[0])
+    assert len(fired) == 1
+    # The alert's correlation_id must be the session's, not whatever
+    # uuid step() generated at the top of the cycle.
+    assert fired[0].correlation_id == _SessionAwareFake.SESSION_ID
+
+
 def test_ws_mode_reuses_client_across_steps(tmp_path):
     """One persistent stream client per camera — not one per step."""
     detector, fakes = _build_ws_detector(

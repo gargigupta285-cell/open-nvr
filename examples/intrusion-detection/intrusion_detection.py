@@ -303,26 +303,42 @@ class KaicStreamClient:
         self._api_key = api_key
         self._timeout = timeout_seconds
         # Translate http(s):// → ws(s):// for the upstream connect URL.
-        # KAI-C's WS endpoint is at /api/v1/infer/{adapter}/stream;
-        # the registration URL the operator supplied is the HTTP
-        # base, so we build the WS URL here.
-        if base_url.startswith("https://"):
-            ws_scheme = "wss://"
-            rest = base_url[len("https://"):]
-        elif base_url.startswith("http://"):
-            ws_scheme = "ws://"
-            rest = base_url[len("http://"):]
-        else:
+        # KAI-C's WS endpoint is at {kaic_url}/api/v1/infer/{adapter}/stream;
+        # preserve any path prefix the operator supplied so KAI-C
+        # deployed behind a reverse proxy (e.g.,
+        # ``https://nvr.corp/kaic/``) routes correctly. (Peer review M3.)
+        from urllib.parse import urlparse, urlunparse
+
+        parsed = urlparse(base_url)
+        ws_scheme_map = {"http": "ws", "https": "wss"}
+        ws_scheme = ws_scheme_map.get(parsed.scheme.lower())
+        if ws_scheme is None:
             raise ValueError(
                 f"kaic_url must start with http:// or https://, got {base_url!r}"
             )
-        self._url = f"{ws_scheme}{rest.rstrip('/')}/api/v1/infer/{adapter_name}/stream"
+        # Build the WS URL: keep host + any path prefix, append the
+        # KAI-C streaming path. Strips a trailing slash on the prefix
+        # so we don't end up with ``//api/v1/...``.
+        path_prefix = (parsed.path or "").rstrip("/")
+        self._url = urlunparse((
+            ws_scheme,
+            parsed.netloc,
+            f"{path_prefix}/api/v1/infer/{adapter_name}/stream",
+            "", "", "",
+        ))
         # Allow injection for tests (the production path uses
         # ``websockets.sync.client.connect``; tests can substitute a
         # fake that returns a stub connection).
         self._websocket_factory = websocket_factory
         self._conn: Any = None
         self._seq: int = 0
+        # KAI-C audits at SESSION grain (stream.opened/closed/failed),
+        # not per-frame, so all frames in this WS session share one
+        # correlation_id — set on handshake. We expose it back via
+        # ``infer_frame``'s response so the detector's alerts
+        # reference the same ID KAI-C will show in its audit log.
+        # (Peer review H1.)
+        self._session_correlation_id: str | None = None
 
     def _do_connect(self, headers: list[tuple[str, str]]) -> Any:
         """Open a fresh WS connection. Raises ``KaicError`` on
@@ -339,7 +355,11 @@ class KaicStreamClient:
                 additional_headers=headers,
                 open_timeout=self._timeout,
                 close_timeout=2.0,
-                max_size=None,
+                # 32 MiB upper bound on result-message size. Mirrors
+                # the SDK's adapter-side ``max_body_bytes`` default;
+                # a misbehaving / malicious adapter can't OOM the
+                # detector with an unbounded frame. (Peer review L6.)
+                max_size=32 * 1024 * 1024,
             )
         except Exception as exc:  # noqa: BLE001
             raise KaicError(f"WS connect to {self._url} failed: {exc}") from exc
@@ -376,6 +396,12 @@ class KaicStreamClient:
             self._safe_close(conn)
             raise KaicError(f"WS handshake failed: {exc}") from exc
         self._conn = conn
+        self._session_correlation_id = correlation_id
+        # Fresh session → fresh seq counter. (Peer review H2 — without
+        # this, a reconnect mid-stream re-uses the previous session's
+        # seq numbers, which §6.3 says must be monotonically increasing
+        # *per session*.)
+        self._seq = 0
 
     def infer_frame(
         self,
@@ -418,13 +444,20 @@ class KaicStreamClient:
             raise KaicError(f"WS recv: unexpected message {payload!r}")
         # Shape the response so the detector's existing post-parser
         # (which expects ``InferResponse``-like dicts from the HTTP
-        # path) can consume it unchanged.
+        # path) can consume it unchanged. We add a private
+        # ``__session_correlation_id`` key so the detector knows the
+        # effective correlation_id KAI-C will surface in its audit
+        # log — in WS mode all frames within a session share one
+        # correlation_id, so alerts MUST reference the session's,
+        # not the per-step one ``_call_kaic`` was passed. (Peer
+        # review H1.)
         return {
             "status": "ok",
             "model_name": "",  # WS protocol doesn't echo model name
             "model_version": "",
             "inference_ms": int(payload.get("inference_ms", 0)),
             "result": payload.get("result") or {},
+            "__session_correlation_id": self._session_correlation_id,
         }
 
     def close(self) -> None:
@@ -565,6 +598,18 @@ class IntrusionDetector:
         except KaicError as exc:
             logger.warning("kaic inference failed for %s: %s", camera.camera_id, exc)
             return []
+
+        # WS mode: KAI-C audits at session grain (one correlation_id
+        # per WS session, not per frame). Use whatever the stream
+        # client reports as the session's effective correlation_id so
+        # alerts join back to the right KAI-C audit row. HTTP mode is
+        # per-call so the per-step ID and effective ID always match.
+        # (Peer review H1.)
+        if isinstance(infer_response, dict):
+            effective_correlation_id = (
+                infer_response.get("__session_correlation_id") or correlation_id
+            )
+            correlation_id = effective_correlation_id
 
         # Detection list lives at ``response.result.detections`` per
         # §5.1. Defensive parsing — adapters might return error

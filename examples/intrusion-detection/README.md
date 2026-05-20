@@ -17,9 +17,15 @@ This is also the canonical **consumer-side** validation of the contract: every p
                                          │ raw JPEG bytes
                                          ▼
                               ┌──────────────────────┐
-                              │   KaicClient         │  base64 frame
-                              │   POST /api/v1/      │  X-Correlation-Id
-                              │   infer/{adapter}    │  X-Internal-Api-Key
+                              │   KAI-C call         │  kaic_transport=http:
+                              │                      │    POST /api/v1/infer/
+                              │   (HTTP or WS,       │      {adapter}
+                              │    selected via      │  kaic_transport=ws:
+                              │    kaic_transport    │    WS /api/v1/infer/
+                              │    config field)     │      {adapter}/stream
+                              │                      │      (persistent, per-camera)
+                              │  X-Correlation-Id    │  Headers in both modes.
+                              │  X-Internal-Api-Key  │
                               └──────────┬───────────┘
                                          │ §5.1 DetectionResult
                                          ▼
@@ -121,13 +127,14 @@ examples/intrusion-detection/
 ├── frame_sources.py        file://, http(s):// — pluggable
 ├── config.example.yml      Sample config with every option
 ├── Dockerfile              Drop-in run-this
-├── pyproject.toml          Minimal deps (httpx, PyYAML)
+├── pyproject.toml          Minimal deps (httpx, PyYAML, websockets)
 ├── README.md               you are here
 └── tests/
-    ├── test_zone.py            (11 tests)
-    ├── test_alerts.py          (12 tests)
-    ├── test_frame_sources.py   (14 tests)
-    └── test_intrusion_detection.py  (16 tests)
+    ├── test_zone.py                  (11 tests)
+    ├── test_alerts.py                (12 tests)
+    ├── test_frame_sources.py         (14 tests)
+    ├── test_intrusion_detection.py   (19 tests)
+    └── test_ws_mode.py               (12 tests)
 ```
 
 ## Tests
@@ -137,7 +144,7 @@ uv pip install -e ".[dev]"          # or: pip install -e ".[dev]"
 PYTHONPATH=. pytest tests/
 ```
 
-53 tests total. Coverage: zone math (convex + concave + edge cases), alert routing (stdout + webhook + failure isolation), frame sources (file + HTTP + transport errors + unsupported schemes), and the full `IntrusionDetector.step()` loop with a stubbed KAI-C (alert paths, no-alert paths, restricted-hours edges, KAI-C errors, correlation_id threading).
+68 tests total. Coverage: zone math (convex + concave + edge cases), alert routing (stdout + webhook + failure isolation), frame sources (file + HTTP + transport errors + unsupported schemes), and the full `IntrusionDetector.step()` loop with a stubbed KAI-C (alert paths, no-alert paths, restricted-hours edges, KAI-C errors, correlation_id threading).
 
 ## Why this is a template
 
@@ -156,5 +163,5 @@ That template is exactly what §12.4 of the design doc calls "first-party exampl
 - RTSP input via ffmpeg subprocess
 - OpenNVR backend snapshot URL (`opennvr://cameras/{id}/snapshot`)
 - Native OpenNVR alerts-API integration (replace webhook for OpenNVR deployments)
-- WebSocket streaming through KAI-C once that proxy lands
+- (A2.5b shipped — see "What's NOT in v1" above for the current opt-in WS mode)
 - Per-detection deduplication (so a stationary person doesn't fire continuously)
