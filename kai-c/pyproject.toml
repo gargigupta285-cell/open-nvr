@@ -9,6 +9,18 @@ dependencies = [
     "fastapi>=0.109.0",
     "requests>=2.31.0",
     "uvicorn>=0.27.0",
+    # A2.4b — websocket client for the /api/v1/infer/{adapter}/stream
+    # proxy. ``websockets`` is the pure-Python reference impl; uvicorn
+    # bundles it as a server-side dep too, so this is effectively free
+    # additional surface.
+    # >=13 keeps us on the asyncio-impl-by-default branch
+    # (``additional_headers`` is the modern kwarg; 12.x's legacy
+    # ``websockets.client.connect`` used ``extra_headers``).
+    "websockets>=13.0",
+    # B1 — NATS publisher for the event-bus broadcast surface
+    # (opennvr.inference.* subjects). Best-effort publishing on the
+    # /infer + /infer/stream paths; NATS down doesn't break inference.
+    "nats-py>=2.6",
 ]
 
 [build-system]

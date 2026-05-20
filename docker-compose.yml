@@ -67,6 +67,47 @@ services:
       retries: 5
 
   # ==========================================
+  # 2a. MEDIAMTX CERT INIT (one-shot)
+  # ==========================================
+  #
+  # M1b-fixup-v2 F-9: auto-generate a self-signed TLS cert pair if none
+  # exists, so a fresh `docker compose up` doesn't fail on missing
+  # ./mediamtx-certs/server.{crt,key}. The init container exits cleanly
+  # after generation; MediaMTX depends on it via `service_completed_
+  # successfully` so the cert is guaranteed to exist before MediaMTX
+  # starts.
+  #
+  # If the operator already ran scripts/generate-mediamtx-certs.sh
+  # manually, this is a no-op and prints a single line confirming the
+  # certs are present.
+  mediamtx-certs-init:
+    image: alpine:3.20
+    container_name: opennvr_mediamtx_certs_init
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        if [ -f /certs/server.crt ] && [ -f /certs/server.key ]; then
+          echo "MediaMTX certs already present at /certs/server.{crt,key}; skipping generation."
+          exit 0
+        fi
+        echo "Generating self-signed MediaMTX cert pair (V-019)..."
+        apk add --no-cache openssl >/dev/null
+        umask 077
+        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+          -keyout /certs/server.key -out /certs/server.crt \
+          -subj "/CN=opennvr-mediamtx" \
+          -addext "subjectAltName=DNS:localhost,DNS:mediamtx,IP:127.0.0.1,IP:::1" \
+          -addext "basicConstraints=critical,CA:FALSE" \
+          -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+          -addext "extendedKeyUsage=serverAuth"
+        chmod 0644 /certs/server.crt
+        echo "Wrote /certs/server.crt + /certs/server.key. SAN: localhost, mediamtx, 127.0.0.1, ::1"
+    volumes:
+      - ./mediamtx-certs:/certs
+
+  # ==========================================
   # 2. MEDIAMTX (Streaming Server)
   # ==========================================
   mediamtx:
@@ -89,12 +130,20 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      mediamtx-certs-init:
+        condition: service_completed_successfully
     # ----------------------------------------------------
     # [WINDOWS/MAC] BRIDGE MODE: Uncomment lines below
     ports:
-      - "127.0.0.1:8554:8554" # RTSP
-      - "127.0.0.1:8888:8888" # HLS
-      - "127.0.0.1:8889:8889" # WebRTC Signaling
+      # M1b-fixup-v2 F-2: the plaintext RTSP port (:8554) is intentionally
+      # NOT mapped. Under rtspEncryption="strict" MediaMTX does not bind
+      # the plaintext listener, so the port map would have nothing to
+      # forward to. Operators who need plaintext for legacy reasons must
+      # switch to mediamtx.local.yml (and set MEDIAMTX_ALLOW_PLAINTEXT_
+      # OUTPUTS=true) AND add `127.0.0.1:8554:8554` back here.
+      - "127.0.0.1:8322:8322" # RTSPS (V-019 / RFC 7826 — TLS-required RTSP)
+      - "127.0.0.1:8888:8888" # HLS (HTTPS — hlsEncryption=yes)
+      - "127.0.0.1:8889:8889" # WebRTC Signaling (HTTPS — webrtcEncryption=yes)
       - "127.0.0.1:8189:8189/tcp" # WebRTC ICE TCP
       - "127.0.0.1:8189:8189/udp" # WebRTC ICE UDP
       - "127.0.0.1:9997:9997" # API/Metrics
@@ -103,6 +152,16 @@ services:
     volumes:
       # Mount Docker-specific mediamtx configuration
       - ./mediamtx.docker.yml:/mediamtx.yml:ro
+      # M1b-fixup-v2 F-9: directory mount instead of per-file mount.
+      # Per-file mounts cause Docker to silently create an empty
+      # *directory* at the host path when the source doesn't exist —
+      # MediaMTX then fails to start with "is a directory" instead of
+      # "no such file or directory". The directory mount works whether
+      # the certs were generated ahead of time by
+      # scripts/generate-mediamtx-certs.sh or by the
+      # mediamtx-certs-init service above. The YAML references the
+      # certs via absolute path (/etc/mediamtx-certs/...).
+      - ./mediamtx-certs:/etc/mediamtx-certs:ro
       # Mount recordings directory (configurable via .env file)
       - ${RECORDINGS_PATH:-/home/ubuntu/recordings}:/app/recordings
     environment:
@@ -131,6 +190,69 @@ services:
       retries: 3
 
   # ==========================================
+  # 2b. NATS (B1 event bus)
+  # ==========================================
+  #
+  # B1: KAI-C publishes ``opennvr.inference.{adapter}.{camera_id}.completed``
+  # events on NATS so monitoring apps (intrusion-detection, future
+  # loitering / PPE / fire-detection siblings) can subscribe instead
+  # of polling KAI-C. One adapter inference fans out to N consumers
+  # → adapter GPU load drops N×.
+  #
+  # Authentication is token-based; the token is the same
+  # INTERNAL_API_KEY operators already manage for KAI-C's HTTP/WS
+  # surface. No port is published to the host because NATS is an
+  # internal service — only ``opennvr-core`` (which runs KAI-C +
+  # any subscribers) talks to it via the ``sentinel_internal`` Docker
+  # network. Setting ``NATS_URL=""`` on opennvr-core disables
+  # publishing entirely for operators not yet on the event bus.
+  #
+  # Operators wanting external subscribers (e.g., a Splunk forwarder
+  # running outside the docker-compose) must add a port mapping AND
+  # ensure the listening interface is firewalled or behind a private
+  # network — the loopback-only assumption baked in here is what
+  # AI_SOVEREIGNTY=local_only enforces at KAI-C startup.
+  nats:
+    image: nats:2-alpine
+    container_name: opennvr_nats
+    restart: unless-stopped
+    command:
+      - --name
+      - opennvr-nats
+      - --auth
+      # Required: NATS token = INTERNAL_API_KEY. ``${VAR:?...}`` makes
+      # ``docker compose up`` fail at validate time if the env var is
+      # unset/empty rather than silently starting NATS without auth.
+      # (Peer review H2 — without this, a missing INTERNAL_API_KEY
+      # leaves the broker open to anyone on the sentinel_internal
+      # network.)
+      - ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set in .env for the NATS event bus}
+      # JetStream off for v1 — KAI-C only does fire-and-forget
+      # publish. Persistence / replay is a B2 concern.
+      - --http_port
+      - "8222"
+    # ----------------------------------------------------
+    # [LINUX] HOST MODE: Uncomment ONE line below
+    # network_mode: host
+    # ----------------------------------------------------
+    # ----------------------------------------------------
+    # [WINDOWS/MAC] BRIDGE MODE: Uncomment lines below
+    networks:
+      - sentinel_internal
+    # ----------------------------------------------------
+    # Intentionally NO ``ports:`` mapping — NATS is internal-only
+    # under default deployment. Subscribers run inside the same
+    # docker-compose project (opennvr-core, future inference-listener
+    # service). Operators needing external subscribers add the mapping
+    # themselves and re-evaluate sovereignty implications.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8222/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  # ==========================================
   # 3. CORE APPLICATION (Backend + Frontend + Kai-C)
   # ==========================================
   opennvr-core:
@@ -150,6 +272,11 @@ services:
       db:
         condition: service_healthy
       mediamtx:
+        condition: service_healthy
+      # B1 — KAI-C connects to NATS at startup. NATS_URL empty in
+      # the operator's .env disables broadcast cleanly; this
+      # depends_on only matters when NATS is actually being used.
+      nats:
         condition: service_healthy
     # ----------------------------------------------------
     # [WINDOWS/MAC] BRIDGE MODE: Uncomment lines below
@@ -181,6 +308,13 @@ services:
       - MEDIAMTX_ADMIN_API=http://mediamtx:9997/v3
       - MEDIAMTX_HLS_URL=http://mediamtx:8888
       - MEDIAMTX_RTSP_URL=rtsp://mediamtx:8554
+      # Internal name `mediamtx` is what backend-to-MediaMTX probes use
+      # (resolvable via Docker DNS). Browser/external clients can't
+      # resolve that name, so MEDIAMTX_EXTERNAL_RTSPS_URL below is what
+      # /streams/.../tokens hands them — see server/routers/streams.py
+      # for the fallback chain (F-1).
+      - MEDIAMTX_RTSPS_URL=rtsps://mediamtx:8322
+      - MEDIAMTX_EXTERNAL_RTSPS_URL=rtsps://localhost:8322
       - MEDIAMTX_PLAYBACK_URL=http://mediamtx:9996
       - KAI_C_URL=http://127.0.0.1:8100
       # ----------------------------------------------------
@@ -204,6 +338,11 @@ services:
       # AI Adapter URL (for Kai-C → ai-adapters routing via supervisord)
       # Override via .env: ADAPTER_URL=http://opennvr_ai:9100 (bridge) or http://127.0.0.1:9100 (host)
       - ADAPTER_URL=${ADAPTER_URL:-http://opennvr_ai:9100}
+
+      # B1 — NATS URL for KAI-C's broadcast publisher. Empty disables
+      # broadcast cleanly (HTTP/WS inference paths still work). For
+      # [LINUX] HOST MODE operators, change to ``nats://127.0.0.1:4222``.
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
 
       # Frames directory — must match the shared_frames volume mount path in this container
       - FRAMES_DIR=/app/AI-adapters/AIAdapters/frames

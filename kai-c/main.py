@@ -23,22 +23,131 @@ This service runs as a standalone HTTP server that:
 3. Returns standardized responses
 """
 
-from fastapi import FastAPI, HTTPException
+import asyncio
+
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import AnyHttpUrl, BaseModel, Field
 from typing import Dict, Any, Optional
+import ipaddress
+import logging
+import socket
+import time
 import uvicorn
 import requests
 import os
+from urllib.parse import urlparse
 from fastapi import Header
 
+from kai_c.audit import AuditEventType, AuditStore, new_correlation_id
 from kai_c.connector import KaiConnector
+from kai_c.correlation import CORRELATION_ID_HEADER, CorrelationIdMiddleware
+from kai_c.events import InferenceCompletedEvent
+from kai_c.nats_publisher import NatsPublisher
+from kai_c.registry import AdapterRegistry
 from kai_c.schemas import KAIRequest
+from kai_c.sovereignty import SovereigntyViolation
+from kai_c.stream_proxy import (
+    CLOSE_MODEL_ERROR,
+    CLOSE_POLICY_REFUSED,
+    StreamProxy,
+)
+
+logger = logging.getLogger("kai-c")
+
+
+# ============================================================
+# V-022 (M1a): AI sovereignty policy
+# ============================================================
+# Mirrors the server-side `settings.ai_sovereignty` field. KAI-C cannot
+# import from `core.config` (it is a separate sub-project that runs in its
+# own process and may live on a different host) so the policy is duplicated
+# here via env var. The two SHOULD be set to the same value at deploy time;
+# the architecture doc calls this out as a known operational coupling.
+#
+# Values:
+#   local_only       - default. Every adapter URL in ADAPTER_REGISTRY must
+#                      resolve to loopback (127.0.0.1, ::1, localhost), and
+#                      /infer/cloud (HuggingFace proxy) is refused outright.
+#   federated        - adapters may live off-host but raw frame data is
+#                      refused; only anonymised parameter exchange is okay.
+#                      The federated runtime is responsible for honouring
+#                      that distinction.
+#   cloud_allowed    - no boundary checks; suitable for hosted deployments
+#                      that have explicitly accepted the sovereignty
+#                      trade-off.
+AI_SOVEREIGNTY = os.getenv("AI_SOVEREIGNTY", "local_only").lower()
+if AI_SOVEREIGNTY not in {"local_only", "federated", "cloud_allowed"}:
+    raise RuntimeError(
+        f"AI_SOVEREIGNTY env var must be one of "
+        f"'local_only' / 'federated' / 'cloud_allowed' "
+        f"(got {AI_SOVEREIGNTY!r})."
+    )
+
+
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _host_is_loopback(host: str | None) -> bool:
+    """Mirror of server/core/config.py:_host_is_loopback, kept narrow to
+    avoid pulling the server codebase into KAI-C."""
+    if not host:
+        return False
+    h = host.strip("[]").lower()
+    if h in _LOOPBACK_HOSTS:
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        pass
+    saved = socket.getdefaulttimeout()
+    try:
+        socket.setdefaulttimeout(2.0)
+        try:
+            infos = socket.getaddrinfo(h, None)
+        except (socket.gaierror, socket.timeout, OSError):
+            return False
+    finally:
+        socket.setdefaulttimeout(saved)
+    return bool(infos) and all(
+        ipaddress.ip_address(info[4][0]).is_loopback for info in infos
+    )
+
+
+def _validate_adapters_match_sovereignty() -> None:
+    """Refuse to start if AI_SOVEREIGNTY=local_only but any registered
+    adapter URL is non-loopback. Called immediately after ADAPTER_REGISTRY
+    is defined so a mis-set env var is caught before the server accepts a
+    single request."""
+    if AI_SOVEREIGNTY != "local_only":
+        return
+    offenders: list[str] = []
+    for name, url in ADAPTER_REGISTRY.items():
+        host = urlparse(url).hostname
+        if host is None:
+            offenders.append(f"{name}={url!r} (unparseable host — missing scheme?)")
+        elif host == "0.0.0.0":
+            offenders.append(
+                f"{name}={url!r} (host is 0.0.0.0, the wildcard bind, not loopback)"
+            )
+        elif not _host_is_loopback(host):
+            offenders.append(f"{name}={url!r} (host={host})")
+    if offenders:
+        details = "\n  - ".join(offenders)
+        raise RuntimeError(
+            "V-022: AI_SOVEREIGNTY=local_only requires every adapter URL "
+            "to be loopback. The following adapters violate that policy:\n"
+            f"  - {details}\n"
+            "Either set ADAPTER_URL (and any per-model overrides) to a "
+            "127.0.0.1 / ::1 / localhost URL, or set AI_SOVEREIGNTY="
+            "federated|cloud_allowed if you have explicitly accepted the "
+            "sovereignty trade-off."
+        )
 
 app = FastAPI(
     title="KAI-C (Kavach AI Connector)",
     description="Middleware connector between OpenNVR Kavach and AI Adapters",
-    version="1.0.0"
+    version="2.0.0"  # A2.4: bumped — added registry / audit / correlation_id
 )
 
 # Add CORS middleware
@@ -49,6 +158,105 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# A2.4: correlation_id middleware (§3.8). Runs on every request so the
+# audit log lines below can pull the id off request.state.
+app.add_middleware(CorrelationIdMiddleware)
+
+# A2.4: audit store + adapter registry singletons. The audit store is
+# eager; the registry is built at startup so the poller can begin
+# polling once known adapters are registered.
+_audit = AuditStore()
+_registry: AdapterRegistry | None = None
+# B1: NATS publisher for the event-bus broadcast surface. Built at
+# startup with config from env so sovereignty violations surface as
+# a clean startup error rather than silently disabling broadcast.
+_nats_publisher: NatsPublisher | None = None
+
+
+def get_registry() -> AdapterRegistry:
+    if _registry is None:  # pragma: no cover — guarded by startup
+        raise RuntimeError("registry not initialized; startup did not run")
+    return _registry
+
+
+def get_audit() -> AuditStore:
+    return _audit
+
+
+def get_nats_publisher() -> NatsPublisher:
+    if _nats_publisher is None:  # pragma: no cover — guarded by startup
+        raise RuntimeError("NATS publisher not initialized; startup did not run")
+    return _nats_publisher
+
+
+@app.on_event("startup")
+async def _kaic_startup() -> None:
+    """Build the registry + register any adapters from the legacy
+    ``ADAPTER_REGISTRY`` env-derived dict. Adapters that fail
+    registration (sovereignty refusal, unreachable, etc.) are logged
+    but do NOT block startup — operators may register them later via
+    POST /api/v1/adapters/register."""
+    global _registry
+    _registry = AdapterRegistry(
+        sovereignty_mode=AI_SOVEREIGNTY,
+        audit=_audit,
+    )
+    for name, url in ADAPTER_REGISTRY.items():
+        try:
+            await _registry.register(name, url)
+        except SovereigntyViolation as exc:
+            logger.warning("sovereignty refused %s@%s: %s", name, url, exc)
+            _audit.emit(
+                AuditEventType.INFERENCE_REFUSED_SOVEREIGNTY,
+                adapter=name,
+                reason=str(exc),
+                sovereignty_mode=AI_SOVEREIGNTY,
+                registration_url=url,
+            )
+        except Exception as exc:
+            # Adapter unreachable / malformed /capabilities — log and
+            # continue. Operators can re-register via the v2 endpoint
+            # once the adapter is up.
+            logger.info("registration deferred for %s@%s: %s", name, url, exc)
+    await _registry.start_polling()
+
+    # B1: NATS publisher for the event-bus broadcast surface. Starts
+    # AFTER the registry so any sovereignty-refused adapters are
+    # already audited, and a NATS misconfig surfaces as its own
+    # log line. ``NATS_URL=""`` disables publishing entirely
+    # (no broadcast; HTTP/WS inference paths unchanged) — see
+    # ``kai_c.nats_publisher.NatsPublisher`` for the rationale.
+    global _nats_publisher
+    _nats_publisher = NatsPublisher(
+        url=os.getenv("NATS_URL", "").strip() or None,
+        # Reuse INTERNAL_API_KEY as the NATS token — operators
+        # already manage one secret for KAI-C; tying broadcast auth
+        # to the same value avoids a second knob.
+        token=INTERNAL_API_KEY or None,
+        sovereignty_mode=AI_SOVEREIGNTY,
+    )
+    try:
+        await _nats_publisher.start()
+    except Exception as exc:
+        # A NATS misconfig is operator-actionable (wrong URL,
+        # sovereignty violation, broker down). Log + continue — KAI-C
+        # still serves HTTP/WS inference correctly without broadcast.
+        logger.warning("NATS publisher startup failed: %s", exc)
+        _nats_publisher = NatsPublisher(
+            url=None, token=None, sovereignty_mode=AI_SOVEREIGNTY,
+        )
+
+
+@app.on_event("shutdown")
+async def _kaic_shutdown() -> None:
+    global _registry, _nats_publisher
+    if _registry is not None:
+        await _registry.aclose()
+        _registry = None
+    if _nats_publisher is not None:
+        await _nats_publisher.close()
+        _nats_publisher = None
 
 # ============================================================
 # ADAPTER REGISTRY - KAI-C manages all AI Adapter URLs
@@ -61,6 +269,13 @@ ADAPTER_REGISTRY = {
     # "blip": "http://localhost:9101",
     # "insightface": "http://localhost:9102",
 }
+
+# V-022 (M1a): fail-closed at import time if any adapter URL violates the
+# sovereignty policy. Cannot run as a startup handler because we want this
+# check to fire even when KAI-C is imported by tests, not just when uvicorn
+# is the entry point.
+_validate_adapters_match_sovereignty()
+
 
 def get_adapter_url(model_name: str = "default") -> str:
     """Get AI Adapter URL from internal registry."""
@@ -232,14 +447,29 @@ async def process_cloud_inference(
 ):
     """
     Process cloud AI inference request.
-    
+
     This endpoint:
     1. Validates internal API key from opennvr
     2. Routes to cloud provider handler (e.g., HuggingFace)
     3. Returns unified response format
-    
+
     Flow: OpenNVR Backend → KAI-C → Cloud Provider API → KAI-C → OpenNVR Backend
     """
+    # V-022 (M1a): refuse the entire cloud-provider proxy path when the
+    # operator has set AI_SOVEREIGNTY=local_only. The server-side router
+    # already 403s its own /cloud-inference/* endpoints, but this is the
+    # defence-in-depth at the KAI-C side: a misconfigured or compromised
+    # caller cannot route to HuggingFace by hitting KAI-C directly.
+    if AI_SOVEREIGNTY == "local_only":
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Cloud-provider inference disabled: "
+                "AI_SOVEREIGNTY=local_only. Set AI_SOVEREIGNTY="
+                "federated|cloud_allowed at boot to enable."
+            ),
+        )
+
     # Validate internal API key
     if INTERNAL_API_KEY and x_internal_api_key != INTERNAL_API_KEY:
         raise HTTPException(
@@ -414,6 +644,366 @@ async def get_schemas(task: Optional[str] = None):
         )
 
 
+# ============================================================
+# A2.4: v2 registry / audit / aggregated-capabilities endpoints
+# ============================================================
+# These live under /api/v1/* so future versioning (v2, v3) is cheap.
+# The legacy /infer, /infer/local, /infer/cloud, /health, /capabilities,
+# /adapters/health, /schema endpoints above are kept for back-compat
+# until OpenNVR backend migrates onto the v1 surface.
+
+
+def require_internal_api_key(x_internal_api_key: Optional[str] = Header(None)) -> None:
+    """Auth dependency for the v2 endpoints (peer-review SR-NEW-7).
+
+    Same dev-mode-bypass pattern as the legacy ``/infer/cloud`` endpoint:
+    if ``INTERNAL_API_KEY`` is empty (dev / single-host loopback
+    deployments) all calls pass. In production the operator sets the
+    env var and OpenNVR backend MUST send the matching
+    ``X-Internal-Api-Key`` header.
+
+    All v2 endpoints depend on this so register/deregister/infer cannot
+    be reached anonymously by an attacker who finds KAI-C's port open
+    on a non-loopback interface.
+    """
+    if INTERNAL_API_KEY and x_internal_api_key != INTERNAL_API_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized: missing or invalid X-Internal-Api-Key",
+        )
+
+
+class RegisterAdapterRequest(BaseModel):
+    """Payload for POST /api/v1/adapters/register.
+
+    ``url`` is validated as a real HTTP/HTTPS URL — malformed strings
+    return 422 (Unprocessable Entity) before they hit the sovereignty
+    layer, where they'd otherwise look like a sovereignty refusal.
+    """
+    name: str = Field(min_length=1)
+    url: AnyHttpUrl
+
+
+@app.post("/api/v1/adapters/register", dependencies=[Depends(require_internal_api_key)])
+async def v1_register_adapter(payload: RegisterAdapterRequest):
+    """Register an adapter at runtime. Polls /capabilities, runs the
+    sovereignty + permission checks, stores in the registry."""
+    try:
+        adapter = await get_registry().register(payload.name, str(payload.url))
+    except SovereigntyViolation as exc:
+        get_audit().emit(
+            AuditEventType.INFERENCE_REFUSED_SOVEREIGNTY,
+            adapter=payload.name,
+            reason=str(exc),
+            sovereignty_mode=AI_SOVEREIGNTY,
+            registration_url=payload.url,
+        )
+        raise HTTPException(status_code=403, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"adapter unreachable: {exc}")
+    return {
+        "status": "ok",
+        "adapter": {
+            "name": adapter.name,
+            "url": adapter.url,
+            "adapter_version": adapter.capabilities.adapter.version,
+            "fingerprint": adapter.fingerprint,
+        },
+    }
+
+
+@app.delete("/api/v1/adapters/{name}", dependencies=[Depends(require_internal_api_key)])
+async def v1_deregister_adapter(name: str):
+    """Remove an adapter from the registry. Emits adapter.deregistered."""
+    registry = get_registry()
+    if registry.get(name) is None:
+        raise HTTPException(status_code=404, detail=f"unknown adapter: {name}")
+    await registry.deregister(name, reason="operator_action")
+    return {"status": "ok"}
+
+
+@app.get("/api/v1/adapters", dependencies=[Depends(require_internal_api_key)])
+async def v1_list_adapters():
+    """Lightweight adapter summaries — what the OpenNVR UI lists."""
+    return {"adapters": get_registry().list_summaries()}
+
+
+@app.get("/api/v1/ai/capabilities", dependencies=[Depends(require_internal_api_key)])
+async def v1_aggregated_capabilities():
+    """The §11 aggregated capabilities view — a single call so the UI
+    doesn't fan out across N adapter URLs."""
+    return get_registry().aggregated_capabilities()
+
+
+# ── B1 NATS publishing helper ──────────────────────────────────────
+
+
+async def _publish_inference_completed(
+    *,
+    adapter_name: str,
+    adapter: Any,
+    camera_id: Optional[str],
+    correlation_id: str,
+    latency_ms: int,
+    body: Dict[str, Any],
+) -> None:
+    """Build an ``InferenceCompletedEvent`` from the response body the
+    adapter returned and publish it on NATS. Shared by HTTP and WS
+    success paths so the broadcast surface is identical regardless of
+    transport.
+
+    Always best-effort — the underlying ``NatsPublisher.publish_inference_
+    completed`` swallows all errors and logs at WARNING. Calling this
+    function never raises.
+    """
+    publisher = _nats_publisher
+    if publisher is None or not publisher.enabled:
+        return
+    # ``body`` is the §3.5 InferResponse the adapter returned. Pull
+    # out the model fields with defensive defaults — a misbehaving
+    # adapter could omit them, in which case we publish what we have
+    # rather than dropping the event.
+    if not isinstance(body, dict):
+        return
+    try:
+        model_name = str(body.get("model_name") or "")
+        model_version = str(body.get("model_version") or "")
+        # Adapter capabilities snapshot — fingerprint is the most
+        # operationally valuable field (§11.3 drift detection).
+        fingerprint = None
+        try:
+            fingerprint = adapter.capabilities.model.fingerprint
+        except Exception:  # noqa: BLE001
+            pass
+        adapter_version = None
+        try:
+            adapter_version = adapter.capabilities.adapter.version
+        except Exception:  # noqa: BLE001
+            pass
+
+        # ``inference_ms`` is the ADAPTER's measurement (§3.5). Don't
+        # silently fall back to KAI-C's round-trip ``latency_ms`` —
+        # that's a different semantic (includes network) and would
+        # confuse subscribers doing latency analytics. Missing → 0.
+        # (Peer review L4.)
+        event = InferenceCompletedEvent(
+            correlation_id=correlation_id,
+            adapter=adapter_name,
+            adapter_version=adapter_version,
+            camera_id=camera_id,
+            model_name=model_name,
+            model_version=model_version,
+            model_fingerprint=fingerprint,
+            inference_ms=int(body.get("inference_ms") or 0),
+            result=body.get("result") or {},
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Pydantic validation can fail if the adapter returned a
+        # malformed shape. Don't break the request — log + skip.
+        logger.warning(
+            "NATS broadcast skipped — event-build failure: %s "
+            "[correlation_id=%s adapter=%s]",
+            exc, correlation_id, adapter_name,
+        )
+        return
+    await publisher.publish_inference_completed(event)
+
+
+@app.post("/api/v1/adapters/refresh", dependencies=[Depends(require_internal_api_key)])
+async def v1_refresh_adapters(name: Optional[str] = None):
+    """Force a /capabilities + /health re-poll. Without ``name`` refreshes
+    every registered adapter; with it, just the one. §11."""
+    registry = get_registry()
+    if name is not None:
+        if registry.get(name) is None:
+            raise HTTPException(status_code=404, detail=f"unknown adapter: {name}")
+        await registry.refresh(name)
+        return {"status": "ok", "refreshed": [name]}
+    names = registry.list_names()
+    for n in names:
+        await registry.refresh(n)
+    return {"status": "ok", "refreshed": names}
+
+
+@app.post("/api/v1/infer/{adapter_name}", dependencies=[Depends(require_internal_api_key)])
+async def v1_infer(
+    adapter_name: str,
+    payload: Dict[str, Any],
+    request: Request,
+):
+    """Contract-compliant proxy: forwards JSON payload to the named
+    adapter's /infer, threading the request's X-Correlation-Id, and
+    emitting inference.completed / inference.failed audit events.
+
+    For v1 we only proxy ``application/json`` requests — multipart
+    proxying lands when KAI-C starts brokering binary frame payloads
+    itself (A2.4b alongside the WS streaming bridge)."""
+    registry = get_registry()
+    audit = get_audit()
+    adapter = registry.get(adapter_name)
+    if adapter is None:
+        raise HTTPException(status_code=404, detail=f"unknown adapter: {adapter_name}")
+
+    correlation_id = getattr(request.state, "correlation_id", None)
+    if correlation_id is None:  # belt-and-braces
+        correlation_id = new_correlation_id()
+
+    camera_id = payload.get("camera_id") if isinstance(payload, dict) else None
+    started = time.monotonic()
+
+    try:
+        status_code, body = await registry.proxy_infer(adapter_name, payload, correlation_id)
+    except Exception as exc:
+        latency_ms = int((time.monotonic() - started) * 1000)
+        audit.emit(
+            AuditEventType.INFERENCE_FAILED,
+            correlation_id=correlation_id,
+            adapter=adapter_name,
+            camera_id=camera_id,
+            latency_ms=latency_ms,
+            error_category="transport_error",
+            error_code="adapter_unreachable",
+            error_message=str(exc),
+        )
+        raise HTTPException(status_code=502, detail=f"adapter unreachable: {exc}")
+
+    latency_ms = int((time.monotonic() - started) * 1000)
+
+    if status_code == 200:
+        audit.emit(
+            AuditEventType.INFERENCE_COMPLETED,
+            correlation_id=correlation_id,
+            adapter=adapter_name,
+            camera_id=camera_id,
+            latency_ms=latency_ms,
+            model_version=adapter.capabilities.model.version,
+        )
+        # B1: broadcast on NATS. Best-effort — publish failures are
+        # logged + counted but never raise. Fire-and-forget via
+        # ``asyncio.create_task`` so a slow NATS connect doesn't
+        # delay the HTTP response. (Peer review H1 — earlier we
+        # ``await``ed the publish which could add up to 5 s of
+        # latency on the first request after a NATS outage.)
+        asyncio.create_task(_publish_inference_completed(
+            adapter_name=adapter_name,
+            adapter=adapter,
+            camera_id=camera_id,
+            correlation_id=correlation_id,
+            latency_ms=latency_ms,
+            body=body,
+        ))
+        return body
+
+    error_info = body.get("error", {}) if isinstance(body, dict) else {}
+    audit.emit(
+        AuditEventType.INFERENCE_FAILED,
+        correlation_id=correlation_id,
+        adapter=adapter_name,
+        camera_id=camera_id,
+        latency_ms=latency_ms,
+        error_category=error_info.get("category", "unknown"),
+        error_code=error_info.get("code", "unknown"),
+        transient=error_info.get("transient", False),
+    )
+    raise HTTPException(status_code=status_code, detail=body)
+
+
+# ── /api/v1/infer/{adapter_name}/stream — §6 WebSocket proxy ───────
+
+
+@app.websocket("/api/v1/infer/{adapter_name}/stream")
+async def v1_infer_stream(websocket: WebSocket, adapter_name: str):
+    """KAI-C WebSocket streaming proxy (§6) — bridges a monitoring app
+    to a registered adapter's ``/infer/stream``.
+
+    Auth (inbound): ``X-Internal-Api-Key`` header on the WS upgrade.
+    FastAPI's ``BaseHTTPMiddleware`` doesn't run on WS upgrades and
+    the ``Depends(require_internal_api_key)`` pattern raises
+    ``HTTPException`` which doesn't translate cleanly to a WS close —
+    so we check the header explicitly and close 4001 on failure.
+
+    Correlation_id is read from the ``X-Correlation-Id`` header (the
+    HTTP middleware doesn't run on WS upgrades either) and minted if
+    absent. Threaded to the adapter via the upstream WS connect
+    headers; the adapter's SDK echoes it back on the HTTP control
+    plane and includes it in all log lines.
+    """
+    # Inbound auth — same allow-open-in-dev pattern as the HTTP path.
+    # Defensive: require both INTERNAL_API_KEY to be set AND the
+    # supplied header to non-empty-match. (Peer review H3 — guards
+    # against a future code path that sets INTERNAL_API_KEY=None.)
+    if INTERNAL_API_KEY:
+        supplied = websocket.headers.get("x-internal-api-key")
+        if not supplied or supplied != INTERNAL_API_KEY:
+            await websocket.close(
+                code=CLOSE_POLICY_REFUSED,
+                reason="unauthorized",
+            )
+            return
+
+    registry = get_registry()
+    adapter = registry.get(adapter_name)
+    if adapter is None:
+        # Reject the upgrade with policy_refused. We don't accept then
+        # close because the client gets a cleaner error this way.
+        await websocket.close(
+            code=CLOSE_POLICY_REFUSED,
+            reason=f"unknown adapter: {adapter_name}",
+        )
+        return
+    if not adapter.capabilities.endpoints.infer_stream.supported:
+        # The adapter declared no streaming support. §3.6 + §6 say the
+        # right behaviour is HTTP 501 from the HTTP probe, but we're
+        # already on WS — close with model_error.
+        await websocket.close(
+            code=CLOSE_MODEL_ERROR,
+            reason="adapter does not support streaming",
+        )
+        return
+
+    correlation_id = (
+        websocket.headers.get(CORRELATION_ID_HEADER.lower())
+        or new_correlation_id()
+    )
+
+    proxy = StreamProxy(
+        client_ws=websocket,
+        adapter_name=adapter_name,
+        adapter_url=str(adapter.url),
+        correlation_id=correlation_id,
+        audit=get_audit(),
+        # B1 — pass the broadcast publisher + adapter so per-frame
+        # results fan out on NATS as they're relayed back to the
+        # client. ``nats_publisher`` may be a disabled publisher (no
+        # URL configured), in which case the proxy skips the broadcast.
+        nats_publisher=_nats_publisher,
+        adapter_info=adapter,
+    )
+    await proxy.run()
+
+
+@app.get("/api/v1/audit", dependencies=[Depends(require_internal_api_key)])
+async def v1_audit_query(
+    adapter: Optional[str] = None,
+    event_type: Optional[str] = None,
+    camera_id: Optional[str] = None,
+    since: Optional[str] = None,
+    limit: int = 100,
+):
+    """Query recent audit events. Filters: adapter, event_type,
+    camera_id, since (ISO-8601). Returns up to ``limit`` newest matches."""
+    if limit < 1 or limit > 10_000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 10000")
+    events = get_audit().filter(
+        adapter=adapter,
+        event_type=event_type,
+        camera_id=camera_id,
+        since=since,
+        limit=limit,
+    )
+    return {"count": len(events), "events": events}
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("Starting KAI-C (Kavach AI Connector) Service")
@@ -421,7 +1011,7 @@ if __name__ == "__main__":
     print("Running on: http://localhost:8100")
     print("API Docs: http://localhost:8100/docs")
     print("=" * 60)
-    
+
     uvicorn.run(
         app,
         host="0.0.0.0",
