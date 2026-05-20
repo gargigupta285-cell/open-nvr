@@ -52,7 +52,7 @@ Every alert carries a `correlation_id` that joins back to KAI-C's audit log — 
 ## What's NOT in v1
 
 - **RTSP stream input** — only HTTP snapshot polling. RTSP needs an ffmpeg subprocess; lands in A2.5b.
-- **WebSocket streaming through KAI-C** — KAI-C's WS proxy isn't built yet (A2.4b). HTTP polling at 1 fps is sufficient for most security-camera use cases.
+- **WebSocket streaming through KAI-C** — **available in A2.5b as opt-in via** `kaic_transport: ws` in config. KAI-C's WS proxy (`/api/v1/infer/{adapter}/stream`, A2.4b) bridges this example to the adapter's §6 streaming endpoint. Each camera holds one persistent WebSocket; per-frame latency drops from ~poll_interval to ~adapter inference time (~30-50 ms for YOLOv8 on CPU). HTTP polling stays the default for back-compat — most security-camera use cases don't need sub-second alerts.
 - **Tracking / persistence across frames** — every cycle is independent. Same person standing in a zone for 60s fires 60 alerts (unless you ack/snooze in the receiving system).
 - **Adapter discovery / multi-camera-per-adapter routing** — `kaic_adapter_name` is single-valued in config. Multi-adapter fanout lands as a follow-up.
 - **OpenNVR alerts API integration** — webhook + stdout for v1. Native OpenNVR alerts-inbox integration lands alongside the operator-UI alerts work in A2.5b.

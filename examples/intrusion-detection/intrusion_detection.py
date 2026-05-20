@@ -101,6 +101,20 @@ class AppConfig:
     cameras: list[CameraWatch]
     webhook_url: str | None
     request_timeout_seconds: float = 30.0
+    # ``kaic_transport`` selects how this example talks to KAI-C:
+    #
+    # * ``http`` (default, back-compat) — one POST to
+    #   /api/v1/infer/{adapter} per polled frame. Simpler; one
+    #   connection per cycle (httpx keeps it alive). Latency floor is
+    #   the poll interval (~1s default).
+    #
+    # * ``ws`` — one persistent WebSocket per camera to KAI-C's
+    #   /api/v1/infer/{adapter}/stream proxy (§6). Drops per-frame
+    #   latency from ~poll_interval to ~adapter inference time
+    #   (~30-50ms for YOLOv8) at the cost of one open connection per
+    #   camera. Use when you actually need sub-second response on
+    #   alerts; HTTP is fine for typical surveillance.
+    kaic_transport: str = "http"
 
 
 def load_config(path: str) -> AppConfig:
@@ -154,6 +168,12 @@ def load_config(path: str) -> AppConfig:
                 f"config: camera entry {idx} malformed: {exc}"
             ) from exc
 
+    kaic_transport = str(raw.get("kaic_transport", "http")).lower()
+    if kaic_transport not in ("http", "ws"):
+        raise ValueError(
+            f"config: kaic_transport must be 'http' or 'ws', got {kaic_transport!r}"
+        )
+
     return AppConfig(
         kaic_url=kaic_url,
         kaic_adapter_name=str(raw.get("kaic_adapter_name", "yolov8")),
@@ -164,6 +184,7 @@ def load_config(path: str) -> AppConfig:
         cameras=cameras,
         webhook_url=str(raw["webhook_url"]) if raw.get("webhook_url") else None,
         request_timeout_seconds=float(raw.get("request_timeout_seconds", 30.0)),
+        kaic_transport=kaic_transport,
     )
 
 
@@ -237,6 +258,204 @@ class KaicError(Exception):
     audit log via the correlation_id we sent)."""
 
 
+# ── KAI-C streaming client (§6 WebSocket) ──────────────────────────
+
+
+class KaicStreamClient:
+    """Per-camera persistent WebSocket session against KAI-C's
+    ``/api/v1/infer/{adapter}/stream`` proxy (added in A2.4b).
+
+    Uses the synchronous ``websockets.sync`` client so the detector's
+    thread model stays simple — each camera owns one client, each
+    poll cycle does ``send_frame() + recv_result()``. The async
+    ``websockets.connect`` API is the more idiomatic choice for
+    high-fan-out streaming, but for this example's typical "5-20
+    cameras at 1-30 fps" workload, the sync API is plenty and keeps
+    the codebase synchronous end-to-end.
+
+    Reconnects lazily on the next ``send_frame`` after a transport
+    error. A persistent failure surfaces as alerts not firing for
+    the affected camera; KAI-C's audit log shows ``stream.failed``
+    so operators can investigate.
+
+    Frame metadata + binary are sent per §6.3:
+
+        send_text({"type": "frame", "seq": <int>, "ts_ms": <int>, "content_type": "image/jpeg"})
+        send_bytes(<jpeg bytes>)
+
+    Result comes back as a text frame:
+
+        {"type": "result", "seq": <echoed>, "ts_ms": <...>, "inference_ms": <int>, "result": {...}}
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        adapter_name: str,
+        camera_id: str,
+        *,
+        api_key: str | None,
+        timeout_seconds: float,
+        websocket_factory: Callable[[str, list[tuple[str, str]]], Any] | None = None,
+    ) -> None:
+        self._adapter_name = adapter_name
+        self._camera_id = camera_id
+        self._api_key = api_key
+        self._timeout = timeout_seconds
+        # Translate http(s):// → ws(s):// for the upstream connect URL.
+        # KAI-C's WS endpoint is at /api/v1/infer/{adapter}/stream;
+        # the registration URL the operator supplied is the HTTP
+        # base, so we build the WS URL here.
+        if base_url.startswith("https://"):
+            ws_scheme = "wss://"
+            rest = base_url[len("https://"):]
+        elif base_url.startswith("http://"):
+            ws_scheme = "ws://"
+            rest = base_url[len("http://"):]
+        else:
+            raise ValueError(
+                f"kaic_url must start with http:// or https://, got {base_url!r}"
+            )
+        self._url = f"{ws_scheme}{rest.rstrip('/')}/api/v1/infer/{adapter_name}/stream"
+        # Allow injection for tests (the production path uses
+        # ``websockets.sync.client.connect``; tests can substitute a
+        # fake that returns a stub connection).
+        self._websocket_factory = websocket_factory
+        self._conn: Any = None
+        self._seq: int = 0
+
+    def _do_connect(self, headers: list[tuple[str, str]]) -> Any:
+        """Open a fresh WS connection. Raises ``KaicError`` on
+        connect failure so the caller can decide to skip the cycle."""
+        if self._websocket_factory is not None:
+            return self._websocket_factory(self._url, headers)
+        # Lazy import — websockets is only needed in WS mode, and
+        # this keeps the HTTP-mode happy path light.
+        from websockets.sync.client import connect as ws_connect
+
+        try:
+            return ws_connect(
+                self._url,
+                additional_headers=headers,
+                open_timeout=self._timeout,
+                close_timeout=2.0,
+                max_size=None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise KaicError(f"WS connect to {self._url} failed: {exc}") from exc
+
+    def _ensure_open(self, correlation_id: str) -> None:
+        """Open the WS + send the §6.1 handshake on first use. The
+        adapter's handshake_ack confirms the negotiated transport
+        (downgrades shared_memory → websocket if the adapter doesn't
+        support shm; we never offer shm so this is informational)."""
+        if self._conn is not None:
+            return
+        headers = [("X-Correlation-Id", correlation_id)]
+        if self._api_key:
+            headers.append(("X-Internal-Api-Key", self._api_key))
+        conn = self._do_connect(headers)
+        try:
+            conn.send(_json_dumps({
+                "type": "handshake",
+                "client_id": "intrusion-detection",
+                "camera_id": self._camera_id,
+                "frame_transport": "websocket",
+            }))
+            # Read the handshake_ack before the first frame goes out;
+            # rejects (bad camera_id, adapter not registered) close
+            # the WS here rather than mid-frame.
+            ack_raw = conn.recv(timeout=self._timeout)
+            ack = _json_loads(ack_raw)
+            if not isinstance(ack, dict) or ack.get("type") != "handshake_ack":
+                raise KaicError(f"unexpected handshake response: {ack_raw!r}")
+        except KaicError:
+            self._safe_close(conn)
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self._safe_close(conn)
+            raise KaicError(f"WS handshake failed: {exc}") from exc
+        self._conn = conn
+
+    def infer_frame(
+        self,
+        *,
+        frame_bytes: bytes,
+        correlation_id: str,
+    ) -> dict[str, Any]:
+        """Send one frame to KAI-C, return the parsed result body.
+
+        Raises ``KaicError`` on transport failure or protocol violation.
+        The detector loop catches and skips that cycle — same handling
+        as the HTTP path. The next call will trigger a reconnect via
+        ``_ensure_open``."""
+        self._ensure_open(correlation_id)
+        assert self._conn is not None
+        self._seq += 1
+        ts_ms = int(time.monotonic() * 1000)
+        try:
+            self._conn.send(_json_dumps({
+                "type": "frame",
+                "seq": self._seq,
+                "ts_ms": ts_ms,
+                "content_type": "image/jpeg",
+            }))
+            self._conn.send(frame_bytes)
+            raw = self._conn.recv(timeout=self._timeout)
+        except Exception as exc:  # noqa: BLE001
+            # Tear down so the next call reconnects. The frame is
+            # lost; that's the same behaviour as an HTTP 502.
+            self._safe_close(self._conn)
+            self._conn = None
+            raise KaicError(f"WS infer failed: {exc}") from exc
+
+        # Parse the §6.3 result message.
+        try:
+            payload = _json_loads(raw)
+        except Exception as exc:  # noqa: BLE001
+            raise KaicError(f"WS recv: non-JSON payload {raw!r}: {exc}") from exc
+        if not isinstance(payload, dict) or payload.get("type") != "result":
+            raise KaicError(f"WS recv: unexpected message {payload!r}")
+        # Shape the response so the detector's existing post-parser
+        # (which expects ``InferResponse``-like dicts from the HTTP
+        # path) can consume it unchanged.
+        return {
+            "status": "ok",
+            "model_name": "",  # WS protocol doesn't echo model name
+            "model_version": "",
+            "inference_ms": int(payload.get("inference_ms", 0)),
+            "result": payload.get("result") or {},
+        }
+
+    def close(self) -> None:
+        if self._conn is not None:
+            self._safe_close(self._conn)
+            self._conn = None
+
+    @staticmethod
+    def _safe_close(conn: Any) -> None:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# Json helpers — kept module-local so the lazy ``import json`` only
+# happens when WS mode actually runs (and so monkey-patching is easy
+# in tests).
+
+def _json_dumps(obj: Any) -> str:
+    import json as _json
+    return _json.dumps(obj)
+
+
+def _json_loads(raw: Any) -> Any:
+    import json as _json
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8")
+    return _json.loads(raw)
+
+
 # ── Detector loop ──────────────────────────────────────────────────
 
 
@@ -255,6 +474,7 @@ class IntrusionDetector:
         dispatcher: AlertDispatcher,
         *,
         now: Callable[[], _dt.datetime] = _dt.datetime.now,
+        stream_client_factory: Callable[[str], KaicStreamClient] | None = None,
     ) -> None:
         self._config = config
         self._kaic = kaic_client
@@ -269,9 +489,60 @@ class IntrusionDetector:
                 camera_id=camera.camera_id,
                 url=camera.frame_url,
             )
+        # WS mode: one persistent stream client per camera, built
+        # lazily on first ``step``. ``stream_client_factory`` is an
+        # injection point for tests; production builds the default
+        # ``KaicStreamClient`` from config.
+        self._stream_clients: dict[str, KaicStreamClient] = {}
+        self._stream_client_factory = stream_client_factory or self._default_stream_client_factory
+
+    def _default_stream_client_factory(self, camera_id: str) -> KaicStreamClient:
+        return KaicStreamClient(
+            self._config.kaic_url,
+            self._config.kaic_adapter_name,
+            camera_id,
+            api_key=self._config.kaic_api_key,
+            timeout_seconds=self._config.request_timeout_seconds,
+        )
 
     def stop(self) -> None:
         self._stop_flag = True
+
+    def close(self) -> None:
+        """Tear down WS clients (no-op if HTTP mode). Called from the
+        CLI's finally block so a clean shutdown returns sockets."""
+        for client in self._stream_clients.values():
+            client.close()
+        self._stream_clients.clear()
+
+    def _call_kaic(
+        self,
+        camera: CameraWatch,
+        frame_bytes: bytes,
+        correlation_id: str,
+    ) -> dict[str, Any]:
+        """Send one frame to KAI-C via whichever transport this
+        deployment configured. HTTP is one-shot per call; WS reuses
+        a persistent connection per camera. Both raise ``KaicError``
+        on transport failure so ``step()``'s catch handles them
+        identically — same alert semantics across modes (no alert
+        on comms failure; the failure is in KAI-C's audit log via
+        the correlation_id we sent)."""
+        if self._config.kaic_transport == "ws":
+            client = self._stream_clients.get(camera.camera_id)
+            if client is None:
+                client = self._stream_client_factory(camera.camera_id)
+                self._stream_clients[camera.camera_id] = client
+            return client.infer_frame(
+                frame_bytes=frame_bytes,
+                correlation_id=correlation_id,
+            )
+        # Default: HTTP path (back-compat).
+        return self._kaic.infer_frame(
+            camera_id=camera.camera_id,
+            frame_bytes=frame_bytes,
+            correlation_id=correlation_id,
+        )
 
     def step(self, camera: CameraWatch) -> list[Alert]:
         """Run one detection cycle for one camera. Returns the list
@@ -290,11 +561,7 @@ class IntrusionDetector:
 
         correlation_id = uuid.uuid4().hex
         try:
-            infer_response = self._kaic.infer_frame(
-                camera_id=camera.camera_id,
-                frame_bytes=frame_bytes,
-                correlation_id=correlation_id,
-            )
+            infer_response = self._call_kaic(camera, frame_bytes, correlation_id)
         except KaicError as exc:
             logger.warning("kaic inference failed for %s: %s", camera.camera_id, exc)
             return []
@@ -450,6 +717,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             detector.run()
     finally:
+        detector.close()   # WS clients (no-op in HTTP mode)
         kaic_client.close()
     return 0
 

@@ -25,6 +25,21 @@ kaic_adapter_name: "yolov8"
 # auth bypass.
 kaic_api_key: null
 
+# How this example talks to KAI-C:
+#
+#   "http" (default, back-compat) — one POST to
+#       /api/v1/infer/{adapter} per polled frame. Simpler;
+#       latency floor is the poll interval (~1s default).
+#
+#   "ws"  — one persistent WebSocket per camera to KAI-C's
+#       /api/v1/infer/{adapter}/stream proxy (A2.4b). Drops
+#       per-frame latency from ~poll_interval to ~adapter inference
+#       time (~30-50ms for YOLOv8 on CPU). Costs one open connection
+#       per camera; use when you actually need sub-second alert
+#       response. For typical security-camera monitoring at 1 fps,
+#       HTTP is plenty.
+kaic_transport: "http"
+
 # ── Polling cadence ─────────────────────────────────────────────────
 #
 # How often to pull a frame from each camera. 1 fps (1.0) is a sane
