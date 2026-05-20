@@ -23,11 +23,10 @@ This service runs as a standalone HTTP server that:
 3. Returns standardized responses
 """
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import AnyHttpUrl, BaseModel, Field
 from typing import Dict, Any, Optional
-import httpx
 import ipaddress
 import logging
 import socket
@@ -44,6 +43,11 @@ from kai_c.correlation import CORRELATION_ID_HEADER, CorrelationIdMiddleware
 from kai_c.registry import AdapterRegistry
 from kai_c.schemas import KAIRequest
 from kai_c.sovereignty import SovereigntyViolation
+from kai_c.stream_proxy import (
+    CLOSE_MODEL_ERROR,
+    CLOSE_POLICY_REFUSED,
+    StreamProxy,
+)
 
 logger = logging.getLogger("kai-c")
 
@@ -771,6 +775,74 @@ async def v1_infer(
         transient=error_info.get("transient", False),
     )
     raise HTTPException(status_code=status_code, detail=body)
+
+
+# ── /api/v1/infer/{adapter_name}/stream — §6 WebSocket proxy ───────
+
+
+@app.websocket("/api/v1/infer/{adapter_name}/stream")
+async def v1_infer_stream(websocket: WebSocket, adapter_name: str):
+    """KAI-C WebSocket streaming proxy (§6) — bridges a monitoring app
+    to a registered adapter's ``/infer/stream``.
+
+    Auth (inbound): ``X-Internal-Api-Key`` header on the WS upgrade.
+    FastAPI's ``BaseHTTPMiddleware`` doesn't run on WS upgrades and
+    the ``Depends(require_internal_api_key)`` pattern raises
+    ``HTTPException`` which doesn't translate cleanly to a WS close —
+    so we check the header explicitly and close 4001 on failure.
+
+    Correlation_id is read from the ``X-Correlation-Id`` header (the
+    HTTP middleware doesn't run on WS upgrades either) and minted if
+    absent. Threaded to the adapter via the upstream WS connect
+    headers; the adapter's SDK echoes it back on the HTTP control
+    plane and includes it in all log lines.
+    """
+    # Inbound auth — same allow-open-in-dev pattern as the HTTP path.
+    # Defensive: require both INTERNAL_API_KEY to be set AND the
+    # supplied header to non-empty-match. (Peer review H3 — guards
+    # against a future code path that sets INTERNAL_API_KEY=None.)
+    if INTERNAL_API_KEY:
+        supplied = websocket.headers.get("x-internal-api-key")
+        if not supplied or supplied != INTERNAL_API_KEY:
+            await websocket.close(
+                code=CLOSE_POLICY_REFUSED,
+                reason="unauthorized",
+            )
+            return
+
+    registry = get_registry()
+    adapter = registry.get(adapter_name)
+    if adapter is None:
+        # Reject the upgrade with policy_refused. We don't accept then
+        # close because the client gets a cleaner error this way.
+        await websocket.close(
+            code=CLOSE_POLICY_REFUSED,
+            reason=f"unknown adapter: {adapter_name}",
+        )
+        return
+    if not adapter.capabilities.endpoints.infer_stream.supported:
+        # The adapter declared no streaming support. §3.6 + §6 say the
+        # right behaviour is HTTP 501 from the HTTP probe, but we're
+        # already on WS — close with model_error.
+        await websocket.close(
+            code=CLOSE_MODEL_ERROR,
+            reason="adapter does not support streaming",
+        )
+        return
+
+    correlation_id = (
+        websocket.headers.get(CORRELATION_ID_HEADER.lower())
+        or new_correlation_id()
+    )
+
+    proxy = StreamProxy(
+        client_ws=websocket,
+        adapter_name=adapter_name,
+        adapter_url=str(adapter.url),
+        correlation_id=correlation_id,
+        audit=get_audit(),
+    )
+    await proxy.run()
 
 
 @app.get("/api/v1/audit", dependencies=[Depends(require_internal_api_key)])

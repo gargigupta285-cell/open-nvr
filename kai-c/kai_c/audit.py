@@ -58,10 +58,15 @@ class AuditEventType(str, Enum):
     INFERENCE_REFUSED_PERMISSION = "inference.refused_permission"
     INFERENCE_REFUSED_BUDGET = "inference.refused_budget"
 
-    # Stream lifecycle (logged via /infer/stream; KAI-C currently
-    # proxies HTTP /infer only, so these are placeholders for A2.5)
+    # Stream lifecycle — logged by the /api/v1/infer/{adapter}/stream
+    # WS proxy (A2.4b). STREAM_FAILED covers both upstream connection
+    # failures (e.g. adapter unreachable) and per-frame error envelopes
+    # the adapter embeds in §6.3 result messages. Per-frame OK
+    # outcomes are NOT audited — at 30 fps that would dwarf the log;
+    # session-level open/close + frame-failures is the right grain.
     STREAM_OPENED = "stream.opened"
     STREAM_CLOSED = "stream.closed"
+    STREAM_FAILED = "stream.failed"
 
 
 class AuditEvent(dict):
