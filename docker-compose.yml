@@ -190,6 +190,69 @@ services:
       retries: 3
 
   # ==========================================
+  # 2b. NATS (B1 event bus)
+  # ==========================================
+  #
+  # B1: KAI-C publishes ``opennvr.inference.{adapter}.{camera_id}.completed``
+  # events on NATS so monitoring apps (intrusion-detection, future
+  # loitering / PPE / fire-detection siblings) can subscribe instead
+  # of polling KAI-C. One adapter inference fans out to N consumers
+  # → adapter GPU load drops N×.
+  #
+  # Authentication is token-based; the token is the same
+  # INTERNAL_API_KEY operators already manage for KAI-C's HTTP/WS
+  # surface. No port is published to the host because NATS is an
+  # internal service — only ``opennvr-core`` (which runs KAI-C +
+  # any subscribers) talks to it via the ``sentinel_internal`` Docker
+  # network. Setting ``NATS_URL=""`` on opennvr-core disables
+  # publishing entirely for operators not yet on the event bus.
+  #
+  # Operators wanting external subscribers (e.g., a Splunk forwarder
+  # running outside the docker-compose) must add a port mapping AND
+  # ensure the listening interface is firewalled or behind a private
+  # network — the loopback-only assumption baked in here is what
+  # AI_SOVEREIGNTY=local_only enforces at KAI-C startup.
+  nats:
+    image: nats:2-alpine
+    container_name: opennvr_nats
+    restart: unless-stopped
+    command:
+      - --name
+      - opennvr-nats
+      - --auth
+      # Required: NATS token = INTERNAL_API_KEY. ``${VAR:?...}`` makes
+      # ``docker compose up`` fail at validate time if the env var is
+      # unset/empty rather than silently starting NATS without auth.
+      # (Peer review H2 — without this, a missing INTERNAL_API_KEY
+      # leaves the broker open to anyone on the sentinel_internal
+      # network.)
+      - ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set in .env for the NATS event bus}
+      # JetStream off for v1 — KAI-C only does fire-and-forget
+      # publish. Persistence / replay is a B2 concern.
+      - --http_port
+      - "8222"
+    # ----------------------------------------------------
+    # [LINUX] HOST MODE: Uncomment ONE line below
+    # network_mode: host
+    # ----------------------------------------------------
+    # ----------------------------------------------------
+    # [WINDOWS/MAC] BRIDGE MODE: Uncomment lines below
+    networks:
+      - sentinel_internal
+    # ----------------------------------------------------
+    # Intentionally NO ``ports:`` mapping — NATS is internal-only
+    # under default deployment. Subscribers run inside the same
+    # docker-compose project (opennvr-core, future inference-listener
+    # service). Operators needing external subscribers add the mapping
+    # themselves and re-evaluate sovereignty implications.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8222/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  # ==========================================
   # 3. CORE APPLICATION (Backend + Frontend + Kai-C)
   # ==========================================
   opennvr-core:
@@ -209,6 +272,11 @@ services:
       db:
         condition: service_healthy
       mediamtx:
+        condition: service_healthy
+      # B1 — KAI-C connects to NATS at startup. NATS_URL empty in
+      # the operator's .env disables broadcast cleanly; this
+      # depends_on only matters when NATS is actually being used.
+      nats:
         condition: service_healthy
     # ----------------------------------------------------
     # [WINDOWS/MAC] BRIDGE MODE: Uncomment lines below
@@ -270,6 +338,11 @@ services:
       # AI Adapter URL (for Kai-C → ai-adapters routing via supervisord)
       # Override via .env: ADAPTER_URL=http://opennvr_ai:9100 (bridge) or http://127.0.0.1:9100 (host)
       - ADAPTER_URL=${ADAPTER_URL:-http://opennvr_ai:9100}
+
+      # B1 — NATS URL for KAI-C's broadcast publisher. Empty disables
+      # broadcast cleanly (HTTP/WS inference paths still work). For
+      # [LINUX] HOST MODE operators, change to ``nats://127.0.0.1:4222``.
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
 
       # Frames directory — must match the shared_frames volume mount path in this container
       - FRAMES_DIR=/app/AI-adapters/AIAdapters/frames

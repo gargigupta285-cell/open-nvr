@@ -17,6 +17,10 @@ dependencies = [
     # (``additional_headers`` is the modern kwarg; 12.x's legacy
     # ``websockets.client.connect`` used ``extra_headers``).
     "websockets>=13.0",
+    # B1 — NATS publisher for the event-bus broadcast surface
+    # (opennvr.inference.* subjects). Best-effort publishing on the
+    # /infer + /infer/stream paths; NATS down doesn't break inference.
+    "nats-py>=2.6",
 ]
 
 [build-system]

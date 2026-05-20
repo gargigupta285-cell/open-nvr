@@ -1,0 +1,29 @@
+[project]
+name = "opennvr-example-inference-listener"
+version = "1.0.0"
+description = "OpenNVR inference-listener example app (B1 — NATS subscriber template)"
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0" }
+
+# Deliberately minimal — meant as a clean copy-as-template for
+# community contributors building subscriber apps. The whole story
+# is `await nats.connect → subscribe → handle_event`, so the dep
+# list is just the NATS client + PyYAML for config.
+dependencies = [
+    "nats-py>=2.6",
+    "PyYAML>=6.0,<7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+inference-listener = "inference_listener:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"

@@ -23,6 +23,8 @@ This service runs as a standalone HTTP server that:
 3. Returns standardized responses
 """
 
+import asyncio
+
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import AnyHttpUrl, BaseModel, Field
@@ -40,6 +42,8 @@ from fastapi import Header
 from kai_c.audit import AuditEventType, AuditStore, new_correlation_id
 from kai_c.connector import KaiConnector
 from kai_c.correlation import CORRELATION_ID_HEADER, CorrelationIdMiddleware
+from kai_c.events import InferenceCompletedEvent
+from kai_c.nats_publisher import NatsPublisher
 from kai_c.registry import AdapterRegistry
 from kai_c.schemas import KAIRequest
 from kai_c.sovereignty import SovereigntyViolation
@@ -164,6 +168,10 @@ app.add_middleware(CorrelationIdMiddleware)
 # polling once known adapters are registered.
 _audit = AuditStore()
 _registry: AdapterRegistry | None = None
+# B1: NATS publisher for the event-bus broadcast surface. Built at
+# startup with config from env so sovereignty violations surface as
+# a clean startup error rather than silently disabling broadcast.
+_nats_publisher: NatsPublisher | None = None
 
 
 def get_registry() -> AdapterRegistry:
@@ -174,6 +182,12 @@ def get_registry() -> AdapterRegistry:
 
 def get_audit() -> AuditStore:
     return _audit
+
+
+def get_nats_publisher() -> NatsPublisher:
+    if _nats_publisher is None:  # pragma: no cover — guarded by startup
+        raise RuntimeError("NATS publisher not initialized; startup did not run")
+    return _nats_publisher
 
 
 @app.on_event("startup")
@@ -207,13 +221,42 @@ async def _kaic_startup() -> None:
             logger.info("registration deferred for %s@%s: %s", name, url, exc)
     await _registry.start_polling()
 
+    # B1: NATS publisher for the event-bus broadcast surface. Starts
+    # AFTER the registry so any sovereignty-refused adapters are
+    # already audited, and a NATS misconfig surfaces as its own
+    # log line. ``NATS_URL=""`` disables publishing entirely
+    # (no broadcast; HTTP/WS inference paths unchanged) — see
+    # ``kai_c.nats_publisher.NatsPublisher`` for the rationale.
+    global _nats_publisher
+    _nats_publisher = NatsPublisher(
+        url=os.getenv("NATS_URL", "").strip() or None,
+        # Reuse INTERNAL_API_KEY as the NATS token — operators
+        # already manage one secret for KAI-C; tying broadcast auth
+        # to the same value avoids a second knob.
+        token=INTERNAL_API_KEY or None,
+        sovereignty_mode=AI_SOVEREIGNTY,
+    )
+    try:
+        await _nats_publisher.start()
+    except Exception as exc:
+        # A NATS misconfig is operator-actionable (wrong URL,
+        # sovereignty violation, broker down). Log + continue — KAI-C
+        # still serves HTTP/WS inference correctly without broadcast.
+        logger.warning("NATS publisher startup failed: %s", exc)
+        _nats_publisher = NatsPublisher(
+            url=None, token=None, sovereignty_mode=AI_SOVEREIGNTY,
+        )
+
 
 @app.on_event("shutdown")
 async def _kaic_shutdown() -> None:
-    global _registry
+    global _registry, _nats_publisher
     if _registry is not None:
         await _registry.aclose()
         _registry = None
+    if _nats_publisher is not None:
+        await _nats_publisher.close()
+        _nats_publisher = None
 
 # ============================================================
 # ADAPTER REGISTRY - KAI-C manages all AI Adapter URLs
@@ -692,6 +735,80 @@ async def v1_aggregated_capabilities():
     return get_registry().aggregated_capabilities()
 
 
+# ── B1 NATS publishing helper ──────────────────────────────────────
+
+
+async def _publish_inference_completed(
+    *,
+    adapter_name: str,
+    adapter: Any,
+    camera_id: Optional[str],
+    correlation_id: str,
+    latency_ms: int,
+    body: Dict[str, Any],
+) -> None:
+    """Build an ``InferenceCompletedEvent`` from the response body the
+    adapter returned and publish it on NATS. Shared by HTTP and WS
+    success paths so the broadcast surface is identical regardless of
+    transport.
+
+    Always best-effort — the underlying ``NatsPublisher.publish_inference_
+    completed`` swallows all errors and logs at WARNING. Calling this
+    function never raises.
+    """
+    publisher = _nats_publisher
+    if publisher is None or not publisher.enabled:
+        return
+    # ``body`` is the §3.5 InferResponse the adapter returned. Pull
+    # out the model fields with defensive defaults — a misbehaving
+    # adapter could omit them, in which case we publish what we have
+    # rather than dropping the event.
+    if not isinstance(body, dict):
+        return
+    try:
+        model_name = str(body.get("model_name") or "")
+        model_version = str(body.get("model_version") or "")
+        # Adapter capabilities snapshot — fingerprint is the most
+        # operationally valuable field (§11.3 drift detection).
+        fingerprint = None
+        try:
+            fingerprint = adapter.capabilities.model.fingerprint
+        except Exception:  # noqa: BLE001
+            pass
+        adapter_version = None
+        try:
+            adapter_version = adapter.capabilities.adapter.version
+        except Exception:  # noqa: BLE001
+            pass
+
+        # ``inference_ms`` is the ADAPTER's measurement (§3.5). Don't
+        # silently fall back to KAI-C's round-trip ``latency_ms`` —
+        # that's a different semantic (includes network) and would
+        # confuse subscribers doing latency analytics. Missing → 0.
+        # (Peer review L4.)
+        event = InferenceCompletedEvent(
+            correlation_id=correlation_id,
+            adapter=adapter_name,
+            adapter_version=adapter_version,
+            camera_id=camera_id,
+            model_name=model_name,
+            model_version=model_version,
+            model_fingerprint=fingerprint,
+            inference_ms=int(body.get("inference_ms") or 0),
+            result=body.get("result") or {},
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Pydantic validation can fail if the adapter returned a
+        # malformed shape. Don't break the request — log + skip.
+        logger.warning(
+            "NATS broadcast skipped — event-build failure: %s "
+            "[correlation_id=%s adapter=%s]",
+            exc, correlation_id, adapter_name,
+        )
+        return
+    await publisher.publish_inference_completed(event)
+
+
 @app.post("/api/v1/adapters/refresh", dependencies=[Depends(require_internal_api_key)])
 async def v1_refresh_adapters(name: Optional[str] = None):
     """Force a /capabilities + /health re-poll. Without ``name`` refreshes
@@ -761,6 +878,20 @@ async def v1_infer(
             latency_ms=latency_ms,
             model_version=adapter.capabilities.model.version,
         )
+        # B1: broadcast on NATS. Best-effort — publish failures are
+        # logged + counted but never raise. Fire-and-forget via
+        # ``asyncio.create_task`` so a slow NATS connect doesn't
+        # delay the HTTP response. (Peer review H1 — earlier we
+        # ``await``ed the publish which could add up to 5 s of
+        # latency on the first request after a NATS outage.)
+        asyncio.create_task(_publish_inference_completed(
+            adapter_name=adapter_name,
+            adapter=adapter,
+            camera_id=camera_id,
+            correlation_id=correlation_id,
+            latency_ms=latency_ms,
+            body=body,
+        ))
         return body
 
     error_info = body.get("error", {}) if isinstance(body, dict) else {}
@@ -841,6 +972,12 @@ async def v1_infer_stream(websocket: WebSocket, adapter_name: str):
         adapter_url=str(adapter.url),
         correlation_id=correlation_id,
         audit=get_audit(),
+        # B1 — pass the broadcast publisher + adapter so per-frame
+        # results fan out on NATS as they're relayed back to the
+        # client. ``nats_publisher`` may be a disabled publisher (no
+        # URL configured), in which case the proxy skips the broadcast.
+        nats_publisher=_nats_publisher,
+        adapter_info=adapter,
     )
     await proxy.run()
 

@@ -86,6 +86,35 @@ CLOSE_MODEL_ERROR: int = 4002      # §6.5 — upstream unreachable / not stream
 _SCHEME_MAP: dict[str, str] = {"http": "ws", "https": "wss"}
 
 
+def _extract_handshake_camera_id(text: str) -> str | None:
+    """Pull ``camera_id`` out of a §6.1 handshake text frame. Returns
+    None for any malformed input — the adapter is responsible for the
+    actual protocol enforcement; we just need camera_id for the B1
+    NATS subject and treat parse failure as ``camera_id=None`` →
+    falls back to ``unknown`` in the subject.
+
+    Only the FIRST text frame is inspected (the §6.1 handshake). If a
+    broken client sends a control message before the handshake, the
+    adapter closes the WS with policy_refused (4001) — at which point
+    nothing else gets published anyway. We do NOT keep trying to
+    extract camera_id from subsequent frames; that would risk picking
+    up a frame_meta's incidental ``camera_id`` field (if any) and
+    bind the stream to the wrong identifier mid-session.
+    """
+    try:
+        payload = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("type") != "handshake":
+        return None
+    cam = payload.get("camera_id")
+    if cam is None or not isinstance(cam, str) or not cam.strip():
+        return None
+    return cam.strip()
+
+
 def adapter_ws_url(adapter_http_url: str) -> str:
     """Translate ``http(s)://host:port`` → ``ws(s)://host:port/infer/stream``.
 
@@ -116,6 +145,8 @@ class StreamProxy:
         correlation_id: str,
         audit: AuditStore,
         connect_timeout_seconds: float = 5.0,
+        nats_publisher: Any = None,
+        adapter_info: Any = None,
     ) -> None:
         self._client = client_ws
         self._adapter_name = adapter_name
@@ -123,6 +154,24 @@ class StreamProxy:
         self._correlation_id = correlation_id
         self._audit = audit
         self._connect_timeout = connect_timeout_seconds
+        # B1 — NATS broadcast surface. ``nats_publisher`` is optional
+        # (back-compat with existing tests; production builds it from
+        # config in main.py). ``adapter_info`` is the registry's
+        # cached ``RegisteredAdapter`` so we can pull model_name /
+        # version / fingerprint without re-querying /capabilities
+        # per frame.
+        self._nats_publisher = nats_publisher
+        self._adapter_info = adapter_info
+        # Camera_id is captured from the §6.1 handshake — needed for
+        # the published event's subject + body. Defaulted to None
+        # until handshake completes.
+        self._camera_id: str | None = None
+        # In-flight NATS publish tasks. ``asyncio.create_task`` doesn't
+        # hold a strong ref to the task; under burst load
+        # (30 fps × N streams) GC could theoretically collect pending
+        # publishes. Keep a set + ``add_done_callback(discard)`` so
+        # tasks live until they complete. (Peer review M1.)
+        self._inflight_publishes: set = set()
         # Captured by either pump if the upstream closes with a non-
         # 1000 code; surfaced in the ``stream.closed`` audit event so
         # operators see e.g. "model_error" vs "normal" in the audit
@@ -263,6 +312,16 @@ class StreamProxy:
                 if msg.get("type") == "websocket.disconnect":
                     return
                 if (text := msg.get("text")) is not None:
+                    # B1 — capture camera_id from the first text frame
+                    # (the §6.1 handshake). Subsequent frames are
+                    # ``frame_meta`` / ``pause`` / etc. and don't
+                    # carry a camera_id, but the handshake does and
+                    # we need it for the NATS subject. Best-effort:
+                    # a malformed handshake just leaves camera_id as
+                    # None; the broader §6 protocol-violation handling
+                    # in the adapter will close the session.
+                    if self._camera_id is None:
+                        self._camera_id = _extract_handshake_camera_id(text)
                     await upstream.send(text)
                     continue
                 if (data := msg.get("bytes")) is not None:
@@ -301,8 +360,11 @@ class StreamProxy:
                 if isinstance(msg, (bytes, bytearray)):
                     await self._client.send_bytes(bytes(msg))
                     continue
-                # Text frame. Audit if it's an error-shaped result.
-                self._maybe_audit_error_result(msg)
+                # Text frame. Inspect once — audit on error envelopes
+                # AND broadcast successful results to NATS. Both
+                # inspections share the json.loads cost (one parse
+                # per result frame).
+                self._inspect_result_text(msg)
                 await self._client.send_text(msg)
         except ConnectionClosed as exc:
             # Capture for the audit event. ``code`` is always present
@@ -313,14 +375,19 @@ class StreamProxy:
         except WebSocketDisconnect:
             return
 
-    def _maybe_audit_error_result(self, text: str) -> None:
-        """Detect §6.3 ``result`` messages whose ``result`` body is a §7
-        FailureEnvelope and emit a STREAM_FAILED audit event.
+    def _inspect_result_text(self, text: str) -> None:
+        """Parse the §6.3 ``result`` message once, then:
 
-        We're parsing JSON we already plan to relay, so the cost is one
-        extra ``json.loads`` per frame. At sustained 30 fps that's
-        negligible; if we ever measure it as hot, switch to a startswith
-        prefix sniff before the full parse.
+        * if it's an error-shaped envelope (status=error), emit a
+          STREAM_FAILED audit event;
+        * otherwise, publish an ``InferenceCompletedEvent`` on NATS
+          for the broadcast surface (B1).
+
+        Both branches are best-effort — the parse error path returns
+        silently and the broadcast publish path swallows its own
+        errors. The client still receives the relayed message
+        regardless. One ``json.loads`` per result frame; at sustained
+        30 fps that's negligible.
         """
         try:
             payload = json.loads(text)
@@ -334,18 +401,88 @@ class StreamProxy:
         if not isinstance(result, dict):
             return
         # §7 envelope shape: top-level status="error" + error object.
-        if result.get("status") != "error":
+        if result.get("status") == "error":
+            error = result.get("error") or {}
+            self._audit.emit(
+                AuditEventType.STREAM_FAILED,
+                correlation_id=self._correlation_id,
+                adapter=self._adapter_name,
+                seq=payload.get("seq"),
+                error_category=error.get("category", "unknown"),
+                error_code=error.get("code", "unknown"),
+                transient=error.get("transient", False),
+            )
             return
-        error = result.get("error") or {}
-        self._audit.emit(
-            AuditEventType.STREAM_FAILED,
-            correlation_id=self._correlation_id,
-            adapter=self._adapter_name,
-            seq=payload.get("seq"),
-            error_category=error.get("category", "unknown"),
-            error_code=error.get("code", "unknown"),
-            transient=error.get("transient", False),
+        # Success path — broadcast to NATS. Synchronously kicked
+        # off as an asyncio task so the pump isn't blocked by a slow
+        # publish; ``NatsPublisher.publish_inference_completed``
+        # already swallows errors internally.
+        if self._nats_publisher is not None and getattr(
+            self._nats_publisher, "enabled", False
+        ):
+            self._schedule_inference_broadcast(payload, result)
+
+    def _schedule_inference_broadcast(
+        self,
+        payload: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        """Build the ``InferenceCompletedEvent`` from a successful §6.3
+        result frame and schedule its publish on the running event
+        loop. Per-frame; never raises.
+        """
+        # Lazy import to keep stream_proxy.py importable without
+        # nats-py installed (the publisher is optional).
+        from kai_c.events import InferenceCompletedEvent
+
+        # Adapter info is registry-cached so we don't re-query
+        # /capabilities per frame. May be None in test fixtures that
+        # don't pass adapter_info — broadcast still works, just with
+        # empty model_name/version/fingerprint.
+        model_name = ""
+        model_version = ""
+        fingerprint = None
+        adapter_version = None
+        if self._adapter_info is not None:
+            try:
+                model_name = self._adapter_info.capabilities.model.name or ""
+                model_version = self._adapter_info.capabilities.model.version or ""
+                fingerprint = self._adapter_info.capabilities.model.fingerprint
+                adapter_version = self._adapter_info.capabilities.adapter.version
+            except Exception:  # noqa: BLE001
+                pass
+
+        try:
+            event = InferenceCompletedEvent(
+                correlation_id=self._correlation_id,
+                adapter=self._adapter_name,
+                adapter_version=adapter_version,
+                camera_id=self._camera_id,
+                model_name=model_name,
+                model_version=model_version,
+                model_fingerprint=fingerprint,
+                inference_ms=int(payload.get("inference_ms", 0) or 0),
+                # §6.3 seq — WS path only; HTTP path leaves None.
+                # Subscribers can dedupe / detect drops with this.
+                # (Peer review M2.)
+                seq=payload.get("seq") if isinstance(payload.get("seq"), int) else None,
+                result=result,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "NATS broadcast skipped — WS event-build failure: %s "
+                "[correlation_id=%s]", exc, self._correlation_id,
+            )
+            return
+        # Fire-and-forget but keep a ref so the task lives until it
+        # completes (peer review M1 — Python's asyncio doc warns
+        # about unreferenced tasks being GC'd). The done-callback
+        # discards the ref so the set doesn't grow unbounded.
+        task = asyncio.create_task(
+            self._nats_publisher.publish_inference_completed(event)
         )
+        self._inflight_publishes.add(task)
+        task.add_done_callback(self._inflight_publishes.discard)
 
     # Close helpers bound at 1s — a stalled WS close-handshake
     # shouldn't pin the proxy task. Errors are logged at WARNING (peer

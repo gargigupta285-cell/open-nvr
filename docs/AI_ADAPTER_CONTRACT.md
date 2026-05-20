@@ -1222,9 +1222,16 @@ Migration order (one commit per adapter): **Piper → Whisper → YOLOv8 → YOL
 
 Each of these will get its own design doc when its milestone arrives.
 
-- **NATS event bus.** Adapters publish detection events as
-  `result_sink: "nats:..."` in streaming handshakes, but the bus
-  itself, JetStream persistence, and subject naming come in B1.
+- ~~**NATS event bus.**~~ **Shipped in B1** for the inference-result
+  fan-out path. KAI-C publishes
+  `opennvr.inference.{adapter}.{camera_id}.completed` after every
+  successful HTTP /infer + WS streaming result. Subscribers fan out
+  via NATS wildcards. See `kai-c/kai_c/events.py` for the schema and
+  `examples/inference-listener/` for the canonical subscriber
+  template. JetStream persistence + alert fan-out + audit-event
+  streaming are deliberately deferred to follow-up slices (B1
+  shipped lean to validate the fan-out story before committing to
+  the broader surface).
 - **Redis cache layer.** The capability cache + idempotency cache
   are KAI-C concerns that ride alongside the contract; B2.
 - **MCP server.** Tools to expose, auth shape, and rate-limiting
