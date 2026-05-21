@@ -1,284 +1,349 @@
-# 🛡️ OpenNVR
-**AI-Powered, Security-First Video Surveillance Platform**
+<div align="center">
 
-Bring AI to the Edge. Own Your Security. Deploy Anywhere.
+<img src="app/public/opennvr-logo.svg" alt="OpenNVR" width="280" />
 
-## What you get
+### Self-hosted, AI-powered video surveillance — built for sovereignty, built for developers.
 
-- **Live multi-camera NVR** — ONVIF / RTSP ingest, HLS playback, event recording via MediaMTX.
-- **Pluggable AI pipeline** — person detection, face recognition, scene captioning out of the box; add your own via the [AI Adapter SDK](https://github.com/open-nvr/ai-adapter). Curious *why* there's an adapter layer at all instead of loading models directly? See [Why use ai-adapter](https://github.com/open-nvr/ai-adapter#why-use-ai-adapter-vs-loading-your-model-directly) — short version: audit chain + fingerprint drift detection + sovereignty enforcement + operator-controlled permissions, none of which `from ultralytics import YOLO` gives you.
-- **Self-hosted, privacy-first** — your footage never leaves your hardware unless *you* wire it up.
-- **Secure-by-Design defaults** — no shipped default password, no placeholder secrets accepted, MediaMTX bound to loopback only, recording-path traversal refused. See [SECURITY_ARCHITECTURE.md](docs/SECURITY_ARCHITECTURE.md) for the offline-first design and its mapping to [Zenodo DOI 10.5281/zenodo.17261761](https://doi.org/10.5281/zenodo.17261761).
-- **Cross-platform** — Windows, macOS, Linux (bridge or host networking).
-- **One-command install** — interactive wizard generates secrets, clones optional components, and starts everything.
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org)
+[![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-> **⚠️ Upgrading from a previous release?** This branch hardens the startup validator: symmetric secrets must be ≥ 32 characters, MediaMTX URLs must resolve to loopback (or set `ALLOW_REMOTE_MEDIAMTX=true`), and the admin account is now activated via a one-time token printed to stdout on first boot rather than a shipped default password. See the *Upgrading* section below for a quick checklist.
+**OpenNVR** is an open-source network video recorder with a pluggable AI adapter ecosystem,
+offline-first network posture, and an end-to-end audit trail from camera to alert.
+Bring your own model. Own your footage. Deploy anywhere.
+
+[Quick start](#-quick-start-3-commands) · [Why OpenNVR](#-why-opennvr) · [Examples](#-examples) · [Architecture](docs/SECURITY_ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md)
+
+</div>
 
 ---
 
-## 🐳 1. Docker Build & Deployment (Recommended)
-This is the recommended approach for **Linux**, **macOS**, and **Windows** users. The install wizard wires the entire ecosystem together automatically.
+## ⚡ Quick start (3 commands)
+
+```bash
+git clone https://github.com/open-nvr/open-nvr.git
+cd open-nvr
+./start.sh        # Linux / macOS   (Windows: .\start.ps1)
+```
+
+Open <http://localhost:8000>, paste the one-time setup token printed in the terminal,
+choose an admin password, and add your first camera.
+AI detection is **off by default for safety** — set `AI_ENABLED=true` in your `.env`
+and restart (`./start.sh build`) when you're ready.
+
+Every security feature ships **on by default**. You don't configure security — you configure exceptions.
+
+---
+
+## 🎯 Why OpenNVR
+
+> Most NVRs treat AI as a bolt-on and security as a checkbox. OpenNVR inverts that.
+
+- **🔌 Pluggable AI adapters.** Any model behind a REST or WebSocket endpoint becomes
+  a first-class detector. YOLOv8, InsightFace, Whisper, Piper, your custom ONNX —
+  same contract, hot-swappable, no fork required.
+- **🛡️ Secure by default.** Strong-secret validators, RTSPS / HLS-TLS / WebRTC-TLS,
+  loopback-only MediaMTX, offline-mode network posture, one-time admin setup token.
+  No shipped default password, ever.
+- **📜 Audit trail end-to-end.** Every inference carries an `X-Correlation-Id` from
+  alert → middleware → adapter. Investigate "why did this alert fire at 22:14?" without
+  guessing.
+- **🧬 Drift detection.** Model weights are fingerprinted with sha256 and polled every
+  minute. Accidental model rotation or tampering surfaces as an audit event,
+  not silence.
+- **📡 Real event bus.** Alerts and inference results publish to NATS with a public
+  subject scheme. Build downstream apps with copy-as-template subscribers — Home
+  Assistant relays, custom dashboards, your SOC pipeline.
+- **🏠 Sovereignty-first.** Offline mode is the default. Cloud routes return 403
+  unless you explicitly opt in. Your footage doesn't leave your hardware unless you
+  wire it up.
+
+---
+
+## 🔍 How OpenNVR compares
+
+| Concern | Frigate | Shinobi | Viseron | **OpenNVR** |
+|---|---|---|---|---|
+| Pluggable AI models | Hardware-detector plugins (Coral / OpenVINO / TensorRT / Hailo) | Plugin system | Built-in YOLO + face | **Open contract — any model behind REST/WS** |
+| Audit trail | Event DB | Logs | Logs | **Per-request correlation ID across the stack** |
+| Sovereignty enforcement | — | — | — | **Cloud routes 403 by default; opt-in only** |
+| Model fingerprint drift detection | — | — | — | **sha256 polled every 60s; audit events** |
+| Event bus | Internal MQTT | webhook | webhook | **NATS, public subjects, template subscribers** |
+| Multi-tenant fairness signal | Single-process | Multi-monitor | Single-process | **Adapter contract declares per-camera fair-queuing intent** |
+| TLS defaults | User-managed | User-managed | User-managed | **RTSPS + HLS-TLS + WebRTC-TLS on by default** |
+| First-boot account | First-login password creation, bearer cookies | Default credentials | Default credentials | **One-time setup token, no shipped password** |
+| Frontend | Web UI | Web UI | Web UI | **Web UI + JSON API + reusable React shell** |
+| License | MIT | GPLv3 | MIT | **AGPLv3** |
+
+We respect Frigate's edge-detection performance and Viseron's zone UX. OpenNVR is the
+choice when "I need to know what my system did, when, and on whose authority" is a
+real question.
+
+---
+
+## 🧩 Features
+
+| | |
+|---|---|
+| 📹 **Multi-camera NVR** | ONVIF / RTSP / RTSPS ingest · HLS playback · event recording · per-camera retention policies |
+| 🤖 **AI pipeline** | YOLOv8 person detection · InsightFace recognition · Whisper ASR · Piper TTS · plug your own |
+| 🔐 **Default-deny posture** | Loopback-only MediaMTX · placeholder-secret refusal · offline mode · sovereignty enforcement |
+| 🌐 **Cross-platform** | Linux (host network) · macOS (bridge) · Windows (PowerShell) |
+| 📡 **NATS event bus** | `opennvr.inference.*` and `opennvr.alerts.*` subjects · copy-as-template subscribers |
+| 🧪 **Adapter SDK** | `pip install opennvr-adapter-sdk` · write a new detector in ~30 lines · ships with conformance tests |
+| 🪪 **Audit log** | Every register / refresh / inference / refusal recorded with correlation ID and reason |
+| 📦 **One-command install** | Interactive wizard generates secrets, certs, and brings up the full stack |
+
+---
+
+## 🚀 Install — for users
 
 ### Prerequisites
+
 - Git
-- Docker Desktop (Windows/macOS) or Docker Engine + Compose v2 (Linux)
+- Docker Desktop (macOS / Windows) **or** Docker Engine + Compose v2 (Linux)
 
-### Step-by-Step Build
+### Step-by-step
 
-1. **Clone the core OpenNVR repository**
-   ```bash
-   git clone https://github.com/open-nvr/open-nvr.git
-   ```
-   ![Cloning OpenNVR Repo](docs/screenshots/cloning_nvr_repo.png)
-
-2. **Clone the AI Adapter repository as a sibling**
-   ```bash
-   git clone https://github.com/open-nvr/ai-adapter.git
-   ```
-   ![Cloning AI Adapter Repo](docs/screenshots/cloning_ai_adapter_repo.png)
-
-3. **Enter the NVR root directory**
-   ```bash
-   cd open-nvr
-   ```
-   ![Changing Directory](docs/screenshots/changing_directory.png)
-
-4. **Run the smart start script**
-
-   **Linux / macOS:**
-   ```bash
-   chmod +x start.sh
-   ./start.sh
-   ```
-
-   **Windows (PowerShell):**
-   ```powershell
-   .\start.ps1
-   ```
-   ![Running setup via powershell](docs/screenshots/start_ps.png)
-
-   > **Initial Setup:** If it is your first time bringing the containers up, the interactive setup will block the sequence and engage with you in the terminal.
-
-   ![Interactive prompt beginning](docs/screenshots/installation_begin.png)
-
-   On first run the wizard will:
-   - check prerequisites (Docker, Compose, Git)
-   - ask for recording storage path and initialization configs
-   - check if the [ai-adapter](https://github.com/open-nvr/ai-adapter) repo is present
-   - generate strong secrets and write `.env`
-   - build images and start the stack
-
-   The bundled `mediamtx-certs-init` service in `docker-compose.yml` automatically generates a self-signed TLS cert pair for MediaMTX (RTSPS / HLS-over-HTTPS / WebRTC signaling per V-019) on first boot if none exists. The pair lives under `./mediamtx-certs/` on the host. If you want a different SAN (e.g. routable hostname or LAN IP), run `./scripts/generate-mediamtx-certs.sh` once with `EXTRA_SAN="DNS:opennvr.lan,IP:10.0.0.5"` *before* the first `docker compose up`; subsequent runs skip generation when the files already exist.
-
-   Subsequent runs of `start.sh` / `start.ps1` just validate and start — no re-install.
-
-   > Prefer doing it by hand? Copy `.env.example` → `.env`, fill in secrets (or run `./scripts/generate-secrets.sh -Write` / `.\scripts\generate-secrets.ps1 -Write`), then `docker compose up -d --build`.
-
-## 🌐 2. Access the Web UI
-
-Once the services are healthy, open your browser and navigate to `http://localhost:8000`. You will automatically be redirected to the **First-Time Setup** page to initialize your `admin` password securely before accessing the dashboard.
-
-### Activating the admin account on first boot
-
-To close the bootstrap-race window (an attacker on the management LAN racing the operator to claim the admin account), `/auth/first-time-setup` is now gated by a **one-time setup token** that is generated on server startup whenever an admin user exists with `password_set=False`.
-
-The token is printed to the server's stdout exactly once, inside a clearly delimited banner:
-
-```
-================================================================
- OpenNVR first-time setup token (one-time use)
-----------------------------------------------------------------
-  <copy this opaque string verbatim>
-----------------------------------------------------------------
- Pass this token in the `setup_token` field of
- POST /auth/first-time-setup. It is consumed on first
- successful use. Restart the server to mint a new one.
-================================================================
+```bash
+git clone https://github.com/open-nvr/open-nvr.git
+cd open-nvr
+./start.sh                    # Linux / macOS
+# Windows PowerShell:
+# .\start.ps1
 ```
 
-- **Docker via `./start.sh` / `.\start.ps1`:** the wizard automatically polls the server's logs after `docker compose up` and prints the banner above the "OpenNVR is running" line — copy from there.
-- **Docker without the wizard:** run `docker compose logs opennvr-core | grep -A 6 "first-time setup token"` to retrieve it.
-- **Local dev:** the token will print in the terminal that runs `python start.py`.
-- **Missed it?** Restart the server — a new token is minted on every boot while a pending user exists.
+The smart launcher detects your OS, runs the interactive installer on first boot, and
+just validates-and-starts on every subsequent run. On first boot it will:
 
-Paste the token into the **First-Time Setup** form alongside your new admin password. After successful setup the token is consumed and cannot be reused.
+1. Check prerequisites (Docker, Compose, Git).
+2. Ask for recording-storage path and initialization options.
+3. Generate cryptographically random secrets and write `.env` (read by `docker compose`).
+4. Generate self-signed TLS certs for MediaMTX.
+5. Build images and start the stack.
 
-![First Time Setup](docs/screenshots/first_time_setup.png)
+When the wizard prints the **first-time setup token banner**, copy the token,
+open <http://localhost:8000>, paste it on the setup form, and choose an admin password.
 
-🎉 **Core Endpoints:**
-- OpenNVR Web UI: `http://localhost:8000`
-- OpenNVR API Docs: `http://localhost:8000/docs`
-- MediaMTX: `http://localhost:8889`
-- AI Adapter API (if enabled): `http://localhost:9100`
+Subsequent restarts skip the setup-token flow.
+
+**Endpoints:**
+
+| Service | URL |
+|---|---|
+| Web UI | <http://localhost:8000> |
+| API docs (OpenAPI) | <http://localhost:8000/docs> |
+| MediaMTX | <http://localhost:8889> |
+| AI Adapter (when `AI_ENABLED=true`) | <http://localhost:9100> |
+
+### Stopping / restarting
+
+```bash
+./start.sh down       # stop everything
+./start.sh status     # show container health
+./start.sh logs       # tail logs
+./start.sh build      # rebuild images and start
+```
+
+> Prefer doing it by hand? The smart launcher is just `install.sh` + `docker compose up -d`.
+> Look in `scripts/install.sh` to see exactly what gets written. For bare-metal
+> development (no Docker), see the next section.
 
 ---
 
-## 💻 2. Local Developer Setup (Without Docker)
-For developers looking to run OpenNVR purely locally in an IDE utilizing local virtual environments.
+## 🛠️ Build & run — for developers
+
+Run all components locally without Docker, in their own venvs, for fast iteration.
 
 ### Prerequisites
-- **Python 3.11+**
-- **uv** (Python package manager - [install guide](https://docs.astral.sh/uv/getting-started/installation/))
-- **Node.js 18+**
-- **PostgreSQL 13+** (Running locally on your OS)
-- **MediaMTX** (Download the binary for your OS from their GitHub releases)
 
-### Preparation
-1. **Clone Both Repositories side-by-side**
-   ```bash
-   git clone https://github.com/open-nvr/open-nvr.git
-   git clone https://github.com/open-nvr/ai-adapter.git
-   ```
-2. **Generate your environment file with strong secrets**
-   ```bash
-   cd open-nvr
-   make secrets-env             # copies env.example -> server/.env and appends cryptographically random secrets
-   # then edit server/.env to point DATABASE_URL at your local PostgreSQL
-   make check-secrets           # confirms no placeholder values were left behind
-   ```
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) (Python package manager)
+- Node.js 18+
+- PostgreSQL 13+
+- [MediaMTX](https://github.com/bluenviron/mediamtx) (download the binary for your OS)
 
-   `make secrets-env` refuses to overwrite an existing `server/.env`, so it is safe to run on a fresh clone but will not silently rotate your keys.
+### Setup
 
-   **Prefer doing it by hand?**
-   ```bash
-   cp server/env.example server/.env
-   make secrets >> server/.env  # appends a generated `# --- generated by `make secrets` --- ` block
-   # edit server/.env: set DATABASE_URL; leave DEFAULT_ADMIN_PASSWORD commented out unless you have a reason
-   ```
-
-   **What the startup validator now enforces** (fail-closed at boot):
-   - `SECRET_KEY`, `MEDIAMTX_SECRET`, `INTERNAL_API_KEY` must be ≥ 32 characters and must not match any of the placeholder fragments shipped in `env.example` (`change-this-...`, `your-secret-...`, etc.).
-   - `CREDENTIAL_ENCRYPTION_KEY` must be a valid 32-byte Fernet key and must not match placeholder fragments.
-   - `MEDIAMTX_*_URL` values must resolve to a loopback address (`127.0.0.1`, `::1`, `localhost`). `0.0.0.0` is rejected because it is the wildcard bind, not loopback. Set `ALLOW_REMOTE_MEDIAMTX=true` only if you are intentionally fronting MediaMTX with a TLS-terminating reverse proxy on the management NIC.
-
-### Running the Services (Requires 5 Terminals)
-You must start the microservices independently.
-
-**Terminal 1: PostgreSQL & OpenNVR Backend**
 ```bash
-cd open-nvr/server
-uv venv venv
-
-# Activate venv (Linux: source venv/bin/activate | Windows: .\venv\Scripts\activate)
-uv sync
-
-# Migrate DB and Start
-alembic upgrade head
-python start.py
+git clone https://github.com/open-nvr/open-nvr.git
+git clone https://github.com/open-nvr/ai-adapter.git     # sibling directory
+cd open-nvr
+make secrets-env                                          # writes server/.env
+# Then edit server/.env: set DATABASE_URL to your local PostgreSQL
+make check-secrets                                        # confirms no placeholders
 ```
 
-**Terminal 2: KAI-C (AI Orchestrator)**
-```bash
-cd open-nvr/kai-c
-uv venv venv
+### Run (5 terminals)
 
-# Activate venv (Linux: source venv/bin/activate | Windows: .\venv\Scripts\activate)
-uv sync
+Each terminal starts at the parent directory where you cloned both repos side-by-side
+(so `open-nvr/` and `ai-adapter/` are siblings, and the MediaMTX binary is also at
+that level — copy it next to the repos).
 
-# Start Connector
-python start.py
-```
+| Terminal | Command |
+|---|---|
+| **1. Backend** | `cd open-nvr/server && uv venv && uv sync && alembic upgrade head && python start.py` |
+| **2. KAI-C** (orchestrator) | `cd open-nvr/kai-c && uv venv && uv sync && python start.py` |
+| **3. Frontend** | `cd open-nvr/app && npm install && npm run dev` (→ <http://localhost:5173>) |
+| **4. MediaMTX** | `./mediamtx open-nvr/mediamtx.local.yml` |
+| **5. AI Adapter** *(optional)* | `cd ai-adapter && uv venv && uv sync --extra all --extra cpu && uv run python download_models.py && uv run uvicorn app.main:app --reload --port 9100` |
 
-**Terminal 3: React Frontend**
-```bash
-cd open-nvr/app
-npm install
-npm run dev
-# Access frontend at http://localhost:5173
-```
+The AI Adapter step downloads several hundred MB of model weights on first run.
 
-**Terminal 4: MediaMTX**
-```bash
-# Extract the binary you downloaded and run it using the local config file provided in our repo:
-./mediamtx open-nvr/mediamtx.local.yml
-```
-
-**Terminal 5: AI Adapter (optional — only if you want AI detection)**
-```bash
-# Clone ai-adapter as a sibling directory to open-nvr:
-#   parent/
-#   ├── open-nvr/
-#   └── ai-adapter/
-git clone https://github.com/open-nvr/ai-adapter.git ../ai-adapter
-cd ../ai-adapter
-uv venv
-
-# Activate venv (Linux/macOS: source .venv/bin/activate | Windows: .\.venv\Scripts\activate)
-uv sync --extra all --extra cpu
-
-# Download model weights
-uv run python download_models.py
-
-# Start Adapter
-uv run uvicorn app.main:app --reload --port 9100
-```
+The full bare-metal walkthrough — including how the startup validator hardens secrets,
+the offline-first posture, and per-camera transport policy — is in
+[`docs/LOCAL_SETUP.md`](docs/LOCAL_SETUP.md).
 
 ---
 
-## ⬆️ Upgrading an existing deployment
+## 🧩 Add a new AI adapter (3 steps)
 
-If you are pulling this branch on top of an older OpenNVR `.env`, you may need three small changes before the server will boot:
+Want to plug a model OpenNVR doesn't ship with? You don't fork — you write a small
+adapter and point KAI-C at it.
 
-1. **Rotate short secrets to ≥ 32 characters.** Run `make secrets` and paste the four generated values over the existing `SECRET_KEY`, `MEDIAMTX_SECRET`, `INTERNAL_API_KEY`, and `CREDENTIAL_ENCRYPTION_KEY` lines in your `server/.env`. If you rotate `CREDENTIAL_ENCRYPTION_KEY` you must also re-encrypt any stored camera credentials — `make secrets` does not do that for you.
-2. **Confirm MediaMTX URLs are loopback.** `MEDIAMTX_BASE_URL`, `MEDIAMTX_ADMIN_API`, `MEDIAMTX_HLS_URL`, `MEDIAMTX_RTSP_URL`, and `MEDIAMTX_PLAYBACK_URL` must all resolve to `127.0.0.1` / `localhost` / `::1`. If you already had them pointed at a routable host on purpose, set `ALLOW_REMOTE_MEDIAMTX=true` to opt out of the check.
-3. **Remove the old `DEFAULT_ADMIN_PASSWORD=admin123` line** from your `.env`. The admin account is now activated via the one-time setup token described above; see [SECURITY_ARCHITECTURE.md §2.1](docs/SECURITY_ARCHITECTURE.md). If you have automated deployment that *does* need to provision an initial password, leave `DEFAULT_ADMIN_PASSWORD=<your-strong-value>` set — the admin user will be created with `password_set=True` in that case and the setup-token flow is skipped.
-4. **Decide your offline-first posture.** Two new settings now default to the strictest posture:
-   - `DEPLOYMENT_MODE=offline` — every cloud-touching route returns 403. Use `hybrid` to opt back in to cloud streaming / cloud recording / cloud AI inference (each call is audit-logged), or `cloud` to disable all checks.
-   - `AI_SOVEREIGNTY=local_only` — KAI-C refuses non-loopback adapter URLs and `/infer/cloud` returns 403. Set to `federated` or `cloud_allowed` if you have explicitly accepted the sovereignty trade-off. Important: **the same value must be set in KAI-C's environment** (it runs in its own process and reads the env var directly).
-5. **(Re-check) MediaMTX URLs:** must be loopback unless `ALLOW_REMOTE_MEDIAMTX=true` is set.
-6. **MediaMTX now requires TLS certs (V-019).** The hardened templates (`mediamtx.docker.yml`, `mediamtx.yml`) terminate TLS on the RTSPS, HLS, and WebRTC-signaling listeners. MediaMTX refuses to start without `server.crt` and `server.key`. Pick **one** of:
+```bash
+pip install opennvr-adapter-sdk
+```
 
-   **Option A — generate a self-signed cert pair (default path).**
+```python
+from opennvr_adapter_sdk import (
+    AdapterApp, AdapterService, BodyShape,
+    HardwareEvaluationResponse, HardwareVerdict,
+    InferResponse, ModelInfo,
+)
 
-   For Docker deployments this happens *automatically* on first `docker compose up` via the bundled `mediamtx-certs-init` service. You only need to invoke the script manually if you want to control the SAN (e.g. add a routable hostname) or for bare-metal installs:
+class MyDetector(AdapterService):
+    def load(self):                                          # eagerly load weights
+        ...
 
-   ```bash
-   # POSIX:
-   ./scripts/generate-mediamtx-certs.sh
-   # With a custom SAN for routable access (browsers reaching by hostname/IP):
-   EXTRA_SAN="DNS:opennvr.lan,IP:10.0.0.5" ./scripts/generate-mediamtx-certs.sh
-   # Windows PowerShell:
-   .\scripts\generate-mediamtx-certs.ps1 -ExtraSan "DNS:opennvr.lan,IP:10.0.0.5"
-   ```
+    def is_ready(self) -> bool:
+        return True
 
-   Writes a 10-year self-signed cert pair to `./mediamtx-certs/` with SAN covering `127.0.0.1`, `::1`, `localhost`, and the docker-compose service name `mediamtx`. Idempotent — won't overwrite existing files unless you pass `--force`. `docker-compose.yml` mounts `./mediamtx-certs/` into `/etc/mediamtx-certs/` inside the container; the YAML templates reference the certs via that absolute path. **Bare-metal installs** must put the certs at `/etc/mediamtx-certs/` on the host (or edit `mediamtx.yml` to point at wherever you put them).
+    def fingerprint(self) -> str | None:                     # sha256 of the weights
+        return "sha256:..."
 
-   **Option B — use the permissive dev template AND acknowledge.**
+    def model_info(self) -> ModelInfo:
+        return ModelInfo(name="my-model", version="1.0.0",
+                         framework="onnx", fingerprint=self.fingerprint())
 
-   For local development where you stream with VLC/ffprobe and don't want to deal with certs:
+    def hardware_evaluation(self) -> HardwareEvaluationResponse:
+        return HardwareEvaluationResponse(verdict=HardwareVerdict.OK, details="")
 
-   ```bash
-   # Swap the volume mount in docker-compose.yml from mediamtx.docker.yml to mediamtx.local.yml,
-   # or run MediaMTX bare-metal with the local template directly.
-   echo "MEDIAMTX_ALLOW_PLAINTEXT_OUTPUTS=true" >> server/.env
-   ```
+    def infer(self, payload) -> InferResponse:
+        frame_bytes = payload["__file__"]
+        # ... run your model ...
+        return InferResponse(result={"detections": [
+            {"label": "person", "confidence": 0.93, "bbox": [10, 20, 100, 200]},
+        ]})
 
-   This is the only supported way to run plaintext in production-shaped deployments — the setting records the deviation in the boot audit log and surfaces it at `/api/v1/system/posture`. The dev template's header has a `DO NOT USE IN PRODUCTION` warning for a reason.
+app = AdapterApp(
+    service=MyDetector(),
+    name="my-detector", version="1.0.0", vendor="me", license="MIT",
+    tasks_advertised=["object_detection"],
+    body_shape=BodyShape.IMAGE,
+).fastapi_app
+```
 
-   **Note on bare-metal remote access.** `mediamtx.yml` (the bare-metal template) binds all viewer transports to `127.0.0.1` by design — there's no Docker port-map to provide the loopback boundary. Remote viewers cannot reach MediaMTX directly. Front it with a TLS-terminating reverse proxy (nginx/Caddy/Traefik) on your management NIC, or open the binds manually AND add a host-firewall rule.
-
-7. **Per-camera RTSPS posture (V-003).** Each camera now carries a `transport_security` policy on its config (`rtsps_required` / `rtsps_preferred` / `plaintext_allowed`). The Alembic migration runs automatically on next deploy (`alembic upgrade head`) and back-fills existing cameras with the safe default `rtsps_preferred`. On camera-add the backend probes the camera's RTSPS reachability and stores the outcome (`supported` / `not_supported` / `inconclusive`) alongside the policy. New API surface:
-
-   - `POST /api/v1/cameras/{id}/probe-transport?port=<n>&reset_policy=<bool>` — re-run the TLS probe. Pass `port` to override the default RTSPS port (useful for cameras that multiplex RTSPS onto :443 or similar). Pass `reset_policy=true` to discard any explicit operator override and let the probe drive.
-   - `PUT /api/v1/cameras/{id}/transport-security` — explicit operator override. Body: `{"policy": "rtsps_required" | "rtsps_preferred" | "plaintext_allowed"}`. Sets `transport_security_operator_set=True` so subsequent re-probes preserve your choice.
-   - `CameraConfigResponse` now includes `transport_security`, `transport_security_operator_set`, `transport_security_probe_result`, and `transport_security_probed_at`. The UI can use these to render a "TLS: supported / not supported / unknown" badge and a "policy: operator-set / probe-driven" indicator alongside each camera.
-
-   Runtime enforcement (stream service refusing plaintext for `rtsps_required` cameras) is a known follow-up — see [SECURITY_ARCHITECTURE.md](docs/SECURITY_ARCHITECTURE.md) V-003 row.
-
-Finally, run `make check-secrets` to confirm no placeholder values were left behind, then start the server normally. Once it boots, `GET /api/v1/system/posture` returns the active policy (which is also recorded in the audit log under the `policy.boot_posture` event).
+`uvicorn my_module:app --port 9100`, then `POST` your adapter's URL to KAI-C's
+`/api/v1/adapters/register`. It's hot-swappable from the dashboard. Full walkthrough
+in the [ai-adapter docs](https://github.com/open-nvr/ai-adapter#-write-your-own-adapter).
 
 ---
 
-## 📖 Additional Documentation
-- [Security Architecture](docs/SECURITY_ARCHITECTURE.md) - Paper-to-code mapping, threat model, and roadmap
-- [User Manual](USER_MANUAL.md) - Using the Web Interface
-- [Security Policy](SECURITY.md) - Core system limits and hardening
-- [Contributing](CONTRIBUTING.md) - PR flow and coding standards
+## 🎬 Examples
+
+Every example is a copy-as-template starting point — minimal, readable, opinionated.
+
+| Example | What you'll build | Difficulty |
+|---|---|---|
+| [`intrusion-detection`](examples/intrusion-detection) | Detect people in restricted zones during restricted hours | ⭐ beginner |
+| [`loitering-detection`](examples/loitering-detection) | NATS subscriber with a dwell-time state machine | ⭐⭐ intermediate |
+| [`inference-listener`](examples/inference-listener) | Minimal NATS subscriber template | ⭐ beginner |
+| [`alerts-subscriber`](examples/alerts-subscriber) | Fan-out alerts to webhooks / logs / your tooling | ⭐ beginner |
+| 🚧 `license-plate-recognition` | Detect + OCR plates on driveway / parking — *coming v0.1* | ⭐⭐ intermediate |
+| 🚧 `smart-doorbell` | Recognise family vs strangers + Telegram alert — *coming v0.1* | ⭐⭐ intermediate |
+| 🚧 `package-delivery` | Porch arrival / departure with duration — *coming v0.1* | ⭐⭐ intermediate |
+| 🚧 `home-assistant-relay` | Bridge OpenNVR alerts into Home Assistant — *coming v0.1* | ⭐⭐ intermediate |
+
+Each example ships with a `config.example.yml`, a `README.md`, and a test suite you
+can read in 5 minutes.
+
+---
+
+## 🤝 Contributing
+
+We want your help. Whether it's a typo, a new adapter, or a whole example app, the
+flow is the same:
+
+1. **Fork** the repo on GitHub.
+2. **Branch** off `main` — `feature/<short-name>` or `fix/<short-name>`.
+3. **Write tests.** Every behavior change needs a test. We block PRs without them.
+4. **Run the suite locally** — `pytest` in each of `server/`, `kai-c/`, and the
+   `examples/*/` you touched. Should be green before you push.
+5. **Open the PR** against `main`. Fill out the template; it's short on purpose.
+
+Full guidelines, coding standards, commit-message format, and the security
+disclosure process: [`CONTRIBUTING.md`](CONTRIBUTING.md) and
+[`SECURITY.md`](SECURITY.md).
+
+**First-time contributors:** look for issues tagged `good first issue` on the issue
+tracker, or pick any of the 🚧 examples in the table above — those are a great
+on-ramp.
+
+---
+
+## 💬 Community
+
+- **GitHub Discussions** — questions, show & tell, feature ideas
+- **Discord** — coming with the v0.1 launch — real-time help, adapter authoring, homelab tips
+- **Issue tracker** — bugs only, please. Use Discussions for questions.
+
+If OpenNVR saves you a weekend, give us a ⭐ on GitHub — it's the cheapest way to help
+other developers find the project.
+
+---
+
+## 🛡️ Security
+
+OpenNVR is designed for environments where "who saw what, when" matters. The full
+threat model, posture controls, and roadmap live in
+[`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md).
+
+Found a security issue? **Please don't open a public issue.** Use GitHub's
+"Report a vulnerability" feature or follow the disclosure process in
+[`SECURITY.md`](SECURITY.md).
+
+---
+
+## 📚 Documentation
+
+- [User Manual](USER_MANUAL.md) — using the web interface
+- [Docker Quickstart](DOCKER_QUICKSTART.md) — the recommended install path
+- [Local Setup](docs/LOCAL_SETUP.md) — bare-metal developer setup
+- [Security Architecture](docs/SECURITY_ARCHITECTURE.md) — threat model, controls, roadmap
+- [AI Adapter Contract](docs/AI_ADAPTER_CONTRACT.md) — the wire spec for adapter authors
+- [Contributing](CONTRIBUTING.md) — PR flow and coding standards
 
 ---
 
 ## ⚖️ License
-This project is 100% open-source and licensed under the **GNU Affero General Public License v3.0 (AGPL v3)**. 
-By strictly enforcing the AGPLv3, OpenNVR guarantees that any ecosystem modifications—even when utilized over an external network or distributed cloud service—must uniformly remain open-source. For full terms, please see the `LICENSE` file in the root directory.
 
-> For enterprise commercial licensing exemptions, custom deployment support, or corporate sponsorships, please reach out directly: **[contact@cryptovoip.in](mailto:contact@cryptovoip.in)**
+OpenNVR is licensed under the **GNU Affero General Public License v3.0** (AGPL v3).
+The AGPL is intentional: it ensures the sovereignty story stays intact — any
+service built on OpenNVR, even one offered over a network, must share its
+modifications openly.
+
+See [`LICENSE`](LICENSE) for the full terms.
+
+> For enterprise commercial licensing, custom deployment support, or corporate
+> sponsorships, reach out at **[contact@cryptovoip.in](mailto:contact@cryptovoip.in)**.
+
+---
+
+<div align="center">
+
+**Star us ⭐ · [Try the quickstart](#-quick-start-3-commands) · [Read the contract](docs/AI_ADAPTER_CONTRACT.md) · [Join the community](#-community)**
+
+</div>

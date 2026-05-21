@@ -17,12 +17,27 @@ dependencies = [
     # (``additional_headers`` is the modern kwarg; 12.x's legacy
     # ``websockets.client.connect`` used ``extra_headers``).
     "websockets>=13.0",
-    # B1 — NATS publisher for the event-bus broadcast surface
+    # NATS publisher for the event-bus broadcast surface
     # (opennvr.inference.* subjects). Best-effort publishing on the
     # /infer + /infer/stream paths; NATS down doesn't break inference.
     "nats-py>=2.6",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+pythonpath = ["."]
+# Async fixtures (e.g. the `registry` fixture in test_registry.py) need
+# pytest-asyncio to be in auto mode so they are awaited correctly
+# without requiring per-fixture @pytest_asyncio.fixture decoration.
+# Consistent with the example apps under open-nvr/examples/.
+asyncio_mode = "auto"
