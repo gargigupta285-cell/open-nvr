@@ -52,7 +52,7 @@ def test_alert_id_is_unique_prefix():
 def test_alert_source_defaults_to_app_kind():
     alert = _alert()
     assert alert.source.kind == "app"
-    assert alert.source.name == "intrusion-detection"
+    assert alert.source.name == "loitering-detection"
 
 
 # ── Stdout channel ─────────────────────────────────────────────────
@@ -212,12 +212,12 @@ from alerts import (  # noqa: E402  — keep grouped with the channel tests
 
 def test_alert_subject_default_prefix():
     subject = alert_subject(_alert())
-    assert subject == "opennvr.alerts.app.intrusion-detection.cam-front"
+    assert subject == "opennvr.alerts.app.loitering-detection.cam-front"
 
 
 def test_alert_subject_custom_prefix():
     subject = alert_subject(_alert(), prefix="org.example.alerts")
-    assert subject == "org.example.alerts.app.intrusion-detection.cam-front"
+    assert subject == "org.example.alerts.app.loitering-detection.cam-front"
 
 
 def test_alert_subject_sanitizes_disallowed_chars():
@@ -298,12 +298,12 @@ def test_nats_channel_publishes_to_derived_subject(monkeypatch):
         assert channel.send(_alert()) is True
         assert len(fake.client.published) == 1
         subject, payload = fake.client.published[0]
-        assert subject == "opennvr.alerts.app.intrusion-detection.cam-front"
+        assert subject == "opennvr.alerts.app.loitering-detection.cam-front"
         # Payload is the exact §11.5 wire JSON
         parsed = json.loads(payload)
         assert parsed["camera_id"] == "cam-front"
         assert parsed["correlation_id"] == "corr-123"
-        assert parsed["source"]["name"] == "intrusion-detection"
+        assert parsed["source"]["name"] == "loitering-detection"
     finally:
         channel.close()
 
@@ -366,7 +366,7 @@ def test_nats_channel_uses_custom_subject_prefix(monkeypatch):
     try:
         channel.send(_alert())
         subject, _ = fake.client.published[0]
-        assert subject == "org.example.alerts.app.intrusion-detection.cam-front"
+        assert subject == "org.example.alerts.app.loitering-detection.cam-front"
     finally:
         channel.close()
 

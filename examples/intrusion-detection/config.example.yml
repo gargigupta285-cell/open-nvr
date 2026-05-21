@@ -87,6 +87,29 @@ restricted_hours:
 # webhook_url: "https://hooks.slack.com/services/T000/B000/XXXXXX"
 webhook_url: null
 
+# ── NATS alert fan-out (optional) ───────────────────────────────────
+#
+# When ``nats_alerts_url`` is set, every fired alert is also published
+# as JSON onto a NATS subject derived from the §11.5 source block:
+#
+#     {nats_alerts_subject_prefix}.{source.kind}.{source.name}.{camera_id}
+#     e.g. opennvr.alerts.app.intrusion-detection.cam-front-door
+#
+# Lets the OpenNVR operator-UI alerts inbox, a SIEM bridge, a Slack
+# bot, or anything else subscribe to alerts off the same NATS bus that
+# already carries inference events (§B1) — without each consumer
+# needing its own webhook. Use ``opennvr.alerts.>`` to subscribe to
+# everything.
+#
+# Failures (broker down, slow connect, bad credentials) are LOGGED but
+# never crash the detector loop — stdout alerts always fire.
+#
+# nats_alerts_url: "nats://nats:4222"
+# nats_alerts_token: "${INTERNAL_API_KEY}"
+# nats_alerts_subject_prefix: "opennvr.alerts"   # default
+nats_alerts_url: null
+nats_alerts_token: null
+
 # ── Cameras ─────────────────────────────────────────────────────────
 #
 # One entry per camera you want to watch. Each entry needs:
