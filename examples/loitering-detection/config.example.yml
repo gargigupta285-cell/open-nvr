@@ -62,6 +62,26 @@ grace_period_seconds: 5
 # Teams, PagerDuty incoming webhooks, etc.
 webhook_url: null
 
+# ── NATS alert fan-out (optional) ─────────────────────────────────
+#
+# Distinct from ``nats_url`` above: that's where we SUBSCRIBE for
+# inference events; this is where we PUBLISH our loitering alerts.
+# In a single-host deployment both point at the same broker; in a
+# federated setup they may differ.
+#
+# When set, every fired alert is also published as JSON to:
+#     {nats_alerts_subject_prefix}.app.loitering-detection.{camera_id}
+#     e.g. opennvr.alerts.app.loitering-detection.cam-back-shed
+#
+# Lets the operator-UI alerts inbox or any other subscriber pick up
+# alerts off the bus instead of needing per-app webhooks.
+#
+# nats_alerts_url: "nats://nats:4222"
+# nats_alerts_token: "${INTERNAL_API_KEY}"
+# nats_alerts_subject_prefix: "opennvr.alerts"  # default
+nats_alerts_url: null
+nats_alerts_token: null
+
 # ── Cameras ───────────────────────────────────────────────────────
 #
 # One entry per camera you want to watch. Each entry needs:

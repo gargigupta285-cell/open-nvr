@@ -24,6 +24,7 @@ This service runs as a standalone HTTP server that:
 """
 
 import asyncio
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -85,6 +86,17 @@ if AI_SOVEREIGNTY not in {"local_only", "federated", "cloud_allowed"}:
     )
 
 
+# Internal API key for authentication between opennvr and kai-c.
+# Defined here (before lifespan + before FastAPI()) so it's a normal
+# module-level binding by the time lifespan, the Depends-protected
+# routes, and the dependencies all read it. Originally lived halfway
+# down the file with the route handlers — leaving it there worked at
+# runtime (lifespan reads it only at uvicorn startup, by which point
+# the whole module has been evaluated) but was a footgun for any
+# future refactor that calls lifespan directly.
+INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
+
+
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
@@ -144,60 +156,60 @@ def _validate_adapters_match_sovereignty() -> None:
             "sovereignty trade-off."
         )
 
-app = FastAPI(
-    title="KAI-C (Kavach AI Connector)",
-    description="Middleware connector between OpenNVR Kavach and AI Adapters",
-    version="2.0.0"  # A2.4: bumped — added registry / audit / correlation_id
-)
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# A2.4: correlation_id middleware (§3.8). Runs on every request so the
-# audit log lines below can pull the id off request.state.
-app.add_middleware(CorrelationIdMiddleware)
-
-# A2.4: audit store + adapter registry singletons. The audit store is
-# eager; the registry is built at startup so the poller can begin
-# polling once known adapters are registered.
+# ============================================================
+# Module-level singletons (populated by the lifespan handler)
+# ============================================================
+# The audit store is eager — it just opens an append-only file and
+# can be constructed at import time. The registry and NATS publisher
+# are built inside ``lifespan`` so their event-loop-bound resources
+# (httpx.AsyncClient, the background poller task, the NATS connection)
+# are tied to the running uvicorn loop.
 _audit = AuditStore()
 _registry: AdapterRegistry | None = None
-# B1: NATS publisher for the event-bus broadcast surface. Built at
-# startup with config from env so sovereignty violations surface as
-# a clean startup error rather than silently disabling broadcast.
 _nats_publisher: NatsPublisher | None = None
 
 
-def get_registry() -> AdapterRegistry:
-    if _registry is None:  # pragma: no cover — guarded by startup
-        raise RuntimeError("registry not initialized; startup did not run")
-    return _registry
+# ============================================================
+# ADAPTER REGISTRY - KAI-C manages all AI Adapter URLs
+# Users NEVER see or configure these URLs
+# ============================================================
+ADAPTER_REGISTRY = {
+    "default": os.getenv("ADAPTER_URL", "http://localhost:9100"),  # Default AI Adapter
+    # Add more adapters here as needed:
+    # "yolov8": "http://localhost:9100",
+    # "blip": "http://localhost:9101",
+    # "insightface": "http://localhost:9102",
+}
+
+# Fail-closed at import time if any adapter URL violates the sovereignty
+# policy. Cannot run as a startup handler because we want this check to
+# fire even when KAI-C is imported by tests, not just when uvicorn is the
+# entry point.
+_validate_adapters_match_sovereignty()
 
 
-def get_audit() -> AuditStore:
-    return _audit
+# ============================================================
+# Lifespan — registry + NATS publisher startup/shutdown
+# ============================================================
+# Replaces the legacy ``@app.on_event("startup")`` / ``("shutdown")``
+# handlers, which FastAPI has deprecated in favour of the lifespan
+# context-manager pattern.
 
-
-def get_nats_publisher() -> NatsPublisher:
-    if _nats_publisher is None:  # pragma: no cover — guarded by startup
-        raise RuntimeError("NATS publisher not initialized; startup did not run")
-    return _nats_publisher
-
-
-@app.on_event("startup")
-async def _kaic_startup() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     """Build the registry + register any adapters from the legacy
-    ``ADAPTER_REGISTRY`` env-derived dict. Adapters that fail
-    registration (sovereignty refusal, unreachable, etc.) are logged
-    but do NOT block startup — operators may register them later via
-    POST /api/v1/adapters/register."""
-    global _registry
+    ``ADAPTER_REGISTRY`` env-derived dict, then start the NATS publisher.
+
+    Adapters that fail registration (sovereignty refusal, unreachable,
+    etc.) are logged but do NOT block startup — operators may register
+    them later via ``POST /api/v1/adapters/register``.
+
+    NATS publisher failures are similarly non-fatal: a misconfig is
+    logged and the publisher is left in a disabled state so KAI-C still
+    serves HTTP/WS inference correctly without broadcast.
+    """
+    global _registry, _nats_publisher
+
     _registry = AdapterRegistry(
         sovereignty_mode=AI_SOVEREIGNTY,
         audit=_audit,
@@ -221,60 +233,74 @@ async def _kaic_startup() -> None:
             logger.info("registration deferred for %s@%s: %s", name, url, exc)
     await _registry.start_polling()
 
-    # B1: NATS publisher for the event-bus broadcast surface. Starts
-    # AFTER the registry so any sovereignty-refused adapters are
-    # already audited, and a NATS misconfig surfaces as its own
-    # log line. ``NATS_URL=""`` disables publishing entirely
-    # (no broadcast; HTTP/WS inference paths unchanged) — see
+    # NATS publisher for the event-bus broadcast surface. Starts AFTER
+    # the registry so any sovereignty-refused adapters are already
+    # audited, and a NATS misconfig surfaces as its own log line.
+    # ``NATS_URL=""`` disables publishing entirely (no broadcast;
+    # HTTP/WS inference paths unchanged) — see
     # ``kai_c.nats_publisher.NatsPublisher`` for the rationale.
-    global _nats_publisher
     _nats_publisher = NatsPublisher(
         url=os.getenv("NATS_URL", "").strip() or None,
-        # Reuse INTERNAL_API_KEY as the NATS token — operators
-        # already manage one secret for KAI-C; tying broadcast auth
-        # to the same value avoids a second knob.
+        # Reuse INTERNAL_API_KEY as the NATS token — operators already
+        # manage one secret for KAI-C; tying broadcast auth to the same
+        # value avoids a second knob.
         token=INTERNAL_API_KEY or None,
         sovereignty_mode=AI_SOVEREIGNTY,
     )
     try:
         await _nats_publisher.start()
     except Exception as exc:
-        # A NATS misconfig is operator-actionable (wrong URL,
-        # sovereignty violation, broker down). Log + continue — KAI-C
-        # still serves HTTP/WS inference correctly without broadcast.
         logger.warning("NATS publisher startup failed: %s", exc)
         _nats_publisher = NatsPublisher(
             url=None, token=None, sovereignty_mode=AI_SOVEREIGNTY,
         )
 
+    try:
+        yield
+    finally:
+        if _registry is not None:
+            await _registry.aclose()
+            _registry = None
+        if _nats_publisher is not None:
+            await _nats_publisher.close()
+            _nats_publisher = None
 
-@app.on_event("shutdown")
-async def _kaic_shutdown() -> None:
-    global _registry, _nats_publisher
-    if _registry is not None:
-        await _registry.aclose()
-        _registry = None
-    if _nats_publisher is not None:
-        await _nats_publisher.close()
-        _nats_publisher = None
 
-# ============================================================
-# ADAPTER REGISTRY - KAI-C manages all AI Adapter URLs
-# Users NEVER see or configure these URLs
-# ============================================================
-ADAPTER_REGISTRY = {
-    "default": os.getenv("ADAPTER_URL", "http://localhost:9100"),  # Default AI Adapter
-    # Add more adapters here as needed:
-    # "yolov8": "http://localhost:9100",
-    # "blip": "http://localhost:9101",
-    # "insightface": "http://localhost:9102",
-}
+app = FastAPI(
+    title="KAI-C (Kavach AI Connector)",
+    description="Middleware connector between OpenNVR Kavach and AI Adapters",
+    version="2.0.0",
+    lifespan=lifespan,
+)
 
-# V-022 (M1a): fail-closed at import time if any adapter URL violates the
-# sovereignty policy. Cannot run as a startup handler because we want this
-# check to fire even when KAI-C is imported by tests, not just when uvicorn
-# is the entry point.
-_validate_adapters_match_sovereignty()
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# correlation_id middleware. Runs on every request so the audit log
+# lines below can pull the id off request.state.
+app.add_middleware(CorrelationIdMiddleware)
+
+
+def get_registry() -> AdapterRegistry:
+    if _registry is None:  # pragma: no cover — guarded by lifespan
+        raise RuntimeError("registry not initialized; lifespan did not run")
+    return _registry
+
+
+def get_audit() -> AuditStore:
+    return _audit
+
+
+def get_nats_publisher() -> NatsPublisher:
+    if _nats_publisher is None:  # pragma: no cover — guarded by lifespan
+        raise RuntimeError("NATS publisher not initialized; lifespan did not run")
+    return _nats_publisher
 
 
 def get_adapter_url(model_name: str = "default") -> str:
@@ -322,8 +348,8 @@ class CloudInferenceResponse(BaseModel):
     error: Optional[str] = None
 
 
-# Internal API key for authentication between opennvr and kai-c
-INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
+# INTERNAL_API_KEY is defined at module top (next to AI_SOVEREIGNTY) so
+# lifespan and the Depends-protected routes share a single binding.
 
 
 @app.get("/")

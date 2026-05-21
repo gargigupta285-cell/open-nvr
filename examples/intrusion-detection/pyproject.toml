@@ -15,6 +15,13 @@ dependencies = [
     "httpx>=0.27,<1.0",
     "PyYAML>=6.0,<7.0",
     "websockets>=13.0",
+    # NATS alert fan-out (optional at runtime). The dep is declared
+    # unconditionally because adding a separate ``[nats]`` extra adds
+    # install friction without payoff — nats-py is small (~50 KB) and
+    # pure-Python aside from its asyncio runtime. If you're not using
+    # the NATS alert channel, leave ``nats_alerts_url`` unset and the
+    # library is never imported.
+    "nats-py>=2.6",
 ]
 
 [project.optional-dependencies]

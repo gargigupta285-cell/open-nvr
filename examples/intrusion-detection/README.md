@@ -40,10 +40,13 @@ This is also the canonical **consumer-side** validation of the contract: every p
                               ┌──────────────────────┐
                               │  AlertDispatcher     │  stdout (always)
                               │                      │  + webhook (optional)
+                              │                      │  + NATS (optional)
                               └──────────────────────┘
 ```
 
 Every alert carries a `correlation_id` that joins back to KAI-C's audit log — an operator investigating an incident can pull the full causal chain: the alert → the KAI-C inference event → the adapter's audit line.
+
+**Alert fan-out via NATS** (§B1-alerts): set `nats_alerts_url` in `config.yml` to also publish each alert as JSON onto a NATS subject — `opennvr.alerts.{source.kind}.{source.name}.{camera_id}`, e.g. `opennvr.alerts.app.intrusion-detection.cam-front-door`. Downstream consumers (operator UI inbox, SIEM, Slack bridges) subscribe via wildcards like `opennvr.alerts.>` and fan out from one publish. See `examples/alerts-subscriber/` for the canonical consumer template, and the [§11.5.1 contract entry](../../docs/AI_ADAPTER_CONTRACT.md) for the full subject scheme and payload format.
 
 ## Operational notes
 

@@ -29,7 +29,9 @@ KAI-C  ───publishes──→  NATS broker  ───broadcasts──→  l
                                                              │ dwell ≥ threshold
                                                              ▼
                                                   ┌──────────────────────┐
-                                                  │  AlertDispatcher     │  stdout + webhook
+                                                  │  AlertDispatcher     │  stdout (always)
+                                                  │                      │  + webhook (optional)
+                                                  │                      │  + NATS (optional)
                                                   └──────────────────────┘
 ```
 
@@ -38,6 +40,8 @@ Each alert carries:
 - `evidence.adapter` / `adapter_version` — which model produced the detection
 - `evidence.model_fingerprint` — §11.3 drift-detection verification
 - `evidence.dwell_seconds` / `threshold_seconds` — how long the entity was there
+
+**Alert fan-out via NATS** (§B1-alerts): set `nats_alerts_url` in `config.yml` to publish each alert as JSON onto `opennvr.alerts.app.loitering-detection.{camera_id}`. Downstream consumers — the operator UI inbox, SIEM bridges, Slack bots — subscribe to wildcards like `opennvr.alerts.>` and fan out from one publish. See `examples/alerts-subscriber/` for the canonical consumer template and the [§11.5.1 contract entry](../../docs/AI_ADAPTER_CONTRACT.md) for the full subject scheme.
 
 ## State machine
 

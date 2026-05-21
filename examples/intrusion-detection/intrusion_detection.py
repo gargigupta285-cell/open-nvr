@@ -100,6 +100,16 @@ class AppConfig:
     restricted_hours: RestrictedHours
     cameras: list[CameraWatch]
     webhook_url: str | None
+    # Optional NATS alert fan-out. When ``nats_alerts_url`` is set,
+    # every fired alert is also published as JSON onto
+    # ``{nats_alerts_subject_prefix}.{source.kind}.{source.name}.{camera_id}``.
+    # Wire this up to feed the OpenNVR alerts inbox, a SIEM, or any
+    # other bus subscriber without standing up additional webhooks.
+    # Default-disabled so single-host deployments without NATS just
+    # work.
+    nats_alerts_url: str | None = None
+    nats_alerts_token: str | None = None
+    nats_alerts_subject_prefix: str = "opennvr.alerts"
     request_timeout_seconds: float = 30.0
     # ``kaic_transport`` selects how this example talks to KAI-C:
     #
@@ -174,6 +184,19 @@ def load_config(path: str) -> AppConfig:
             f"config: kaic_transport must be 'http' or 'ws', got {kaic_transport!r}"
         )
 
+    nats_alerts_url = str(raw["nats_alerts_url"]).strip() if raw.get("nats_alerts_url") else None
+    nats_alerts_token = str(raw["nats_alerts_token"]) if raw.get("nats_alerts_token") else None
+    # Refuse an explicitly-empty prefix; absent → use the default.
+    if "nats_alerts_subject_prefix" in raw:
+        nats_prefix = str(raw["nats_alerts_subject_prefix"]).strip()
+        if not nats_prefix:
+            raise ValueError(
+                "config: 'nats_alerts_subject_prefix' must not be empty "
+                "(omit the key to use the default 'opennvr.alerts')"
+            )
+    else:
+        nats_prefix = "opennvr.alerts"
+
     return AppConfig(
         kaic_url=kaic_url,
         kaic_adapter_name=str(raw.get("kaic_adapter_name", "yolov8")),
@@ -183,6 +206,9 @@ def load_config(path: str) -> AppConfig:
         restricted_hours=rh,
         cameras=cameras,
         webhook_url=str(raw["webhook_url"]) if raw.get("webhook_url") else None,
+        nats_alerts_url=nats_alerts_url,
+        nats_alerts_token=nats_alerts_token,
+        nats_alerts_subject_prefix=nats_prefix,
         request_timeout_seconds=float(raw.get("request_timeout_seconds", 30.0)),
         kaic_transport=kaic_transport,
     )
@@ -738,7 +764,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
 
-    dispatcher = build_dispatcher(webhook_url=config.webhook_url)
+    dispatcher = build_dispatcher(
+        webhook_url=config.webhook_url,
+        nats_alerts_url=config.nats_alerts_url,
+        nats_alerts_token=config.nats_alerts_token,
+        nats_alerts_subject_prefix=config.nats_alerts_subject_prefix,
+    )
     kaic_client = KaicClient(
         config.kaic_url,
         config.kaic_adapter_name,
@@ -764,6 +795,10 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         detector.close()   # WS clients (no-op in HTTP mode)
         kaic_client.close()
+        # Drain in-flight NATS alert publishes (no-op for stdout +
+        # webhook channels). Stays at the end of the finally clause
+        # so it runs even if detector/kaic_client close raises.
+        dispatcher.close()
     return 0
 
 

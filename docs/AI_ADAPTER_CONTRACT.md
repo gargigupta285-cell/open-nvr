@@ -1066,6 +1066,69 @@ next-severity-up channel).
 remains the source of truth; alerts are the *delivery mechanism*
 for the subset that needs immediate human attention.
 
+#### 11.5.1 Alert fan-out via NATS (B1-alerts)
+
+Apps that publish alerts can ALSO mirror them onto OpenNVR's NATS
+event bus so multiple consumers (UI inbox, SIEM bridges, Slack
+bots, audit forwarders) fan out off one publish without each one
+needing its own webhook from the publisher.
+
+**Subject scheme** mirrors the §11.5 ``source`` block, with each
+segment sanitized (any character outside ``[A-Za-z0-9_-]`` becomes
+``_``, empty segments fall back to ``unknown`` so a malformed Alert
+can't produce ``opennvr.alerts...cam-X``).
+
+> **Operator note**: non-ASCII identifiers (e.g. Chinese camera names
+> like `前门`) collapse entirely to underscores after sanitization,
+> which means all such cameras share one subject. If you have non-
+> ASCII camera identifiers, set explicit ASCII `camera_id` values
+> when registering the camera; the JSON payload still carries the
+> original `camera_id` field, only the NATS subject is sanitized.
+
+```
+opennvr.alerts.{source.kind}.{source.name}.{camera_id}
+```
+
+Examples:
+
+```
+opennvr.alerts.app.intrusion-detection.cam-front-door
+opennvr.alerts.app.loitering-detection.cam-back-shed
+opennvr.alerts.adapter.yolov8.cam-X         (future, adapter-emitted)
+opennvr.alerts.kai-c.policy-violation.cam-X (future, KAI-C-emitted)
+```
+
+Useful subscription patterns:
+
+| Pattern | Catches |
+|---|---|
+| `opennvr.alerts.>` | Every alert |
+| `opennvr.alerts.app.>` | All app-emitted alerts |
+| `opennvr.alerts.app.intrusion-detection.>` | One app's alerts |
+| `opennvr.alerts.*.*.cam-front-door` | All alerts about one camera |
+
+**Payload** on the wire is exactly the §11.5 Alert envelope shown
+above, JSON-encoded — no wrapping. A consumer that already knows
+how to parse §11.5 alerts from the audit log parses NATS-delivered
+alerts identically.
+
+**Failure isolation**: a misbehaving / unreachable NATS broker MUST
+NOT cascade into the publisher's main loop. The reference
+implementation (``examples/intrusion-detection/alerts.py`` →
+``NatsAlertChannel``) logs publish failures, returns False from the
+channel ``send()``, and continues; stdout and webhook channels
+still fire. Same contract as the §B1 inference-result publisher.
+
+**First-party examples**:
+
+* Publishers — ``examples/intrusion-detection`` and
+  ``examples/loitering-detection`` both ship the ``NatsAlertChannel``
+  as an opt-in third channel alongside stdout and webhook. Set
+  ``nats_alerts_url`` in their config to enable.
+* Subscriber template — ``examples/alerts-subscriber`` is the
+  copy-as-template starting point for downstream consumers (UI
+  inbox writer, SIEM forwarder, custom Slack bot).
+
 ## 12. Examples + the integration contract for app authors
 
 This section is the **app developer's manual.** Adapter authors can

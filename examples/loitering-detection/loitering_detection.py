@@ -107,6 +107,13 @@ class AppConfig:
     grace_period_seconds: float
     cameras: dict[str, CameraWatch]  # keyed by camera_id for O(1) lookup
     webhook_url: str | None
+    # Optional NATS alert fan-out. Distinct from ``nats_url``: that one
+    # is where we SUBSCRIBE for inference events, this one is where we
+    # PUBLISH our alerts. In a single-host deployment both will point
+    # at the same broker; in a federated setup they may differ.
+    nats_alerts_url: str | None = None
+    nats_alerts_token: str | None = None
+    nats_alerts_subject_prefix: str = "opennvr.alerts"
 
 
 def load_config(path: str) -> AppConfig:
@@ -201,6 +208,18 @@ def load_config(path: str) -> AppConfig:
                 "use the default ['person'], or list at least one label)"
             )
 
+    nats_alerts_url = str(raw["nats_alerts_url"]).strip() if raw.get("nats_alerts_url") else None
+    nats_alerts_token = str(raw["nats_alerts_token"]) if raw.get("nats_alerts_token") else None
+    if "nats_alerts_subject_prefix" in raw:
+        nats_prefix = str(raw["nats_alerts_subject_prefix"]).strip()
+        if not nats_prefix:
+            raise ValueError(
+                "config: 'nats_alerts_subject_prefix' must not be empty "
+                "(omit the key to use the default 'opennvr.alerts')"
+            )
+    else:
+        nats_prefix = "opennvr.alerts"
+
     return AppConfig(
         nats_url=nats_url,
         nats_token=str(raw["nats_token"]) if raw.get("nats_token") else None,
@@ -210,6 +229,9 @@ def load_config(path: str) -> AppConfig:
         grace_period_seconds=grace,
         cameras=cameras,
         webhook_url=str(raw["webhook_url"]) if raw.get("webhook_url") else None,
+        nats_alerts_url=nats_alerts_url,
+        nats_alerts_token=nats_alerts_token,
+        nats_alerts_subject_prefix=nats_prefix,
     )
 
 
@@ -525,7 +547,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
 
-    dispatcher = build_dispatcher(webhook_url=config.webhook_url)
+    dispatcher = build_dispatcher(
+        webhook_url=config.webhook_url,
+        nats_alerts_url=config.nats_alerts_url,
+        nats_alerts_token=config.nats_alerts_token,
+        nats_alerts_subject_prefix=config.nats_alerts_subject_prefix,
+    )
     detector = LoiteringDetector(config, dispatcher)
 
     loop = asyncio.new_event_loop()
@@ -539,6 +566,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         loop.run_until_complete(detector.run(once=args.once))
     finally:
+        # Drain in-flight NATS alert publishes BEFORE we close the
+        # asyncio loop — the dispatcher runs its NATS client on its
+        # own daemon thread, but ``close`` blocks until drain
+        # completes, which is what we want at shutdown.
+        dispatcher.close()
         loop.close()
     return 0
 
