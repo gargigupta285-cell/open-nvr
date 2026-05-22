@@ -9,10 +9,9 @@
 >
 > **New here? Read [Why use ai-adapter](https://github.com/open-nvr/ai-adapter#why-use-ai-adapter-vs-loading-your-model-directly) first.** This document is the *what* — the wire shapes every adapter must speak. The README explains the *why*: which cross-cutting concerns (audit chain, fingerprint drift, sovereignty enforcement, operator-controlled permissions) earn the layer's keep, with a worked comparison vs `from ultralytics import YOLO` and a data-flow diagram for the intrusion-detection example.
 >
-> **What lives outside this doc.** NATS event bus (B1), Redis caches
-> (B2), MCP server (D1), pgvector + RAG (D2/D3), example apps
-> (C1/C2). Each is named in the milestone plan and will get its own
-> design doc when its turn comes.
+> **What lives outside this doc.** The NATS event bus, Redis caches,
+> MCP server, pgvector + RAG, and example apps each have their own
+> design docs when they ship.
 
 ---
 
@@ -62,8 +61,8 @@ audit integrity is v1.5.
 catalogue in §12.2 lists 12 named examples covering intrusion
 detection, package theft, LPR, loitering, PPE compliance, fall
 detection, fire/smoke, crowd counting, camera health, forensic
-search, and the watchman voice agent. C1/C2 ship first; the rest
-are the contribution roadmap.
+search, and the watchman voice agent. Intrusion-detection and the
+watchman agent ship first; the rest are the contribution roadmap.
 
 ---
 
@@ -108,7 +107,7 @@ caller.
                │
        HTTP control plane (mandatory)        ┌───────────────┐
        WebSocket streaming  (mandatory)      │  NATS event   │
-       Shared-memory frame transport         │  bus (B1)     │
+       Shared-memory frame transport         │  bus          │
         (optional, negotiated)               │  detections,  │
                │                             │  commands     │
    ┌───────────▼──────────────────────────┐  └───────────────┘
@@ -555,8 +554,8 @@ opens with a `handshake` exchange that negotiates:
 - which inputs the client will send (frames, audio, JSON)
 - whether shared-memory frame transport is in play
 - per-client inflight limits
-- whether the adapter should publish results to NATS (B1) instead of
-  back over the socket
+- whether the adapter should publish results to NATS instead of back
+  over the socket
 
 ### 6.1 Handshake
 
@@ -808,14 +807,14 @@ fans out across N adapter calls.
 
 ### 11.1 Sovereignty enforcement
 
-KAI-C is also the sovereignty enforcement point (V-022 from the
-security work). The existing `ai_sovereignty` setting still applies:
+KAI-C is also the sovereignty enforcement point. The existing
+`ai_sovereignty` setting still applies:
 
 - `local_only` — KAI-C refuses to register any adapter whose
   registration URL is non-loopback AND any adapter whose declared
   `permissions.network_egress` is non-empty (because that's a
-  cloud-proxy adapter). This is stricter than the current V-022
-  check, which only looked at the URL.
+  cloud-proxy adapter). This is stricter than the legacy
+  URL-only check.
 - `federated` — adapters may have egress to declared peer endpoints,
   but `permissions.network_egress` must list them explicitly; KAI-C
   refuses wildcards.
@@ -829,15 +828,15 @@ out to in `network_egress` — KAI-C will admit you under `federated`
 or `cloud_allowed` and reject under `local_only`. The adapter
 declaration is the source of truth; KAI-C will not infer.
 
-This is a meaningful tightening of V-022 and lands in milestone B
-when KAI-C is rewritten as the registry. Until then, the existing
-loopback check stays in place as a baseline.
+This is a meaningful tightening of the legacy URL-only check; see
+[`SECURITY_ARCHITECTURE.md`](./SECURITY_ARCHITECTURE.md) for the full
+sovereignty story.
 
 ### 11.2 Audit trail
 
 Audit logging is the load-bearing trust contract. KAI-C writes an
-append-only audit record to OpenNVR's audit log (V-013 store)
-for every event below. The log is queryable from the OpenNVR UI by
+append-only audit record to OpenNVR's audit log for every event
+below. The log is queryable from the OpenNVR UI by
 time range, adapter, camera, outcome, and category — that's the
 "audit any breach" affordance the platform promises to operators.
 
@@ -858,7 +857,7 @@ time range, adapter, camera, outcome, and category — that's the
 
 `correlation_id` is the stable UUID defined in §3.8. KAI-C mints it
 at request-receive time and threads it through every layer: the
-adapter, the audit log, NATS subjects (B1), and any example app
+adapter, the audit log, NATS subjects, and any example app
 that subscribes. A single correlation_id lets an incident reviewer
 pull the full causal chain — "this 3am alert came from app `X`,
 which called adapter `Y` v1.4, which got a stream frame from camera
@@ -1066,7 +1065,7 @@ next-severity-up channel).
 remains the source of truth; alerts are the *delivery mechanism*
 for the subset that needs immediate human attention.
 
-#### 11.5.1 Alert fan-out via NATS (B1-alerts)
+#### 11.5.1 Alert fan-out via NATS
 
 Apps that publish alerts can ALSO mirror them onto OpenNVR's NATS
 event bus so multiple consumers (UI inbox, SIEM bridges, Slack
@@ -1117,7 +1116,7 @@ NOT cascade into the publisher's main loop. The reference
 implementation (``examples/intrusion-detection/alerts.py`` →
 ``NatsAlertChannel``) logs publish failures, returns False from the
 channel ``send()``, and continues; stdout and webhook channels
-still fire. Same contract as the §B1 inference-result publisher.
+still fire. Same contract as the inference-result publisher.
 
 **First-party examples**:
 
@@ -1171,11 +1170,11 @@ async with adapter.stream(camera_id="cam-7") as session:
   are queryable via `nvr.cameras.get(camera_id)`; an app can refuse
   to run if a camera lacks audio.
 - New camera registration triggers `camera.registered` audit event;
-  apps that auto-attach to new cameras can subscribe via NATS (B1).
+  apps that auto-attach to new cameras can subscribe via NATS.
 
 **For new-camera onboarding (operator UX):** the OpenNVR UI's
 "Add camera" wizard auto-discovers ONVIF devices on the LAN,
-probes transport security (M1c work), and gives the operator
+probes transport security, and gives the operator
 defaults for username/password and resolution. Apps don't see this
 flow — they only see the resulting stable `camera_id`.
 
@@ -1187,18 +1186,20 @@ template community contributors can copy. The full target catalogue:
 
 | Slug | Use case | Adapters needed | Status |
 |---|---|---|---|
-| `intrusion-detection` | Person/vehicle in zone after-hours | object_detection | **C1 (first to ship)** |
-| `watchman-agent` | Voice-interactive watchman ("what's at the gate?") | ASR + TTS + LLM | **C2** |
-| `package-detect` | Porch package arrival + theft detection | object_detection + classification | A3 candidate |
-| `camera-health` | Detect blurry/obstructed/offline cameras | classification | A3 candidate |
-| `lpr` | License-plate recognition (whitelist / denylist) | LPR adapter (new) | B |
-| `loitering` | Person stays in zone > N minutes | object_detection + tracking | B |
-| `crowd-count` | Headcount in zone (retail, public safety) | counting | B |
-| `ppe-compliance` | Hardhat/vest detection (construction sites) | classification | B |
-| `fall-detect` | Slip-and-fall (elder care, retail) | pose | B+ |
-| `fire-smoke` | Early fire/smoke warning | classification | B+ |
-| `forensic-search` | "Show me everyone in red between 2-4pm" | CLIP + pgvector | D3 |
-| `audit-replay` | Semantic search across recorded events | embeddings + RAG | D3 |
+| `intrusion-detection` | Person/vehicle in zone after-hours | object_detection | **Shipped (first reference example)** |
+| `loitering-detection` | Person stays in zone > N minutes | object_detection + tracking | **Shipped** |
+| `watchman-agent` | Voice-interactive watchman ("what's at the gate?") | ASR + TTS + LLM | Planned |
+| `license-plate-recognition` | License-plate recognition (whitelist / denylist) | LPR adapter (new) | Planned |
+| `smart-doorbell` | Family vs stranger recognition + Telegram alert | face recognition | Planned |
+| `package-delivery` | Porch package arrival + theft detection | object_detection + classification | Planned |
+| `home-assistant-relay` | Bridge OpenNVR alerts to Home Assistant | n/a (subscriber) | Planned |
+| `camera-health` | Detect blurry/obstructed/offline cameras | classification | Roadmap |
+| `crowd-count` | Headcount in zone (retail, public safety) | counting | Roadmap |
+| `ppe-compliance` | Hardhat/vest detection (construction sites) | classification | Roadmap |
+| `fall-detect` | Slip-and-fall (elder care, retail) | pose | Roadmap |
+| `fire-smoke` | Early fire/smoke warning | classification | Roadmap |
+| `forensic-search` | "Show me everyone in red between 2-4pm" | CLIP + pgvector | Roadmap |
+| `audit-replay` | Semantic search across recorded events | embeddings + RAG | Roadmap |
 
 Each example ships as a runnable Docker container with a README and
 screenshots. Community contributors fill the gaps — an example
@@ -1221,7 +1222,7 @@ Examples consume:
 
 - Adapter HTTP/WS contract (this doc) — for inference
 - OpenNVR REST APIs — for cameras, recordings, alerts
-- NATS subjects (once B1 ships) — for detection-event streams
+- NATS subjects — for detection-event streams
 - `opennvr-app-sdk` (§11.4) — wraps the above
 
 Each example's README answers: "what problem does this solve, what
@@ -1285,26 +1286,26 @@ Migration order (one commit per adapter): **Piper → Whisper → YOLOv8 → YOL
 
 Each of these will get its own design doc when its milestone arrives.
 
-- ~~**NATS event bus.**~~ **Shipped in B1** for the inference-result
-  fan-out path. KAI-C publishes
+- ~~**NATS event bus.**~~ **Shipped.** KAI-C publishes
   `opennvr.inference.{adapter}.{camera_id}.completed` after every
   successful HTTP /infer + WS streaming result. Subscribers fan out
   via NATS wildcards. See `kai-c/kai_c/events.py` for the schema and
   `examples/inference-listener/` for the canonical subscriber
-  template. JetStream persistence + alert fan-out + audit-event
-  streaming are deliberately deferred to follow-up slices (B1
+  template. JetStream persistence and audit-event streaming are
+  deliberately deferred to follow-up work (the initial release
   shipped lean to validate the fan-out story before committing to
   the broader surface).
 - **Redis cache layer.** The capability cache + idempotency cache
-  are KAI-C concerns that ride alongside the contract; B2.
-- **MCP server.** Tools to expose, auth shape, and rate-limiting
-  in D1.
-- **pgvector + RAG.** D2/D3. The face DB migration off the
-  in-memory dict is the trigger.
+  are KAI-C concerns that ride alongside the contract; planned
+  follow-up.
+- **MCP server.** Tools to expose, auth shape, and rate-limiting —
+  planned follow-up.
+- **pgvector + RAG.** Planned follow-up. The face DB migration off
+  the in-memory dict is the trigger.
 - **Triton-style multi-model inference servers.** Not ruled out —
   a Triton-fronting adapter is a perfectly valid contract
   implementation — but not in v1's reference set.
-- **Adapter image signing + SBOM.** Tracked under the V-011 security
+- **Adapter image signing + SBOM.** Tracked under the security
   roadmap; lands in parallel.
 
 ## 15. Open questions for reviewer
@@ -1326,4 +1327,4 @@ Each of these will get its own design doc when its milestone arrives.
 - Zenodo paper, DOI [10.5281/zenodo.17261761](https://doi.org/10.5281/zenodo.17261761) — §3.4 / §4.1 customer-sovereignty principles inform §8 and §11.1.
 - Existing adapter implementations: `/Users/varunpratapsingh/cv/ai-adapter/app/adapters/`.
 - KAI-C registry behaviour today: `/Users/varunpratapsingh/cv/open-nvr/kai-c/main.py`.
-- OpenNVR security architecture: [docs/SECURITY_ARCHITECTURE.md](./SECURITY_ARCHITECTURE.md), §2.4 V-022 row covers the sovereignty interaction.
+- OpenNVR security architecture: [docs/SECURITY_ARCHITECTURE.md](./SECURITY_ARCHITECTURE.md) — sovereignty enforcement and the broader threat model.

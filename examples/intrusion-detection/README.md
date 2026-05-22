@@ -46,11 +46,11 @@ This is also the canonical **consumer-side** validation of the contract: every p
 
 Every alert carries a `correlation_id` that joins back to KAI-C's audit log — an operator investigating an incident can pull the full causal chain: the alert → the KAI-C inference event → the adapter's audit line.
 
-**Alert fan-out via NATS** (§B1-alerts): set `nats_alerts_url` in `config.yml` to also publish each alert as JSON onto a NATS subject — `opennvr.alerts.{source.kind}.{source.name}.{camera_id}`, e.g. `opennvr.alerts.app.intrusion-detection.cam-front-door`. Downstream consumers (operator UI inbox, SIEM, Slack bridges) subscribe via wildcards like `opennvr.alerts.>` and fan out from one publish. See `examples/alerts-subscriber/` for the canonical consumer template, and the [§11.5.1 contract entry](../../docs/AI_ADAPTER_CONTRACT.md) for the full subject scheme and payload format.
+**Alert fan-out via NATS**: set `nats_alerts_url` in `config.yml` to also publish each alert as JSON onto a NATS subject — `opennvr.alerts.{source.kind}.{source.name}.{camera_id}`, e.g. `opennvr.alerts.app.intrusion-detection.cam-front-door`. Downstream consumers (operator UI inbox, SIEM, Slack bridges) subscribe via wildcards like `opennvr.alerts.>` and fan out from one publish. See `examples/alerts-subscriber/` for the canonical consumer template, and the [§11.5.1 contract entry](../../docs/AI_ADAPTER_CONTRACT.md) for the full subject scheme and payload format.
 
 ## Operational notes
 
-**Polling is serial across cameras.** With N cameras and per-camera inference latency L, the cycle takes ~N×L. If `request_timeout_seconds` (default 30s) is much greater than `poll_interval_seconds` (default 1s), one slow inference blocks the whole loop for the timeout. For N > ~10 cameras or when sub-second responsiveness matters, parallel polling lands in A2.5b.
+**Polling is serial across cameras.** With N cameras and per-camera inference latency L, the cycle takes ~N×L. If `request_timeout_seconds` (default 30s) is much greater than `poll_interval_seconds` (default 1s), one slow inference blocks the whole loop for the timeout. For N > ~10 cameras or when sub-second responsiveness matters, parallel polling is a planned follow-up.
 
 **Fail-fast on bad camera URLs.** `IntrusionDetector.__init__` raises on the first unsupported `frame_url`, so a single typo aborts startup before any detection runs. Operator notices the typo immediately rather than silently losing one camera in a fleet of ten — but the trade-off is real, so review the full config before deploying.
 
@@ -60,17 +60,17 @@ Every alert carries a `correlation_id` that joins back to KAI-C's audit log — 
 
 ## What's NOT in v1
 
-- **RTSP stream input** — only HTTP snapshot polling. RTSP needs an ffmpeg subprocess; lands in A2.5b.
-- **WebSocket streaming through KAI-C** — **available in A2.5b as opt-in via** `kaic_transport: ws` in config. KAI-C's WS proxy (`/api/v1/infer/{adapter}/stream`, A2.4b) bridges this example to the adapter's §6 streaming endpoint. Each camera holds one persistent WebSocket; per-frame latency drops from ~poll_interval to ~adapter inference time (~30-50 ms for YOLOv8 on CPU). HTTP polling stays the default for back-compat — most security-camera use cases don't need sub-second alerts.
+- **RTSP stream input** — only HTTP snapshot polling. RTSP needs an ffmpeg subprocess; planned follow-up.
+- **WebSocket streaming through KAI-C** — **available as opt-in via** `kaic_transport: ws` in config. KAI-C's WS proxy (`/api/v1/infer/{adapter}/stream`) bridges this example to the adapter's §6 streaming endpoint. Each camera holds one persistent WebSocket; per-frame latency drops from ~poll_interval to ~adapter inference time (~30-50 ms for YOLOv8 on CPU). HTTP polling stays the default for back-compat — most security-camera use cases don't need sub-second alerts.
 - **Tracking / persistence across frames** — every cycle is independent. Same person standing in a zone for 60s fires 60 alerts (unless you ack/snooze in the receiving system).
-- **Adapter discovery / multi-camera-per-adapter routing** — `kaic_adapter_name` is single-valued in config. Multi-adapter fanout lands as a follow-up.
-- **OpenNVR alerts API integration** — webhook + stdout for v1. Native OpenNVR alerts-inbox integration lands alongside the operator-UI alerts work in A2.5b.
+- **Adapter discovery / multi-camera-per-adapter routing** — `kaic_adapter_name` is single-valued in config. Multi-adapter fanout is a planned follow-up.
+- **OpenNVR alerts API integration** — webhook + stdout for v1. Native OpenNVR alerts-inbox integration is a planned follow-up.
 
 ## Quick start
 
 ```bash
 # 1. Build & run the YOLOv8 adapter (the example talks to it via KAI-C).
-#    A2.2 ships the Dockerfile in ai-adapter/adapters/yolov8/.
+#    The Dockerfile ships in ai-adapter/adapters/yolov8/.
 cd ai-adapter
 docker build -f adapters/yolov8/Dockerfile -t opennvr/yolov8-adapter:local .
 docker run --rm -d --name yolov8 -p 9002:9002 \
@@ -78,8 +78,8 @@ docker run --rm -d --name yolov8 -p 9002:9002 \
   -v $(pwd)/model_weights:/weights:ro \
   opennvr/yolov8-adapter:local
 
-# 2. Run KAI-C from source (A2.4 doesn't ship a versioned image yet —
-#    that's a follow-up). Either `python -m uvicorn main:app --port 8100`
+# 2. Run KAI-C from source (a versioned image is a planned follow-up).
+#    Either `python -m uvicorn main:app --port 8100`
 #    from the kai-c/ directory, or build a local image from kai-c/Dockerfile.
 cd ../open-nvr/kai-c
 export INTERNAL_API_KEY=$(openssl rand -hex 32)
@@ -161,10 +161,9 @@ Everything else — KAI-C call, correlation_id, audit trail, alert dispatch, fra
 
 That template is exactly what §12.4 of the design doc calls "first-party example as a first-class community contribution lane." Submit a PR adding your example under `examples/{your-slug}/` and you join the catalogue.
 
-## Roadmap (A2.5b)
+## Roadmap
 
 - RTSP input via ffmpeg subprocess
 - OpenNVR backend snapshot URL (`opennvr://cameras/{id}/snapshot`)
 - Native OpenNVR alerts-API integration (replace webhook for OpenNVR deployments)
-- (A2.5b shipped — see "What's NOT in v1" above for the current opt-in WS mode)
 - Per-detection deduplication (so a stationary person doesn't fire continuously)

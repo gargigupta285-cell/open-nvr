@@ -345,6 +345,7 @@ a vulnerability" feature on this repo, or follow the disclosure process in
 - [Local Setup](docs/LOCAL_SETUP.md) — bare-metal developer setup
 - [Security Architecture](docs/SECURITY_ARCHITECTURE.md) — threat model, controls, roadmap
 - [AI Adapter Contract](docs/AI_ADAPTER_CONTRACT.md) — the wire spec for adapter authors
+- [Changelog](CHANGELOG.md) — what's new, version by version
 - [Contributing](CONTRIBUTING.md) — PR flow and coding standards
 
 ---

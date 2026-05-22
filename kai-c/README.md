@@ -2,15 +2,15 @@
 
 KAI-C is the middleware layer between the OpenNVR NVR backend and the AI Adapters engine. The backend never talks to AIAdapters directly — KAI-C handles routing, URL management, authentication, response standardization, **audit logging, sovereignty enforcement, and fingerprint-drift detection**.
 
-## v2.0 (A2.4) — registry, audit, and the trust contract
+## v2.0 — registry, audit, and the trust contract
 
-As of A2.4 KAI-C is the registry and audit layer per §11 of the [AI Adapter Contract v1](../docs/AI_ADAPTER_CONTRACT.md). It still works as a thin proxy for the legacy endpoints; the new behaviour is layered on top.
+As of v2.0 KAI-C is the registry and audit layer per §11 of the [AI Adapter Contract v1](../docs/AI_ADAPTER_CONTRACT.md). It still works as a thin proxy for the legacy endpoints; the new behaviour is layered on top.
 
 **What's new:**
 
 - **Adapter registry** (`kai_c/registry.py`) — polls each adapter's `/capabilities` on registration + every 60s. Caches capabilities, fingerprint, health. Detects drift between polls.
 - **Audit log** (`kai_c/audit.py`) — append-only JSONL store. Every registration, every inference, every sovereignty refusal, every fingerprint mismatch is recorded. Queryable from `/api/v1/audit`.
-- **Sovereignty v2** (`kai_c/sovereignty.py`) — V-022 tightening: under `local_only`, refuses adapters whose declared `permissions.network_egress` is non-empty (cloud-proxy adapters). Under `federated`, refuses wildcard egress entries. Re-checks on every poll so a runtime drift de-registers the adapter.
+- **Sovereignty v2** (`kai_c/sovereignty.py`) — under `local_only`, refuses adapters whose declared `permissions.network_egress` is non-empty (cloud-proxy adapters). Under `federated`, refuses wildcard egress entries. Re-checks on every poll so a runtime drift de-registers the adapter.
 - **Correlation IDs** (`kai_c/correlation.py`) — every inbound request gets a `X-Correlation-Id` (minted if absent), threaded through to the adapter, echoed in the response, and stamped on every audit event for the request. One id joins logs across KAI-C, the adapter, and downstream consumers.
 
 **New v1 endpoints** (legacy endpoints unchanged for back-compat):
@@ -44,9 +44,9 @@ As of A2.4 KAI-C is the registry and audit layer per §11 of the [AI Adapter Con
 
 The legacy endpoints `/infer`, `/infer/local`, and `/infer/cloud` (kept for OpenNVR backend back-compat) **bypass the new audit + registry pipeline**. They read the static `ADAPTER_REGISTRY` env-derived dict, not the live registry; they don't thread `X-Correlation-Id`; they don't emit `inference.completed` / `inference.failed` events.
 
-**Consequence**: an adapter de-registered by the new registry (e.g., for permission drift in §11.3) is still reachable via the legacy `/infer` path because that endpoint only sees the static config. The startup-time loopback check (V-022 M1a) still applies, so the legacy path is safe for the URL-loopback story — it just doesn't get the audit story.
+**Consequence**: an adapter de-registered by the new registry (e.g., for permission drift in §11.3) is still reachable via the legacy `/infer` path because that endpoint only sees the static config. The startup-time loopback check still applies, so the legacy path is safe for the URL-loopback story — it just doesn't get the audit story.
 
-**Fix path**: migrate OpenNVR backend onto `POST /api/v1/infer/{adapter_name}`, which has full audit + sovereignty + correlation_id. Once nothing uses legacy `/infer`, those endpoints retire. Tracked as A2.5.
+**Fix path**: migrate OpenNVR backend onto `POST /api/v1/infer/{adapter_name}`, which has full audit + sovereignty + correlation_id. Once nothing uses legacy `/infer`, those endpoints retire.
 
 
 
