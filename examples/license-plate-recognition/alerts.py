@@ -2,15 +2,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 """
-Alert emission for the loitering-detection example.
+Alert emission for the license-plate-recognition example.
 
-Copied verbatim from ``examples/intrusion-detection/alerts.py`` per
-the "copy-as-template" model documented in both examples' READMEs.
-The ONLY local difference is ``AlertSource.name`` defaults to
-``"loitering-detection"`` so downstream consumers filtering by source
-get the right value. Everything else — Alert wire shape, the three
-channels (stdout / webhook / NATS), subject derivation, dispatcher
-behavior — is identical so future improvements diff-and-copy cleanly.
+Verbatim copy of ``examples/intrusion-detection/alerts.py`` with only
+``AlertSource.name`` and this header docstring changed. Keeping the
+file structure identical across examples means a developer reading
+one example knows where everything lives in the others — the
+copy-as-template convention.
 
 Three delivery channels in v1:
 
@@ -89,7 +87,7 @@ class AlertSource:
     """The ``source`` block of the §11.5 alert envelope."""
 
     kind: str = "app"  # one of: kai-c / adapter / app
-    name: str = "loitering-detection"
+    name: str = "license-plate-recognition"
     version: str = "1.0.0"
 
 
@@ -508,7 +506,7 @@ def build_dispatcher(
     nats_alerts_token: str | None = None,
     nats_alerts_subject_prefix: str = DEFAULT_ALERT_SUBJECT_PREFIX,
 ) -> AlertDispatcher:
-    """Convenience factory used by ``loitering_detection.py`` config
+    """Convenience factory used by ``intrusion_detection.py`` config
     loading. stdout is always included; webhook and NATS are independently
     opt-in via config.
 

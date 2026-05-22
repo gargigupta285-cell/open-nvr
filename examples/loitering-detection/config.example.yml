@@ -11,7 +11,7 @@
 # ── NATS endpoint (KAI-C's event bus) ──────────────────────────────
 #
 # This example subscribes to KAI-C's inference broadcast surface
-# (§B1) instead of driving its own KAI-C calls. It rides the
+# (NATS event bus) instead of driving its own KAI-C calls. It rides the
 # inference stream another app (e.g. intrusion-detection) is already
 # pushing. Net: one adapter inference fans out to N consumers; this
 # app pays zero GPU cost on top of whatever's already running.

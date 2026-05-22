@@ -14,7 +14,7 @@ Architecture
 
 Unlike ``intrusion-detection`` (which DRIVES inference by polling
 KAI-C or holding a WS session per camera), this app SUBSCRIBES to
-KAI-C's NATS broadcast surface (``opennvr.inference.*`` per §B1).
+KAI-C's NATS broadcast surface (``opennvr.inference.*`` per the NATS event bus).
 That means it consumes inference results that intrusion-detection
 (or any other app) is already driving — adapter GPU is paid once,
 N subscribers fan out from one inference stream.
@@ -416,7 +416,7 @@ class LoiteringDetector:
             del self._states[key]
 
     def _parse_ts(self, raw: Any) -> float:
-        """Extract a POSIX timestamp from a §B1 ``completed_at`` ISO
+        """Extract a POSIX timestamp from a the NATS event bus ``completed_at`` ISO
         string. Falls back to the clock for missing / malformed
         values so a misbehaving publisher doesn't break the state
         machine."""

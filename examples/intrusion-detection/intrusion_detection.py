@@ -289,7 +289,7 @@ class KaicError(Exception):
 
 class KaicStreamClient:
     """Per-camera persistent WebSocket session against KAI-C's
-    ``/api/v1/infer/{adapter}/stream`` proxy (added in A2.4b).
+    ``/api/v1/infer/{adapter}/stream`` proxy .
 
     Uses the synchronous ``websockets.sync`` client so the detector's
     thread model stays simple — each camera owns one client, each

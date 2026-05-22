@@ -10,7 +10,7 @@
 
 # ── NATS endpoint (OpenNVR's alert fan-out) ────────────────────────
 #
-# Subscribes to OpenNVR's alert bus (§B1-alerts). Monitoring apps
+# Subscribes to OpenNVR's alert bus (NATS alert fan-out). Monitoring apps
 # (intrusion-detection, loitering-detection, etc.) publish their §11.5
 # Alert envelopes here; this consumer fans them out to wherever you
 # want them (operator UI inbox, SIEM, Slack, audit log).

@@ -1,7 +1,7 @@
 [project]
 name = "opennvr-example-alerts-subscriber"
 version = "1.0.0"
-description = "OpenNVR alerts-subscriber example app (B1-alerts — NATS-subscribing alert consumer)"
+description = "OpenNVR alerts-subscriber example app (NATS-subscribing alert consumer)"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0" }
 

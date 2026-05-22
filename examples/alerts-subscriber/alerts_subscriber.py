@@ -5,7 +5,7 @@
 Alerts-subscriber example app.
 
 The canonical subscriber-side template for OpenNVR's alert fan-out
-(§B1-alerts). Connects to NATS, subscribes to a configurable
+(NATS alert fan-out). Connects to NATS, subscribes to a configurable
 ``opennvr.alerts.*`` subject pattern, prints each §11.5 Alert envelope
 to stdout, and optionally forwards via webhook.
 

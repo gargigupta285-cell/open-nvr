@@ -4,7 +4,7 @@ Every example here is a **copy-as-template** starting point — minimal, readabl
 and opinionated. Pick one that's close to what you want to build, copy the
 folder, and edit the predicate.
 
-The four shipped examples cover two orthogonal axes of the OpenNVR pipeline:
+The five shipped examples cover two orthogonal axes of the OpenNVR pipeline:
 *driving* inference vs *subscribing* to it, and *inference events* vs *alerts*.
 
 ```
@@ -120,25 +120,36 @@ python alerts_subscriber.py --config config.yml
 
 ---
 
-## 🚧 Planned — coming in v0.1
+### [`license-plate-recognition/`](license-plate-recognition)
 
-These four are the next round of viral, demo-friendly examples. Each is
-designed to be the kind of thing that earns a homelab YouTube review or
-a `/r/homelab` thread. **Want to help build one?** Open a discussion and
-we'll match scope to interest.
-
-### `license-plate-recognition/`
-
-**Detect every vehicle on your driveway, log every plate.** Pluggable OCR
-adapter on top of YOLOv8 vehicle detection. Ships with an alert payload that
-carries `plate_text`, `vehicle_color`, and `confidence`.
+**Detect every vehicle on your driveway, log every plate.** The first
+example to drive a two-stage inference chain through KAI-C — YOLOv8 for
+vehicle detection, then the `fast-plate-ocr` adapter for OCR on each
+vehicle crop. Ships with watchlist (allowlist / denylist) severity
+routing and a Pillow-based cropping helper.
 
 | | |
 |---|---|
-| Pattern | Drives YOLOv8 + OCR adapter chain → fires alerts |
-| Adapters | YOLOv8 (vehicle detection) + new PaddleOCR-style adapter |
+| Pattern | Drives YOLOv8 + fast-plate-ocr chain → fires alerts |
+| Adapters | YOLOv8 + fast-plate-ocr (Apache-2.0, ONNX, CPU-only, plate-specific) |
 | Difficulty | ⭐⭐ intermediate |
-| Why it's interesting | LPR is the most-asked-for NVR feature; ours is the only one with a pluggable OCR engine |
+| Best for learning | Chaining multiple adapters under one correlation ID |
+| Tests | 29 |
+
+```bash
+cd examples/license-plate-recognition && uv sync --extra dev
+cp config.example.yml config.yml      # edit camera URLs + watchlists
+python license_plate_recognition.py --config config.yml
+```
+
+---
+
+## 🚧 Planned — coming in v0.1
+
+These three are the next round of viral, demo-friendly examples. Each is
+designed to be the kind of thing that earns a homelab YouTube review or
+a `/r/homelab` thread. **Want to help build one?** Open a discussion and
+we'll match scope to interest.
 
 ### `smart-doorbell/`
 

@@ -56,8 +56,11 @@ jobs:
         run: uv run pytest tests/ -q
 
   # ── KAI-C middleware ─────────────────────────────────────────────
-  # kai-c/ also uses [dependency-groups]; pyproject sets
-  # testpaths = ["test"] (singular) so a bare `pytest` finds them.
+  # kai-c/ uses [dependency-groups] for dev deps (pytest + pytest-
+  # asyncio); pyproject sets testpaths = ["test"] (singular) so a
+  # bare `pytest` finds them. Sync without --frozen for now — the
+  # committed uv.lock pre-dates the pytest-asyncio addition; re-lock
+  # locally (`uv lock` from kai-c/) and commit, then add --frozen.
   kai-c:
     name: kai-c (pytest)
     runs-on: ubuntu-latest
@@ -69,7 +72,7 @@ jobs:
           cache-dependency-glob: "kai-c/uv.lock"
       - name: Sync dependencies
         working-directory: kai-c
-        run: uv sync --frozen
+        run: uv sync
       - name: Run pytest
         working-directory: kai-c
         run: uv run pytest -q
@@ -91,6 +94,7 @@ jobs:
           - alerts-subscriber
           - inference-listener
           - intrusion-detection
+          - license-plate-recognition
           - loitering-detection
     steps:
       - uses: actions/checkout@v4

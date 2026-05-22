@@ -1,7 +1,7 @@
 [project]
 name = "opennvr-example-loitering-detection"
 version = "1.0.0"
-description = "OpenNVR loitering-detection example app (C1 — NATS-subscribing monitoring app)"
+description = "OpenNVR loitering-detection example app (NATS-subscribing monitoring app)"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0" }
 
