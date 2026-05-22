@@ -1,7 +1,5 @@
 <div align="center">
 
-<img src="app/public/opennvr-logo.svg" alt="OpenNVR" width="280" />
-
 # OpenNVR
 
 ### Self-hosted, AI-powered video surveillance — secure by default, sovereign by design, yours to extend.
@@ -61,6 +59,29 @@ Every security feature ships **on by default**. You don't configure security —
 - **🏠 Sovereignty-first.** Offline mode is the default. Cloud routes return 403
   unless you explicitly opt in. Your footage doesn't leave your hardware unless you
   wire it up.
+
+---
+
+## 🛡️ Security: the defaults other NVRs leave to you
+
+Most open-source NVRs treat security as the operator's homework. OpenNVR
+enforces it at boot — every relaxation is an explicit decision that lands in
+the audit log.
+
+| Concern | Frigate / Shinobi / Viseron | **OpenNVR** |
+|---|---|---|
+| First-boot admin account | Default credentials or unset auth | **One-time setup token, no shipped password** |
+| Secret strength | Operator's responsibility | **Refuses to boot on placeholder or short secrets** |
+| Cloud egress | On by default | **403 unless `DEPLOYMENT_MODE` is flipped; audit-logged** |
+| AI sovereignty | No concept | **Adapters declaring `network_egress` refused under `local_only`** |
+| Camera TLS | Plaintext OK | **RTSPS + HLS-TLS + WebRTC-TLS on by default; plaintext requires opt-in + audit** |
+| Audit trail | Application logs | **End-to-end correlation ID from alert → adapter; append-only event log** |
+| Model integrity | Trust the file | **sha256 polled every 60s; drift surfaces as `adapter.fingerprint_mismatch`** |
+
+Built to close every systemic IP-camera weakness documented in recent academic
+work on networked surveillance. Full threat model and control mapping in
+[`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md) · academic
+foundation at [Zenodo DOI 10.5281/zenodo.17261761](https://doi.org/10.5281/zenodo.17261761).
 
 ---
 
@@ -308,80 +329,12 @@ other developers find the project.
 
 ---
 
-## 🛡️ Security — what ships on by default
+## 🔐 Reporting a vulnerability
 
-OpenNVR was rebuilt to address every systemic IP-camera weakness identified in
-recent academic work on networked surveillance. The defaults are deliberately
-strict; every relaxation is an explicit operator decision that lands in the
-audit log.
-
-**Credentials & accounts**
-
-- **No shipped default password.** The admin account activates via a one-time
-  setup token printed to stdout on first boot. The token is consumed on first
-  successful use; a fresh one is minted on every restart that finds a pending
-  user.
-- **Strong-secret validators.** The server refuses to boot if any
-  `SECRET_KEY`, `MEDIAMTX_SECRET`, `INTERNAL_API_KEY`, or
-  `CREDENTIAL_ENCRYPTION_KEY` is shorter than 32 characters or matches a
-  placeholder pattern from the shipped `env.example`. `make secrets` generates
-  cryptographically random values that pass.
-- **Camera credentials encrypted at rest.** Stored under a Fernet key that
-  the validator refuses to accept if it's a placeholder.
-
-**Network posture**
-
-- **Offline mode by default.** Cloud-touching routes (cloud recording, cloud
-  AI inference, federated streams) return 403 unless `DEPLOYMENT_MODE` is
-  explicitly set to `hybrid` or `cloud`. The deviation is audit-logged at
-  boot and surfaced at `/api/v1/system/posture`.
-- **AI sovereignty enforcement.** KAI-C refuses to register adapters that
-  declare `network_egress` permissions under the default
-  `AI_SOVEREIGNTY=local_only` policy. Adapter URLs must resolve to loopback.
-- **MediaMTX bound to loopback.** Cloud-style `0.0.0.0` binds are rejected by
-  the boot validator. The recording-path traversal vector is hardened
-  server-side (`..` and absolute paths refused; symlinks resolved within the
-  configured root).
-
-**Transport security**
-
-- **RTSPS / HLS-TLS / WebRTC-TLS on by default.** MediaMTX refuses to start
-  without `server.crt` / `server.key`; the docker-compose `mediamtx-certs-init`
-  service generates a 10-year self-signed pair on first boot if none exists.
-  Plaintext outputs require `MEDIAMTX_ALLOW_PLAINTEXT_OUTPUTS=true`, which is
-  recorded in the boot audit log.
-- **Per-camera transport policy.** Each camera carries a
-  `transport_security` field — `rtsps_required` / `rtsps_preferred` /
-  `plaintext_allowed`. RTSPS reachability is probed on add; operators can
-  override per-camera. Stream provisioning refuses plaintext for
-  `rtsps_required` cameras across every code path.
-
-**Auditability**
-
-- **End-to-end correlation ID.** Every inference call carries an
-  `X-Correlation-Id` joined from alert → middleware → adapter line, so an
-  operator investigating "why did this alert fire at 22:14?" never has to
-  guess.
-- **Model fingerprint drift detection.** sha256 of every loaded model is
-  polled every 60 seconds; drift surfaces as an
-  `adapter.fingerprint_mismatch` audit event, not silence.
-- **Append-only audit log.** Registration, refusal, drift, inference,
-  sovereignty violation — all recorded with reason codes you can grep.
-
-**License posture**
-
-- **AGPLv3 source-disclosure.** Forks that run OpenNVR as a network service
-  must share their modifications. This is the legal mechanism that backs the
-  sovereignty story.
-
-The full threat model, control mapping, and roadmap is in
-[`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md). The
-academic paper that informs the architecture is at
-[Zenodo DOI 10.5281/zenodo.17261761](https://doi.org/10.5281/zenodo.17261761).
-
-Found a security issue? **Please don't open a public issue.** Use GitHub's
-"Report a vulnerability" feature or follow the disclosure process in
-[`SECURITY.md`](SECURITY.md).
+**Please don't open a public issue for security bugs.** Use GitHub's "Report
+a vulnerability" feature on this repo, or follow the disclosure process in
+[`SECURITY.md`](SECURITY.md). Threat model and control mapping are in
+[`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md).
 
 ---
 
