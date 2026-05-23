@@ -1,6 +1,6 @@
 # Inference-listener example app
 
-The second first-party OpenNVR example app, paired with `intrusion-detection` to demonstrate the **B1 event bus**. Subscribes to KAI-C's NATS broadcast surface (`opennvr.inference.{adapter}.{camera_id}.completed`) and prints every event to stdout.
+The second first-party OpenNVR example app, paired with `intrusion-detection` to demonstrate the **NATS event bus**. Subscribes to KAI-C's NATS broadcast surface (`opennvr.inference.{adapter}.{camera_id}.completed`) and prints every event to stdout.
 
 This is the **subscriber-side template** for monitoring apps that prefer "receive results that someone else drove" over "drive inference myself." When one inference fans out to N consumers, the adapter's GPU does the work once instead of N times.
 

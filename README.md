@@ -4,6 +4,7 @@
 
 ### Self-hosted, AI-powered video surveillance — secure by default, sovereign by design, yours to extend.
 
+[![CI](https://github.com/open-nvr/open-nvr/actions/workflows/ci.yml/badge.svg)](https://github.com/open-nvr/open-nvr/actions/workflows/ci.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org)
 [![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
@@ -278,7 +279,9 @@ in the [ai-adapter docs](https://github.com/open-nvr/ai-adapter#-write-your-own-
 
 ## 🎬 Examples
 
-Every example is a copy-as-template starting point — minimal, readable, opinionated.
+Every example is a copy-as-template starting point — minimal, readable,
+opinionated. **See the [gallery landing page](examples/README.md)** for the
+full catalogue with screenshots, difficulty ratings, and run instructions.
 
 | Example | What you'll build | Difficulty |
 |---|---|---|
@@ -345,6 +348,7 @@ a vulnerability" feature on this repo, or follow the disclosure process in
 - [Local Setup](docs/LOCAL_SETUP.md) — bare-metal developer setup
 - [Security Architecture](docs/SECURITY_ARCHITECTURE.md) — threat model, controls, roadmap
 - [AI Adapter Contract](docs/AI_ADAPTER_CONTRACT.md) — the wire spec for adapter authors
+- [Changelog](CHANGELOG.md) — what's new, version by version
 - [Contributing](CONTRIBUTING.md) — PR flow and coding standards
 
 ---

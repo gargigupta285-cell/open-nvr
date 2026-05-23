@@ -1,0 +1,128 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# CI for OpenNVR. Runs on every push to main / arch-rev and on every PR.
+#
+# What this catches:
+#   - server pytest regressions
+#   - kai-c pytest regressions (incl. the async-fixture infra that
+#     previously emitted 9 ERRORs before pytest-asyncio was wired up)
+#   - example pytest regressions across all six shipped examples
+#   - React frontend build failures
+#
+# What this does NOT do (yet):
+#   - End-to-end docker-compose smoke (separate slice — see internal
+#     SMOKE_TEST checklist)
+#   - Lint / ruff (not yet wired into the project's dev workflow)
+#   - Multi-Python matrix (project requires >=3.11; testing one stable
+#     version is enough until we get into 3.12-specific issues)
+
+name: ci
+
+on:
+  push:
+    branches: [main, arch-rev]
+  pull_request:
+
+# A new PR commit cancels the old run; main / arch-rev runs each get
+# their own concurrency slot so a follow-up push doesn't cancel an
+# integration build mid-flight.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Backend server ───────────────────────────────────────────────
+  # server/ uses [dependency-groups] dev = [...] for test deps which
+  # uv installs automatically on plain `uv sync`. uv.lock is committed
+  # so --frozen is safe and reproducible.
+  server:
+    name: server (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: "server/uv.lock"
+      - name: Sync dependencies
+        working-directory: server
+        run: uv sync --frozen
+      - name: Run pytest
+        working-directory: server
+        run: uv run pytest tests/ -q
+
+  # ── KAI-C middleware ─────────────────────────────────────────────
+  # kai-c/ uses [dependency-groups] for dev deps (pytest + pytest-
+  # asyncio); pyproject sets testpaths = ["test"] (singular) so a
+  # bare `pytest` finds them. Sync without --frozen for now — the
+  # committed uv.lock pre-dates the pytest-asyncio addition; re-lock
+  # locally (`uv lock` from kai-c/) and commit, then add --frozen.
+  kai-c:
+    name: kai-c (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: "kai-c/uv.lock"
+      - name: Sync dependencies
+        working-directory: kai-c
+        run: uv sync
+      - name: Run pytest
+        working-directory: kai-c
+        run: uv run pytest -q
+
+  # ── Example apps ─────────────────────────────────────────────────
+  # Each example has its own pyproject.toml + test suite. Matrix over
+  # them so a broken example surfaces with the example name in the
+  # job title, not buried inside one combined job.
+  # Examples don't ship a uv.lock (they're copy-as-template), so
+  # `uv sync` resolves fresh against the pyproject. Dev extras live
+  # under [project.optional-dependencies] dev, hence `--extra dev`.
+  examples:
+    name: example/${{ matrix.example }} (pytest)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        example:
+          - alerts-subscriber
+          - inference-listener
+          - intrusion-detection
+          - license-plate-recognition
+          - loitering-detection
+          - smart-doorbell
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        working-directory: examples/${{ matrix.example }}
+        run: uv sync --extra dev
+      - name: Run pytest
+        working-directory: examples/${{ matrix.example }}
+        run: uv run pytest -q
+
+  # ── React frontend build ─────────────────────────────────────────
+  frontend:
+    name: frontend (build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: app/package-lock.json
+      - name: Install dependencies
+        working-directory: app
+        run: npm ci
+      - name: Build
+        working-directory: app
+        run: npm run build

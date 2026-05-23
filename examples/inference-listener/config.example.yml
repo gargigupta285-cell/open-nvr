@@ -26,7 +26,7 @@ nats_token: null
 # ── Subscription ───────────────────────────────────────────────────
 #
 # NATS subject pattern this listener subscribes to. Wildcards
-# follow the §B1 contract:
+# follow the the NATS event bus contract:
 #
 #   "opennvr.inference.>"               → every inference event
 #   "opennvr.inference.yolov8.>"        → YOLOv8 results only

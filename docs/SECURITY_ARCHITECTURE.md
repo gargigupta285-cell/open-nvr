@@ -49,8 +49,8 @@ in the issue tracker.
 | Concern | OpenNVR enforcement | Code path |
 |---|---|---|
 | RTSPS / SRTP support | Camera-URL schema accepts both `rtsp://` and `rtsps://`; MediaMTX config wires `rtspsAddress` and `srtpAddress`. | `server/schemas.py`; `server/services/mediamtx_admin_service.py`. |
-| Preferring encrypted transport per camera | **V-003 (M1c + M1c-followup + M1c-followup-selfrev).** Each camera carries a `transport_security` policy (`rtsps_required` / `rtsps_preferred` / `plaintext_allowed`) on its `CameraConfig` row. On camera-create the backend runs an async TLS-handshake probe against the camera's RTSPS port and stores the outcome alongside the policy. A `POST /api/v1/cameras/{id}/probe-transport` endpoint re-runs the probe on demand (accepts `?port=<n>` for non-default RTSPS ports). `PUT /api/v1/cameras/{id}/transport-security` is the explicit operator-override endpoint; it sets the `transport_security_operator_set` flag so subsequent re-probes preserve the operator's choice unless `?reset_policy=true`. The decision rule for fresh cameras: probe SUPPORTED → `rtsps_preferred`; probe NOT_SUPPORTED → `plaintext_allowed` with audit log; probe INCONCLUSIVE → `rtsps_preferred` (don't make a security regression on a transient failure). **Runtime enforcement: `enforce_transport_policy` is invoked at both MediaMTX-touching choke points (`provision_path` for path-create / replace, and `patch_path` for source-mutating PATCHes), so all five entry paths into stream provisioning are covered — `push_rtsp_stream`, the startup auto-provisioner (`MediaMtxStartupService._provision_camera_with_retry`), the config-driven re-provisioner (`CameraConfigService.provision`), the admin debug endpoint `POST /admin/streams/push/{id}`, AND the admin patch endpoint `PATCH /admin/paths/{id}` (which can change `source` and was a 5th-bypass-class issue caught in self-review v2). The gate runs BEFORE any MediaMTX HTTP. Unknown policy values (typos, future enum drift, hand-edited DB rows) fail closed — `enforce_transport_policy` refuses anything not in the documented enum. Refusals: routes surface HTTP 409 with a remediation hint; the startup loop marks the camera `status=policy_blocked`, increments a dedicated `policy_blocked` counter in the startup summary, and aborts retries with a `mediamtx.startup.camera_policy_blocked` audit event. The four refusal entry points each emit their own audit event (`camera.transport_policy_refused`, `camera_config.transport_policy_refused`, `mediamtx.startup.camera_policy_blocked`, plus the admin endpoint's 409 trace). `rtsps_preferred` over a plaintext URL logs an informational warning. `plaintext_allowed` and the pre-probe `None` state skip the check.** | `server/services/transport_probe_service.py` (`enforce_transport_policy`, `TransportPolicyViolation`, `url_is_tls`); `server/services/mediamtx_admin_service.py:provision_path` (gate location); `server/services/mediamtx_startup_service.py:_provision_camera_with_retry`; `server/services/camera_config_service.py:provision`; `server/routers/mediamtx_admin.py:push_rtsp_stream`; `server/services/camera_service.py:create_camera`; `server/routers/cameras.py:probe_camera_transport`, `set_camera_transport_security`, `provision_camera_mediamtx`; `server/models.py:CameraConfig.transport_security{,_operator_set,_probe_result,_probed_at}`; migration `b4e2a9c7f1d0_add_camera_transport_security.py`. |
-| Eliminating plaintext outbound to viewers | **V-019 (M1b + M1b-fixup).** All three operator-facing transports terminate TLS at MediaMTX itself: `rtspEncryption: "strict"` refuses plaintext RTSP clients on the listener (RFC 7826), `hlsEncryption: yes` makes HLS-over-HTTPS the default for the .m3u8 + segments, and `webrtcEncryption: yes` puts the WHIP/WHEP signaling channel (which carries the `?jwt=` token from `authJWTInHTTPQuery: true`) over HTTPS. WebRTC media remains DTLS-SRTP at the wire. `rtmp: no` and `srt: no` are explicit. The hardened RTSPS listener is exposed at `:8322` (loopback-mapped on the host); the backend emits `urls.rtsps` in `/api/v1/streams/.../tokens` so clients have an unambiguous TLS endpoint. The dev template (`mediamtx.local.yml`) remains permissive but carries a "DO NOT USE IN PRODUCTION" header and requires `MEDIAMTX_ALLOW_PLAINTEXT_OUTPUTS=true` on the OpenNVR side so the deviation is audit-logged and visible at `/system/posture`. **Operator dependency:** TLS requires `server.crt` + `server.key` files in MediaMTX's working directory; `scripts/generate-mediamtx-certs.sh` (POSIX) and `scripts/generate-mediamtx-certs.ps1` (Windows) generate a 10-year self-signed pair with SAN `DNS:localhost,DNS:mediamtx,IP:127.0.0.1`. **Known residual:** the JWT-in-URL pattern (`authJWTInHTTPQuery: true`) is now over TLS but tokens still land in browser history / proxy access logs; switching to a header-based JWT is tracked separately under V-007. | `mediamtx.docker.yml`, `mediamtx.yml`, `mediamtx.local.yml`, `docker-compose.yml`, `docker-compose.linux.yml`, `scripts/generate-mediamtx-certs.{sh,ps1}`; `server/core/config.py:mediamtx_rtsps_url`, `mediamtx_allow_plaintext_outputs`; `server/routers/streams.py:tokens` emits `urls.rtsps`; `server/core/policy.py:current_posture`. |
+| Preferring encrypted transport per camera | **V-003.** Each camera carries a `transport_security` policy (`rtsps_required` / `rtsps_preferred` / `plaintext_allowed`) on its `CameraConfig` row. On camera-create the backend runs an async TLS-handshake probe against the camera's RTSPS port and stores the outcome alongside the policy. A `POST /api/v1/cameras/{id}/probe-transport` endpoint re-runs the probe on demand (accepts `?port=<n>` for non-default RTSPS ports). `PUT /api/v1/cameras/{id}/transport-security` is the explicit operator-override endpoint; it sets the `transport_security_operator_set` flag so subsequent re-probes preserve the operator's choice unless `?reset_policy=true`. The decision rule for fresh cameras: probe SUPPORTED → `rtsps_preferred`; probe NOT_SUPPORTED → `plaintext_allowed` with audit log; probe INCONCLUSIVE → `rtsps_preferred` (don't make a security regression on a transient failure). **Runtime enforcement: `enforce_transport_policy` is invoked at both MediaMTX-touching choke points (`provision_path` for path-create / replace, and `patch_path` for source-mutating PATCHes), so all five entry paths into stream provisioning are covered — `push_rtsp_stream`, the startup auto-provisioner (`MediaMtxStartupService._provision_camera_with_retry`), the config-driven re-provisioner (`CameraConfigService.provision`), the admin debug endpoint `POST /admin/streams/push/{id}`, AND the admin patch endpoint `PATCH /admin/paths/{id}` (which can change `source` and was a 5th-bypass-class issue caught in self-review v2). The gate runs BEFORE any MediaMTX HTTP. Unknown policy values (typos, future enum drift, hand-edited DB rows) fail closed — `enforce_transport_policy` refuses anything not in the documented enum. Refusals: routes surface HTTP 409 with a remediation hint; the startup loop marks the camera `status=policy_blocked`, increments a dedicated `policy_blocked` counter in the startup summary, and aborts retries with a `mediamtx.startup.camera_policy_blocked` audit event. The four refusal entry points each emit their own audit event (`camera.transport_policy_refused`, `camera_config.transport_policy_refused`, `mediamtx.startup.camera_policy_blocked`, plus the admin endpoint's 409 trace). `rtsps_preferred` over a plaintext URL logs an informational warning. `plaintext_allowed` and the pre-probe `None` state skip the check.** | `server/services/transport_probe_service.py` (`enforce_transport_policy`, `TransportPolicyViolation`, `url_is_tls`); `server/services/mediamtx_admin_service.py:provision_path` (gate location); `server/services/mediamtx_startup_service.py:_provision_camera_with_retry`; `server/services/camera_config_service.py:provision`; `server/routers/mediamtx_admin.py:push_rtsp_stream`; `server/services/camera_service.py:create_camera`; `server/routers/cameras.py:probe_camera_transport`, `set_camera_transport_security`, `provision_camera_mediamtx`; `server/models.py:CameraConfig.transport_security{,_operator_set,_probe_result,_probed_at}`; migration `b4e2a9c7f1d0_add_camera_transport_security.py`. |
+| Eliminating plaintext outbound to viewers | **V-019.** All three operator-facing transports terminate TLS at MediaMTX itself: `rtspEncryption: "strict"` refuses plaintext RTSP clients on the listener (RFC 7826), `hlsEncryption: yes` makes HLS-over-HTTPS the default for the .m3u8 + segments, and `webrtcEncryption: yes` puts the WHIP/WHEP signaling channel (which carries the `?jwt=` token from `authJWTInHTTPQuery: true`) over HTTPS. WebRTC media remains DTLS-SRTP at the wire. `rtmp: no` and `srt: no` are explicit. The hardened RTSPS listener is exposed at `:8322` (loopback-mapped on the host); the backend emits `urls.rtsps` in `/api/v1/streams/.../tokens` so clients have an unambiguous TLS endpoint. The dev template (`mediamtx.local.yml`) remains permissive but carries a "DO NOT USE IN PRODUCTION" header and requires `MEDIAMTX_ALLOW_PLAINTEXT_OUTPUTS=true` on the OpenNVR side so the deviation is audit-logged and visible at `/system/posture`. **Operator dependency:** TLS requires `server.crt` + `server.key` files in MediaMTX's working directory; `scripts/generate-mediamtx-certs.sh` (POSIX) and `scripts/generate-mediamtx-certs.ps1` (Windows) generate a 10-year self-signed pair with SAN `DNS:localhost,DNS:mediamtx,IP:127.0.0.1`. **Known residual:** the JWT-in-URL pattern (`authJWTInHTTPQuery: true`) is now over TLS but tokens still land in browser history / proxy access logs; switching to a header-based JWT is tracked separately under V-007. | `mediamtx.docker.yml`, `mediamtx.yml`, `mediamtx.local.yml`, `docker-compose.yml`, `docker-compose.linux.yml`, `scripts/generate-mediamtx-certs.{sh,ps1}`; `server/core/config.py:mediamtx_rtsps_url`, `mediamtx_allow_plaintext_outputs`; `server/routers/streams.py:tokens` emits `urls.rtsps`; `server/core/policy.py:current_posture`. |
 | Telnet / UPnP detection on cameras | **Gap — V-014/V-021.** Planned: ONVIF probe records active services and flags Telnet/UPnP. | `server/services/onvif_service.py`. |
 
 ### 2.3 Fragmented interoperability (paper §3.3)
@@ -68,8 +68,8 @@ in the issue tracker.
 | Storage stays customer-controlled | Recordings written to `RECORDINGS_BASE_PATH`; the base is resolved at access time and every file operation is symlink-resolved and containment-checked. The recording-upload sink additionally **refuses any DB-stored `file_path` that is absolute and does not name the recordings subtree**, so a DB-poisoned record pointing at `/etc/passwd` cannot be rewritten into a relative-under-base lookup. **Residual risk:** there is a TOCTOU window between the path check and the upload worker's `open()`; closing it requires `O_NOFOLLOW` at the open site and is tracked as an M2 follow-up. | `server/services/storage_service.py:resolve_under_root`, `safe_recording_path`; absolute-path refusal in `server/routers/recordings.py:queue_cloud_upload_for_day`. |
 | Credential vault Fernet-at-rest | Camera passwords and cloud-provider tokens are encrypted at rest with the Fernet key the operator generated locally. | `server/services/credential_vault_service.py`. |
 | KAI-C never reveals adapter URLs to the UI | The NVR talks to a single internal endpoint (`KAI_C_URL`); adapter routing happens inside KAI-C. | `server/services/kai_c_service.py`; `kai-c/`. |
-| Cloud connectors are not opt-in / off by default | **V-009 (M1a).** `settings.deployment_mode: Literal["offline","hybrid","cloud"]` defaults to `offline`. `core.policy.require_outbound_allowed` returns 403 on every cloud-touching route in this mode (`/cloud-inference/infer`, `/cloud-inference/jobs`, `/cloud-streaming/targets`, `/cloud-streaming/targets/{id}/start`, `/recordings/cloud-upload/day`). Defense-in-depth at the service call-sites (`cloud_inference_service._call_kai_c`, `cloud_recording_service.upload_to_nvr`) catches background-task callers that survive a mid-flight policy change. Boot posture audit-logged via `policy.boot_posture` event. Surfaced via `GET /api/v1/system/posture`. | `server/core/policy.py`, `server/routers/cloud_inference.py`, `server/routers/cloud_streaming.py`, `server/routers/recordings.py`, `server/services/cloud_inference_service.py`, `server/services/cloud_recording_service.py`, `server/routers/system.py`. |
-| AI sovereignty: refuse to leak frames to vendor inference | **V-022 (M1a).** `settings.ai_sovereignty: Literal["local_only","federated","cloud_allowed"]` defaults to `local_only`. `core.policy.require_ai_sovereignty_allowed` stacks with the outbound gate on the cloud-inference router. KAI-C imports its own `AI_SOVEREIGNTY` env var and refuses to start if any registered adapter URL is non-loopback in `local_only` mode; `POST /infer/cloud` (HuggingFace proxy) returns 403 outright. Same posture endpoint and audit entry. | `server/core/policy.py`, `kai-c/main.py:_validate_adapters_match_sovereignty`. |
+| Cloud connectors are not opt-in / off by default | **V-009.** `settings.deployment_mode: Literal["offline","hybrid","cloud"]` defaults to `offline`. `core.policy.require_outbound_allowed` returns 403 on every cloud-touching route in this mode (`/cloud-inference/infer`, `/cloud-inference/jobs`, `/cloud-streaming/targets`, `/cloud-streaming/targets/{id}/start`, `/recordings/cloud-upload/day`). Defense-in-depth at the service call-sites (`cloud_inference_service._call_kai_c`, `cloud_recording_service.upload_to_nvr`) catches background-task callers that survive a mid-flight policy change. Boot posture audit-logged via `policy.boot_posture` event. Surfaced via `GET /api/v1/system/posture`. | `server/core/policy.py`, `server/routers/cloud_inference.py`, `server/routers/cloud_streaming.py`, `server/routers/recordings.py`, `server/services/cloud_inference_service.py`, `server/services/cloud_recording_service.py`, `server/routers/system.py`. |
+| AI sovereignty: refuse to leak frames to vendor inference | **V-022.** `settings.ai_sovereignty: Literal["local_only","federated","cloud_allowed"]` defaults to `local_only`. `core.policy.require_ai_sovereignty_allowed` stacks with the outbound gate on the cloud-inference router. KAI-C imports its own `AI_SOVEREIGNTY` env var and refuses to start if any registered adapter URL is non-loopback in `local_only` mode; `POST /infer/cloud` (HuggingFace proxy) returns 403 outright. Same posture endpoint and audit entry. | `server/core/policy.py`, `kai-c/main.py:_validate_adapters_match_sovereignty`. |
 | Customer-managed encryption keys (KMS / HSM / TPM) | **Gap — V-004.** Today there is a single Fernet key in env. Planned: `KeyProvider` abstraction with `EnvKeyProvider`, `FileKeyProvider`, `VaultProvider`, `KMSProvider`, `TPMProvider`; per-camera DEK for recording-at-rest encryption; `key_id` column on encrypted fields for rotation. | `server/core/keys/` (planned). |
 
 ### 2.5 Supply chain and firmware transparency (paper §3.5)
@@ -116,7 +116,7 @@ AI, and is the only edge any operator or downstream system touches.
 
 | Paper requirement | OpenNVR component | Status |
 |---|---|---|
-| TLS/SRTP re-streaming on the operator side | MediaMTX configured with `rtspEncryption: "strict"`, `hlsEncryption: yes`, `webrtcEncryption: yes`. V-019 closed in M1b + M1b-fixup; see §2.2. WebRTC media remains DTLS-SRTP at the wire (always). | Implemented. |
+| TLS/SRTP re-streaming on the operator side | MediaMTX configured with `rtspEncryption: "strict"`, `hlsEncryption: yes`, `webrtcEncryption: yes`. V-019 closed; see §2.2. WebRTC media remains DTLS-SRTP at the wire (always). | Implemented. |
 | Customer-controlled, software-defined gateway | FastAPI server + MediaMTX, both running under `systemd` on Linux LTS. | Implemented. |
 | RBAC | `Role`, `Permission`, `PermissionChecker`. | Implemented. |
 | Certificate-based authentication | **V-018.** Internal mTLS between NVR ↔ kai-c ↔ ai-adapter; optional client certs for high-end cameras; in-house CA bootstrapped at install. | Planned. |
@@ -196,24 +196,27 @@ operator can apply compensating controls:
 
 ## 7. Roadmap (paper §9 future work + this review)
 
-Tracked in `SECURITY_FINDINGS.md`. Milestone ordering:
+The vulnerability IDs (`V-001` … `V-022`) below cross-reference the systematic
+review in the [Zenodo paper](https://doi.org/10.5281/zenodo.17261761).
 
-* **M0 — done in this PR.** V-001 (no default password + token-gated
+### Shipped
+
+* **Account hardening.** V-001 (no default password + token-gated
   first-time-setup), V-002 (placeholder-secret rejection across runtime
   validator and Makefile linter, ≥6-char fragment matching to avoid
   random-token false positives), V-005 (recording-path traversal guard +
   absolute-path refusal at the upload sink), V-015 (MediaMTX loopback
   enforcement covering wildcard `0.0.0.0` and scheme-less URLs, with
   DNS-resolution timeout), `make secrets`. **Breaking change:** the
-  minimum length for symmetric secrets has been raised from 12 to 32
-  characters; existing operators must re-run `make secrets` or extend
-  their secrets to ≥32 chars before upgrading.
-* **M1a — done.** V-009 (`deployment_mode`) and V-022 (`ai_sovereignty`)
-  shipped as paired settings + paired router/service gates + KAI-C
-  startup validator + `/system/posture` endpoint + boot audit entry.
-  See entries in §2.4 for code paths.
-* **M1b — done (with M1b-fixup).** V-019: MediaMTX hardened YAML
-  templates default to `rtspEncryption: "strict"` (TLS-required RTSPS),
+  minimum length for symmetric secrets is 32 characters; existing
+  operators must re-run `make secrets` or extend their secrets to
+  ≥32 chars before upgrading from a pre-release.
+* **Network posture.** V-009 (`deployment_mode`) and V-022
+  (`ai_sovereignty`) shipped as paired settings + paired router/service
+  gates + KAI-C startup validator + `/system/posture` endpoint +
+  boot audit entry. See entries in §2.4 for code paths.
+* **Operator transport TLS.** V-019: MediaMTX hardened YAML templates
+  default to `rtspEncryption: "strict"` (TLS-required RTSPS),
   `hlsEncryption: yes`, `webrtcEncryption: yes`, `rtmp: no`, `srt: no`.
   The backend emits a TLS-explicit `urls.rtsps` field and the
   docker-compose port map exposes the RTSPS listener at
@@ -222,10 +225,10 @@ Tracked in `SECURITY_FINDINGS.md`. Milestone ordering:
   `mediamtx_allow_plaintext_outputs` records the operator's deviation
   when the permissive dev template (`mediamtx.local.yml`) is in use.
   Known residual: JWT-in-URL (tracked under V-007 follow-up).
-* **M1c — done (with M1c-followup + M1c-followup-selfrev).** V-003:
-  per-camera `transport_security` policy (`rtsps_required` /
-  `rtsps_preferred` / `plaintext_allowed`) on `CameraConfig`, populated
-  by an async TLS-handshake probe at camera-create time. `POST
+* **Per-camera transport policy.** V-003: per-camera
+  `transport_security` policy (`rtsps_required` / `rtsps_preferred` /
+  `plaintext_allowed`) on `CameraConfig`, populated by an async
+  TLS-handshake probe at camera-create time. `POST
   /api/v1/cameras/{id}/probe-transport` re-runs the probe; operator
   overrides are preserved unless `?reset_policy=true`. **Runtime
   enforcement** lives at `provision_path` (the MediaMTX choke point)
@@ -233,19 +236,22 @@ Tracked in `SECURITY_FINDINGS.md`. Milestone ordering:
   startup auto-provisioner, the config-driven re-provisioner, and the
   admin debug push endpoint. Refusals return HTTP 409; the startup
   loop marks the camera `status=policy_blocked` and aborts retries.
-* **M2 — network isolation enforcement.** V-010 (`opennvr-netd`), V-016
+
+### Planned
+
+* **Network isolation enforcement.** V-010 (`opennvr-netd`), V-016
   (dual-homed validator), V-017 (DNS blackhole template), V-020
   (Wireguard remote-access helper).
-* **M3 — customer sovereignty for keys and audit.** V-004 (KeyProvider
+* **Customer sovereignty for keys and audit.** V-004 (KeyProvider
   + TPM tier + recording-at-rest), V-012 (hash-chained audit), V-021
   (compliance posture API + docs).
-* **M4 — middleware hardening defense in depth.** V-006 (security
+* **Middleware hardening defense in depth.** V-006 (security
   headers), V-007 (cookie JWT), V-008 (CSRF), V-013 (rate limit), V-018
   (internal mTLS).
-* **M5 — supply chain transparency.** V-011 (SBOM + cosign), V-014
+* **Supply chain transparency.** V-011 (SBOM + cosign), V-014
   (firmware_health + CVE cross-reference).
 
-Each milestone is independently shippable and produces user-visible audit
+Each item is independently shippable and produces user-visible audit
 evidence aligned with the compliance frame in §5.
 
 ## 8. Conventions for new code

@@ -1,6 +1,6 @@
 # Alerts-subscriber example app
 
-The fourth first-party OpenNVR example. Subscribes to OpenNVR's alert fan-out NATS surface (§B1-alerts) and prints / forwards each fired alert.
+The fourth first-party OpenNVR example. Subscribes to OpenNVR's alert fan-out NATS surface and prints / forwards each fired alert.
 
 This is the **alert-side** companion to `inference-listener`:
 

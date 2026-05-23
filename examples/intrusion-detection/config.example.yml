@@ -32,7 +32,7 @@ kaic_api_key: null
 #       latency floor is the poll interval (~1s default).
 #
 #   "ws"  — one persistent WebSocket per camera to KAI-C's
-#       /api/v1/infer/{adapter}/stream proxy (A2.4b). Drops
+#       /api/v1/infer/{adapter}/stream proxy ). Drops
 #       per-frame latency from ~poll_interval to ~adapter inference
 #       time (~30-50ms for YOLOv8 on CPU). Costs one open connection
 #       per camera; use when you actually need sub-second alert
@@ -97,7 +97,7 @@ webhook_url: null
 #
 # Lets the OpenNVR operator-UI alerts inbox, a SIEM bridge, a Slack
 # bot, or anything else subscribe to alerts off the same NATS bus that
-# already carries inference events (§B1) — without each consumer
+# already carries inference events (NATS event bus) — without each consumer
 # needing its own webhook. Use ``opennvr.alerts.>`` to subscribe to
 # everything.
 #
@@ -119,7 +119,7 @@ nats_alerts_token: null
 #                    file:///abs/path/test.jpg    (testing / demo)
 #                    http://192.168.1.50/jpg/image.jpg  (cheap IP cams)
 #                    https://camera.example.com/snapshot.jpg  (TLS-fronted)
-#                    rtsp://…    — deferred to A2.5b
+#                    rtsp://…    — a planned follow-up
 #   frame_width / frame_height  — pixel dimensions of the camera's
 #                    output (needed to convert §5.1 normalized [0, 1]
 #                    bboxes back to pixel coords for the zone polygon).

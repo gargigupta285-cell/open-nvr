@@ -12,7 +12,7 @@ Three delivery channels in v1:
 * **nats** — optional. Publishes the alert's §11.5 JSON onto a NATS
   subject derived from the alert source + camera. Lets the operator
   UI inbox, SIEM bridges, or any other subscriber fan out off the same
-  bus that already carries KAI-C inference events (§B1).
+  bus that already carries KAI-C inference events (NATS event bus).
 
 Future channels (OpenNVR alerts-API native endpoint, SMS/email via
 OpenNVR's notification settings) plug in alongside via the AlertChannel
@@ -63,7 +63,7 @@ logger = logging.getLogger(__name__)
 
 
 # Default subject prefix. Operators can override via config; we sit on
-# ``opennvr.alerts.*`` to mirror ``opennvr.inference.*`` from §B1.
+# ``opennvr.alerts.*`` to mirror ``opennvr.inference.*`` from the NATS event bus.
 DEFAULT_ALERT_SUBJECT_PREFIX = "opennvr.alerts"
 
 # Connect + publish budgets. NATS is local; these are tight on purpose
@@ -245,7 +245,7 @@ class NatsAlertChannel:
     subscribers can fan out off the same publish (operator UI inbox,
     SIEM bridge, Slack bot, audit forwarder) without the publishing
     app knowing they exist. Same pattern KAI-C uses for inference
-    events under §B1.
+    events under the NATS event bus.
 
     Implementation notes
     --------------------
@@ -450,7 +450,7 @@ class AlertDispatcher:
 
     ``fire()`` returns a per-channel report so the caller can audit
     delivery outcomes; the detector loop ignores this in v1 but the
-    OpenNVR alerts-API integration (A2.5b) will record it.
+    OpenNVR alerts-API integration (planned follow-up) will record it.
     """
 
     def __init__(self, channels: list[AlertChannel]) -> None:

@@ -1,7 +1,7 @@
 [project]
 name = "opennvr-example-inference-listener"
 version = "1.0.0"
-description = "OpenNVR inference-listener example app (B1 — NATS subscriber template)"
+description = "OpenNVR inference-listener example app (NATS subscriber template)"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0" }
 

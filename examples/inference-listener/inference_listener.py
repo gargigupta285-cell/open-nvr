@@ -4,7 +4,7 @@
 """
 Inference-listener example app.
 
-The canonical subscriber-side template for KAI-C's B1 event bus.
+The canonical subscriber-side template for KAI-C's NATS event bus.
 Connects to NATS, subscribes to a configurable
 ``opennvr.inference.*`` subject pattern, and prints each
 ``InferenceCompletedEvent`` to stdout. Every alert in the published

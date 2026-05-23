@@ -4,7 +4,7 @@ The second first-party OpenNVR monitoring app, paired with `intrusion-detection`
 
 | Pattern | This app | `intrusion-detection` |
 |---|---|---|
-| **How it gets results** | Subscribes to KAI-C's NATS broadcast (§B1) | Drives KAI-C directly (HTTP poll or WS stream) |
+| **How it gets results** | Subscribes to KAI-C's NATS broadcast | Drives KAI-C directly (HTTP poll or WS stream) |
 | **GPU cost on top of other apps** | Zero — rides existing inference | Pays per-app inference cost |
 | **Detects** | Watched-label entity loitering in zone > threshold | Watched-label entity present in zone during restricted hours |
 | **Predicate** | Dwell time (state machine) | Point-in-polygon × time window |
@@ -41,7 +41,7 @@ Each alert carries:
 - `evidence.model_fingerprint` — §11.3 drift-detection verification
 - `evidence.dwell_seconds` / `threshold_seconds` — how long the entity was there
 
-**Alert fan-out via NATS** (§B1-alerts): set `nats_alerts_url` in `config.yml` to publish each alert as JSON onto `opennvr.alerts.app.loitering-detection.{camera_id}`. Downstream consumers — the operator UI inbox, SIEM bridges, Slack bots — subscribe to wildcards like `opennvr.alerts.>` and fan out from one publish. See `examples/alerts-subscriber/` for the canonical consumer template and the [§11.5.1 contract entry](../../docs/AI_ADAPTER_CONTRACT.md) for the full subject scheme.
+**Alert fan-out via NATS**: set `nats_alerts_url` in `config.yml` to publish each alert as JSON onto `opennvr.alerts.app.loitering-detection.{camera_id}`. Downstream consumers — the operator UI inbox, SIEM bridges, Slack bots — subscribe to wildcards like `opennvr.alerts.>` and fan out from one publish. See `examples/alerts-subscriber/` for the canonical consumer template and the [§11.5.1 contract entry](../../docs/AI_ADAPTER_CONTRACT.md) for the full subject scheme.
 
 ## State machine
 

@@ -1,7 +1,7 @@
 [project]
 name = "opennvr-example-intrusion-detection"
 version = "1.0.0"
-description = "OpenNVR intrusion-detection example app (A2.5)"
+description = "OpenNVR intrusion-detection example app"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0" }
 
