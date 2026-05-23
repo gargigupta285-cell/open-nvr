@@ -7,7 +7,7 @@
 #   - server pytest regressions
 #   - kai-c pytest regressions (incl. the async-fixture infra that
 #     previously emitted 9 ERRORs before pytest-asyncio was wired up)
-#   - example pytest regressions across all four shipped examples
+#   - example pytest regressions across all six shipped examples
 #   - React frontend build failures
 #
 # What this does NOT do (yet):
@@ -96,6 +96,7 @@ jobs:
           - intrusion-detection
           - license-plate-recognition
           - loitering-detection
+          - smart-doorbell
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6

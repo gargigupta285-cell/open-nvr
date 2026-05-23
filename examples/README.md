@@ -4,24 +4,27 @@ Every example here is a **copy-as-template** starting point — minimal, readabl
 and opinionated. Pick one that's close to what you want to build, copy the
 folder, and edit the predicate.
 
-The five shipped examples cover two orthogonal axes of the OpenNVR pipeline:
+The six shipped examples cover two orthogonal axes of the OpenNVR pipeline:
 *driving* inference vs *subscribing* to it, and *inference events* vs *alerts*.
 
 ```
                       Drives inference?
                       ──────────────────
-                       Yes              No
-                  ┌───────────────┬──────────────────────┐
-  Subscribes to   │               │ inference-listener   │
-  inference       │               │ loitering-detection  │
-  events          │               │                      │
-                  ├───────────────┼──────────────────────┤
-  Subscribes to   │ intrusion-    │ alerts-subscriber    │
-  alert envelopes │ detection¹    │                      │
-                  └───────────────┴──────────────────────┘
+                       Yes                            No
+                  ┌─────────────────────────┬──────────────────────┐
+  Subscribes to   │                         │ inference-listener   │
+  inference       │                         │ loitering-detection  │
+  events          │                         │                      │
+                  ├─────────────────────────┼──────────────────────┤
+  Subscribes to   │ intrusion-detection¹    │ alerts-subscriber    │
+  alert envelopes │ license-plate-          │                      │
+                  │   recognition¹          │                      │
+                  │ smart-doorbell¹         │                      │
+                  └─────────────────────────┴──────────────────────┘
 
-  ¹ intrusion-detection drives KAI-C directly AND emits its own alerts;
-    pick this one if you want to learn the full producer side first.
+  ¹ These three drive KAI-C directly AND emit their own alerts —
+    they're the full producer-side templates. Start here if you want
+    to learn the producer flow first.
 ```
 
 ---
@@ -134,7 +137,7 @@ routing and a Pillow-based cropping helper.
 | Adapters | YOLOv8 + fast-plate-ocr (Apache-2.0, ONNX, CPU-only, plate-specific) |
 | Difficulty | ⭐⭐ intermediate |
 | Best for learning | Chaining multiple adapters under one correlation ID |
-| Tests | 29 |
+| Tests | 34 |
 
 ```bash
 cd examples/license-plate-recognition && uv sync --extra dev
@@ -144,25 +147,43 @@ python license_plate_recognition.py --config config.yml
 
 ---
 
-## 🚧 Planned — coming in v0.1
+### [`smart-doorbell/`](smart-doorbell)
 
-These three are the next round of viral, demo-friendly examples. Each is
-designed to be the kind of thing that earns a homelab YouTube review or
-a `/r/homelab` thread. **Want to help build one?** Open a discussion and
-we'll match scope to interest.
-
-### `smart-doorbell/`
-
-**Know who's at the door — family, friend, or stranger.** InsightFace
-recognition (already shipped) + Telegram / ntfy / webhook delivery with a
-snapshot. One-shot REST enrollment, no desktop app required.
+**Know who's at the door — family, friend, or stranger.** Drives the
+InsightFace adapter via KAI-C; classifies each detected face into
+family / known / unknown and routes severity accordingly. Unknown-face
+alerts include a base64 JPEG snapshot in the envelope, so a short
+downstream relay (see `alerts-subscriber/`) can post the photo to
+Telegram / ntfy / Discord with the notification. **Pure REST
+enrollment** — `smart_doorbell.py enroll --image alice.jpg ...`, no
+shared volume, no desktop tool.
 
 | | |
 |---|---|
-| Pattern | Drives InsightFace adapter → routes alerts to messaging |
-| Adapters | InsightFace (face recognition) |
+| Pattern | Drives InsightFace → severity-routed alerts |
+| Adapters | InsightFace (face detection + recognition + embedding) |
 | Difficulty | ⭐⭐ intermediate |
-| Why it's interesting | Recognition + delivery in one tutorial; pure REST enrollment |
+| Best for learning | Per-person dedup, severity routing, REST enrollment flow |
+| Tests | 31 |
+
+```bash
+cd examples/smart-doorbell && uv sync --extra dev
+cp config.example.yml config.yml      # edit doorbell URL + tokens
+# Enroll family (REST, no GUI)
+python smart_doorbell.py enroll --config config.yml \
+  --person-id alice --name "Alice Smith" --image alice.jpg --category family
+# Run the daemon
+python smart_doorbell.py daemon --config config.yml
+```
+
+---
+
+## 🚧 Planned — coming in v0.1
+
+These two are the next round of viral, demo-friendly examples. Each is
+designed to be the kind of thing that earns a homelab YouTube review or
+a `/r/homelab` thread. **Want to help build one?** Open a discussion and
+we'll match scope to interest.
 
 ### `package-delivery/`
 
@@ -196,7 +217,7 @@ minutes.
 
 ## 💡 More on the roadmap
 
-Beyond the four planned examples, these are explicitly welcome contributions
+Beyond the two planned examples above, these are explicitly welcome contributions
 (see also the [adapter wishlist](https://github.com/open-nvr/ai-adapter#-adapters-wed-love-to-see)):
 
 | Category | Idea |
@@ -230,7 +251,7 @@ examples/<example-name>/
 ```
 
 `alerts.py` and the config-loading shape are deliberately consistent across
-all four shipped examples so you can copy one folder, rename `<example>.py`,
+all six shipped examples so you can copy one folder, rename `<example>.py`,
 and replace the predicate with your domain logic — everything else (alert
 routing, correlation IDs, NATS publishing, SIGINT handling) is the template.
 
@@ -243,7 +264,7 @@ The fastest path to a first-party example slot:
 1. Open a [discussion](https://github.com/open-nvr/open-nvr/discussions) with
    your idea, the camera setup you'll demo on, and the adapter(s) you'll
    chain.
-2. Fork, branch, and copy one of the four shipped examples as your starting
+2. Fork, branch, and copy one of the six shipped examples as your starting
    template.
 3. Replace the predicate (`zone.contains?`, the dwell-time state machine,
    etc.) with your domain logic.

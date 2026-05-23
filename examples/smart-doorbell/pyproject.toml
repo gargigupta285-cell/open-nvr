@@ -1,0 +1,34 @@
+[project]
+name = "opennvr-example-smart-doorbell"
+version = "1.0.0"
+description = "OpenNVR smart-doorbell example app — face recognition at the front door via the InsightFace adapter through KAI-C"
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0" }
+
+# Deliberately minimal — the example is meant as a clean
+# copy-as-template for community contributors. httpx for the
+# KAI-C + adapter calls, PyYAML for config, nats-py for the
+# optional alert fan-out.
+dependencies = [
+    "httpx>=0.27,<1.0",
+    "PyYAML>=6.0,<7.0",
+    "nats-py>=2.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"

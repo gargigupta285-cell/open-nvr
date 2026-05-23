@@ -18,9 +18,10 @@ principles: secure by default, sovereign by design, and pluggable by contract.
   YOLOv8 object detection, InsightFace recognition, Whisper ASR, and Piper TTS
   ship as reference adapters. Wire spec lives in
   [`docs/AI_ADAPTER_CONTRACT.md`](docs/AI_ADAPTER_CONTRACT.md).
-- **`opennvr-adapter-sdk` packaged for PyPI.** Apache-2.0 SDK that adapter authors
-  install to write a new detector in ~30 lines of code. Lives in the
-  `open-nvr/ai-adapter` repository; published on the first `sdk-v*` tag.
+- **`opennvr-adapter-sdk`.** Apache-2.0 SDK that adapter authors install to
+  write a new detector in ~30 lines of code. Lives in the
+  `open-nvr/ai-adapter` repository; PyPI publish wires off the first
+  `sdk-v*` tag — until then, install from source.
 - **NATS event bus.** Inference results and alerts publish to
   `opennvr.inference.*` and `opennvr.alerts.*` subjects. Build downstream
   applications with the copy-as-template subscriber pattern.
@@ -49,6 +50,14 @@ principles: secure by default, sovereign by design, and pluggable by contract.
 - `license-plate-recognition` — drives YOLOv8 + the fast-plate-ocr adapter
   via KAI-C in a two-stage chain, with allowlist / denylist watchlist
   routing and Pillow-based plate cropping.
+- `smart-doorbell` — drives the InsightFace adapter via KAI-C, classifies
+  visitors into family / known / unknown with severity routing, and embeds
+  a base64 JPEG snapshot of unknown faces directly in the alert envelope
+  so downstream relays (a ~15-line Telegram / ntfy / Discord bridge — see
+  `alerts-subscriber/` for the template) can post the photo with the
+  notification. Pure-REST enrollment flow — `python smart_doorbell.py
+  enroll --image alice.jpg ...` works from any machine that can reach the
+  adapter, no shared volume, no desktop GUI.
 
 Each example ships with a `config.example.yml`, a `README.md`, and a focused
 test suite designed to be read in five minutes.

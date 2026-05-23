@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import logging
 import signal
@@ -157,12 +158,13 @@ def load_config(path: str | Path) -> AppConfig:
 
 
 class KaicDetectorClient:
-    """HTTP client for the detector adapter (YOLOv8) via KAI-C.
+    """JSON+base64 HTTP client for the detector adapter (YOLOv8) via KAI-C.
 
-    Uses multipart/form-data with a ``frame`` file field — the wire
-    shape the SDK's body parser advertises in /capabilities
-    (``application/octet-stream`` is NOT a supported content type,
-    even though it would feel natural for raw frame bytes).
+    KAI-C's ``/api/v1/infer/{adapter_name}`` proxy only accepts
+    application/json (multipart proxying is a planned follow-up), so
+    the frame ships base64-encoded inside the JSON body. The SDK's
+    body parser unwraps ``frame_b64`` into the binary payload before
+    the adapter's service sees it.
     """
 
     def __init__(
@@ -179,13 +181,16 @@ class KaicDetectorClient:
     def detect(
         self, frame_jpeg: bytes, *, correlation_id: str | None = None
     ) -> dict[str, Any]:
-        headers = {"X-Internal-Api-Key": self._api_key}
+        headers = {
+            "X-Internal-Api-Key": self._api_key,
+            "Content-Type": "application/json",
+        }
         if correlation_id:
             headers[CORRELATION_ID_HEADER] = correlation_id
-        files = {"frame": ("frame.jpg", frame_jpeg, "image/jpeg")}
+        body = {"frame_b64": base64.b64encode(frame_jpeg).decode("ascii")}
         resp = httpx.post(
             self._url,
-            files=files,
+            json=body,
             headers=headers,
             timeout=self._timeout,
         )
@@ -194,7 +199,10 @@ class KaicDetectorClient:
 
 
 class KaicOcrClient:
-    """HTTP client for the OCR adapter (fast-plate-ocr) via KAI-C."""
+    """JSON+base64 HTTP client for the OCR adapter (fast-plate-ocr) via KAI-C.
+
+    See ``KaicDetectorClient`` for the reasoning — KAI-C is JSON-only.
+    """
 
     def __init__(
         self,
@@ -214,23 +222,21 @@ class KaicOcrClient:
         min_confidence: float | None = None,
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
-        # Multipart upload — the fast-plate-ocr adapter declares
-        # BodyShape.IMAGE, so KAI-C / SDK route picks the multipart
-        # path when it sees a 'frame' file part.
-        params_blob: dict[str, Any] = {}
-        if min_confidence is not None:
-            params_blob["min_confidence"] = min_confidence
-        files = {"frame": ("plate.jpg", plate_jpeg, "image/jpeg")}
-        data = {"params": json.dumps(params_blob)} if params_blob else None
-
-        headers = {"X-Internal-Api-Key": self._api_key}
+        headers = {
+            "X-Internal-Api-Key": self._api_key,
+            "Content-Type": "application/json",
+        }
         if correlation_id:
             headers[CORRELATION_ID_HEADER] = correlation_id
+        body: dict[str, Any] = {
+            "frame_b64": base64.b64encode(plate_jpeg).decode("ascii"),
+        }
+        if min_confidence is not None:
+            body["min_confidence"] = min_confidence
 
         resp = httpx.post(
             self._url,
-            files=files,
-            data=data,
+            json=body,
             headers=headers,
             timeout=self._timeout,
         )
