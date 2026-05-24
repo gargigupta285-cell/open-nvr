@@ -4,7 +4,7 @@ Every example here is a **copy-as-template** starting point — minimal, readabl
 and opinionated. Pick one that's close to what you want to build, copy the
 folder, and edit the predicate.
 
-The six shipped examples cover two orthogonal axes of the OpenNVR pipeline:
+The eight shipped examples cover two orthogonal axes of the OpenNVR pipeline:
 *driving* inference vs *subscribing* to it, and *inference events* vs *alerts*.
 
 ```
@@ -17,14 +17,19 @@ The six shipped examples cover two orthogonal axes of the OpenNVR pipeline:
   events          │                         │                      │
                   ├─────────────────────────┼──────────────────────┤
   Subscribes to   │ intrusion-detection¹    │ alerts-subscriber    │
-  alert envelopes │ license-plate-          │                      │
+  alert envelopes │ license-plate-          │ camera-agent²        │
                   │   recognition¹          │                      │
                   │ smart-doorbell¹         │                      │
+                  │ package-delivery¹       │                      │
                   └─────────────────────────┴──────────────────────┘
 
-  ¹ These three drive KAI-C directly AND emit their own alerts —
+  ¹ These four drive KAI-C directly AND emit their own alerts —
     they're the full producer-side templates. Start here if you want
     to learn the producer flow first.
+  ² camera-agent sits in the "subscribes to inference" row because
+    it's reactive — the user talks to it. It runs tools (which DO
+    drive KAI-C) on demand, but the example is shaped as a
+    conversation, not a polling daemon.
 ```
 
 ---
@@ -178,26 +183,69 @@ python smart_doorbell.py daemon --config config.yml
 
 ---
 
-## 🚧 Planned — coming in v0.1
-
-These two are the next round of viral, demo-friendly examples. Each is
-designed to be the kind of thing that earns a homelab YouTube review or
-a `/r/homelab` thread. **Want to help build one?** Open a discussion and
-we'll match scope to interest.
-
-### `package-delivery/`
+### [`package-delivery/`](package-delivery)
 
 **Alert me when a package arrives — and when it leaves.** YOLOv8 on a porch
-ROI with a state machine that distinguishes arrive → linger → disappear, so
-"package picked up by owner" and "package taken by stranger" are different
-events.
+ROI with a per-track state machine that distinguishes arrive → (linger) →
+disappear. The "package taken by a stranger" path fires with high severity
+when no person was seen near the porch at pickup time, so homelab users
+aren't woken every time they bring in their own boxes.
 
 | | |
 |---|---|
-| Pattern | Drives YOLOv8 → custom state machine → fires alerts |
+| Pattern | Drives YOLOv8 → IoU tracker → state machine → fires alerts |
 | Adapters | YOLOv8 |
 | Difficulty | ⭐⭐ intermediate |
-| Why it's interesting | Forks easily into other duration-based predicates |
+| Best for learning | Duration-based predicates, per-track state machines, ROI filtering |
+| Tests | 54 |
+
+```bash
+cd examples/package-delivery && uv sync --extra dev
+cp config.example.yml config.yml      # edit camera URLs + porch ROI
+python package_delivery.py --config config.yml
+```
+
+---
+
+### [`camera-agent/`](camera-agent) — preview
+
+**Ask your cameras.** A voice agent that listens for spoken questions
+in a browser tab, grounds its answers in live camera feeds via tool
+calling (BLIP scene caption + YOLOv8 detection + InsightFace
+recognition + NATS event history), and replies through Piper TTS.
+Pipecat-based pipeline with Silero VAD for natural turn-taking. All
+CPU-runnable. The first OpenNVR example where cameras have agency,
+not just data.
+
+**Preview note:** three integration points (Whisper / Piper response
+field names, WebSocket serializer pairing, the BLIP SDK service)
+need verification against your deployed adapter versions before the
+voice loop runs end-to-end. The infrastructure (config loader, frame
+cache, event ring, tool definitions, 46 tests) is tested and stable;
+the streaming round-trip is shaped but not yet pinned. See the
+example's README "Status: preview" section.
+
+| | |
+|---|---|
+| Pattern | WebSocket voice conversation → tool-calling LLM → live camera adapters |
+| Adapters | Whisper + Ollama + Piper (voice path) + BLIP + YOLOv8 + InsightFace (tools) |
+| Difficulty | ⭐⭐⭐ advanced |
+| Best for learning | Pipecat pipelines, OpenAI-style tool calling against local Ollama, custom Pipecat services bridging an adapter contract |
+| Tests | 46 |
+
+```bash
+cd examples/camera-agent && uv sync --extra dev
+cp config.example.yml config.yml      # edit camera URLs, system prompt
+python camera_agent.py --config config.yml
+# then open http://localhost:9100/demo, click Start, and speak
+```
+
+---
+
+## 🚧 Planned — coming in v0.1
+
+The next round of viral, demo-friendly examples. **Want to help
+build one?** Open a discussion and we'll match scope to interest.
 
 ### `home-assistant-relay/`
 
@@ -217,7 +265,7 @@ minutes.
 
 ## 💡 More on the roadmap
 
-Beyond the two planned examples above, these are explicitly welcome contributions
+Beyond the planned example above, these are explicitly welcome contributions
 (see also the [adapter wishlist](https://github.com/open-nvr/ai-adapter#-adapters-wed-love-to-see)):
 
 | Category | Idea |
@@ -251,7 +299,7 @@ examples/<example-name>/
 ```
 
 `alerts.py` and the config-loading shape are deliberately consistent across
-all six shipped examples so you can copy one folder, rename `<example>.py`,
+all eight shipped examples so you can copy one folder, rename `<example>.py`,
 and replace the predicate with your domain logic — everything else (alert
 routing, correlation IDs, NATS publishing, SIGINT handling) is the template.
 
@@ -264,7 +312,7 @@ The fastest path to a first-party example slot:
 1. Open a [discussion](https://github.com/open-nvr/open-nvr/discussions) with
    your idea, the camera setup you'll demo on, and the adapter(s) you'll
    chain.
-2. Fork, branch, and copy one of the six shipped examples as your starting
+2. Fork, branch, and copy one of the eight shipped examples as your starting
    template.
 3. Replace the predicate (`zone.contains?`, the dwell-time state machine,
    etc.) with your domain logic.
