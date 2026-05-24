@@ -58,6 +58,33 @@ principles: secure by default, sovereign by design, and pluggable by contract.
   notification. Pure-REST enrollment flow — `python smart_doorbell.py
   enroll --image alice.jpg ...` works from any machine that can reach the
   adapter, no shared volume, no desktop GUI.
+- `package-delivery` — drives YOLOv8 against a porch ROI, threads detections
+  with a per-camera IoU tracker, and runs a state machine that distinguishes
+  arrival, optional linger, and disappearance. The disappearance event
+  routes "owner pickup" vs "porch pirate" by whether a person was sighted
+  in the ROI during a configurable lookback window — info vs high severity.
+  The whole point is the state machine: copy this folder and replace the
+  predicate to ship "car arrived and stayed", "dog left the yard", "shed
+  door open longer than X" without rewriting the alert plumbing.
+- `camera-agent` — **preview** — a voice agent that grounds its answers
+  in live OpenNVR camera feeds via tool calling. Pipecat pipeline with
+  Silero VAD on a WebSocket transport; custom Pipecat services wrap the
+  Whisper / Ollama / Piper adapters for the streaming voice path, and
+  four registered tools (BLIP scene caption + YOLOv8 detection +
+  InsightFace recognition + NATS event history) hit KAI-C for the
+  auditable inference. All CPU-runnable; default model `llama3.2:3b`
+  is roughly 3 GB RAM and 5-15 tok/s on a modern CPU. The first OpenNVR
+  example where cameras have agency, not just data — operators ask
+  "what's on the front porch?", the agent runs the right tool against
+  the right camera and answers in voice. Ships as preview in v0.1: the
+  infrastructure (config loader, frame cache, event ring, tool
+  definitions, 46 unit tests) is tested and stable, but three
+  integration points (Whisper / Piper response field names, the
+  Pipecat WebSocket serializer pairing in the demo HTML, and the BLIP
+  SDK-based adapter that hasn't shipped yet) need pinning per-deployment
+  before the streaming voice round-trip runs end-to-end. Tracked for
+  v0.2. A small self-contained `/demo` page demonstrates the shape
+  without React-app changes.
 
 Each example ships with a `config.example.yml`, a `README.md`, and a focused
 test suite designed to be read in five minutes.
