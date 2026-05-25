@@ -102,26 +102,27 @@ async def test_setup_honours_start_frame_sample_rates():
     """When Pipecat's StartFrame carries sample-rate negotiation,
     the serializer picks those up so it stays in sync with whatever
     the transport ended up plumbing."""
-    from pipecat.frames.frames import StartFrame
     from serializer import RawPcmSerializer
 
     s = RawPcmSerializer(input_sample_rate=16000, output_sample_rate=22050)
 
-    # Construct a StartFrame with whatever the current Pipecat
-    # version exposes — we set attributes after construction so
-    # this test is robust to StartFrame's required-args drift
-    # between minor versions.
-    try:
-        start = StartFrame(audio_in_sample_rate=8000, audio_out_sample_rate=24000)
-    except TypeError:
-        # Older Pipecat: StartFrame doesn't accept these as kwargs;
-        # set them as attributes directly so the test still
-        # exercises the setup() codepath.
-        start = StartFrame()  # type: ignore[call-arg]
-        start.audio_in_sample_rate = 8000  # type: ignore[attr-defined]
-        start.audio_out_sample_rate = 24000  # type: ignore[attr-defined]
+    # Construct a stand-in for StartFrame instead of the real class.
+    # The actual Pipecat ``StartFrame`` constructor has churned hard
+    # across releases — 0.0.5x makes ``clock`` and ``task_manager``
+    # required positional args (no way to fabricate one in a unit
+    # test without dragging in the whole runtime), while 0.0.10x
+    # makes everything optional but also rearranges other fields.
+    # ``serializer.setup()`` only reads ``audio_in_sample_rate`` /
+    # ``audio_out_sample_rate`` via ``getattr`` — pinning to a real
+    # StartFrame just to satisfy a duck-typed attribute lookup is
+    # the kind of test fragility that makes Pipecat bumps painful.
+    # A bare object with the two attributes exercises the same code
+    # path and survives any upstream rearrangement.
+    class _FakeStartFrame:
+        audio_in_sample_rate = 8000
+        audio_out_sample_rate = 24000
 
-    await s.setup(start)
+    await s.setup(_FakeStartFrame())  # type: ignore[arg-type]
     assert s._input_sample_rate == 8000
     assert s._output_sample_rate == 24000
 
