@@ -15,6 +15,10 @@
 offline-first network posture, and an end-to-end audit trail from camera to alert.
 Bring your own model. Own your footage. Deploy anywhere.
 
+> **v0.1 is here.** Nine first-party example apps shipping today — from
+> *"is there a person in this zone?"* to *"ask your cameras out loud."*
+> Skip to the [gallery](#-examples).
+
 [Quick start](#-quick-start-3-commands) · [Why OpenNVR](#-why-opennvr) · [Examples](#-examples) · [Architecture](docs/SECURITY_ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md)
 
 </div>
@@ -286,16 +290,19 @@ full catalogue with screenshots, difficulty ratings, and run instructions.
 | Example | What you'll build | Difficulty |
 |---|---|---|
 | [`intrusion-detection`](examples/intrusion-detection) | Detect people in restricted zones during restricted hours | ⭐ beginner |
-| [`loitering-detection`](examples/loitering-detection) | NATS subscriber with a dwell-time state machine | ⭐⭐ intermediate |
+| [`loitering-detection`](examples/loitering-detection) | Dwell-time state machine on a NATS inference stream | ⭐⭐ intermediate |
 | [`inference-listener`](examples/inference-listener) | Minimal NATS subscriber template | ⭐ beginner |
 | [`alerts-subscriber`](examples/alerts-subscriber) | Fan-out alerts to webhooks / logs / your tooling | ⭐ beginner |
-| 🚧 `license-plate-recognition` | Detect + OCR plates on driveway / parking — *coming v0.1* | ⭐⭐ intermediate |
-| 🚧 `smart-doorbell` | Recognise family vs strangers + Telegram alert — *coming v0.1* | ⭐⭐ intermediate |
-| 🚧 `package-delivery` | Porch arrival / departure with duration — *coming v0.1* | ⭐⭐ intermediate |
-| 🚧 `home-assistant-relay` | Bridge OpenNVR alerts into Home Assistant — *coming v0.1* | ⭐⭐ intermediate |
+| [`license-plate-recognition`](examples/license-plate-recognition) | Watch the driveway, log every plate, route allow/deny lists | ⭐⭐ intermediate |
+| [`smart-doorbell`](examples/smart-doorbell) | Family / known / unknown at the front door with REST enrollment | ⭐⭐ intermediate |
+| [`package-delivery`](examples/package-delivery) | Porch arrival / linger / pickup with porch-pirate severity routing | ⭐⭐ intermediate |
+| [`camera-agent`](examples/camera-agent) | **Ask your cameras out loud.** Voice agent grounded in live feeds via tool calling | ⭐⭐⭐ advanced |
+| [`home-assistant-relay`](examples/home-assistant-relay) | Bridge OpenNVR alerts into Home Assistant via MQTT discovery | ⭐⭐ intermediate |
 
-Each example ships with a `config.example.yml`, a `README.md`, and a test suite you
-can read in 5 minutes.
+Each example ships with a `config.example.yml`, a `README.md`, and a focused
+test suite you can read in 5 minutes. The full v0.1 gallery — including
+the axis-grid that groups examples by *drives-inference* vs *subscribes-to-events* —
+is at [`examples/README.md`](examples/README.md).
 
 ---
 
@@ -316,8 +323,11 @@ disclosure process: [`CONTRIBUTING.md`](CONTRIBUTING.md) and
 [`SECURITY.md`](SECURITY.md).
 
 **First-time contributors:** look for issues tagged `good first issue` on the issue
-tracker, or pick any of the 🚧 examples in the table above — those are a great
-on-ramp.
+tracker, or fork any of the example apps above — copying one and replacing the
+predicate (zone check, dwell-time state machine, plate-watchlist filter, …) is
+the cheapest path to a real PR. The roadmap section in
+[`examples/README.md`](examples/README.md) lists the adapter / example combinations
+the community has asked for next.
 
 ---
 

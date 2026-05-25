@@ -72,7 +72,7 @@ class AppConfig:
     whisper_token: str = ""
     ollama_url: str = "http://127.0.0.1:9004"
     ollama_token: str = ""
-    piper_url: str = "http://127.0.0.1:9006"
+    piper_url: str = "http://127.0.0.1:9001"
     piper_token: str = ""
 
     # LLM tuning.
@@ -158,7 +158,7 @@ def load_config(path: str | Path) -> AppConfig:
         whisper_token=_str("whisper_token", ""),
         ollama_url=_str("ollama_url", "http://127.0.0.1:9004"),
         ollama_token=_str("ollama_token", ""),
-        piper_url=_str("piper_url", "http://127.0.0.1:9006"),
+        piper_url=_str("piper_url", "http://127.0.0.1:9001"),
         piper_token=_str("piper_token", ""),
         llm_model=_str("llm_model", "llama3.2:3b"),
         llm_temperature=_float("llm_temperature", 0.4),
@@ -401,9 +401,15 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             FastAPIWebsocketTransport,
         )
         from pipecat.audio.vad.silero import SileroVADAnalyzer
-        from pipecat.serializers.protobuf import ProtobufFrameSerializer
+        from serializer import RawPcmSerializer
 
         await websocket.accept()
+        # RawPcmSerializer is camera-agent-local — it speaks raw int16
+        # PCM on both directions of the WebSocket so the self-contained
+        # /demo HTML page can use vanilla JS + AudioContext without
+        # bundling the Pipecat JS client. Production deployments can
+        # swap to ProtobufFrameSerializer + @pipecat-ai/client-js for
+        # richer frame types (transcripts, control frames, etc.).
         transport = FastAPIWebsocketTransport(
             websocket=websocket,
             params=FastAPIWebsocketParams(
@@ -413,7 +419,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 vad_enabled=True,
                 vad_analyzer=SileroVADAnalyzer(),
                 vad_audio_passthrough=True,
-                serializer=ProtobufFrameSerializer(),
+                serializer=RawPcmSerializer(),
             ),
         )
 

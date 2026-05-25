@@ -207,7 +207,7 @@ python package_delivery.py --config config.yml
 
 ---
 
-### [`camera-agent/`](camera-agent) — preview
+### [`camera-agent/`](camera-agent)
 
 **Ask your cameras.** A voice agent that listens for spoken questions
 in a browser tab, grounds its answers in live camera feeds via tool
@@ -217,21 +217,13 @@ Pipecat-based pipeline with Silero VAD for natural turn-taking. All
 CPU-runnable. The first OpenNVR example where cameras have agency,
 not just data.
 
-**Preview note:** three integration points (Whisper / Piper response
-field names, WebSocket serializer pairing, the BLIP SDK service)
-need verification against your deployed adapter versions before the
-voice loop runs end-to-end. The infrastructure (config loader, frame
-cache, event ring, tool definitions, 46 tests) is tested and stable;
-the streaming round-trip is shaped but not yet pinned. See the
-example's README "Status: preview" section.
-
 | | |
 |---|---|
 | Pattern | WebSocket voice conversation → tool-calling LLM → live camera adapters |
 | Adapters | Whisper + Ollama + Piper (voice path) + BLIP + YOLOv8 + InsightFace (tools) |
 | Difficulty | ⭐⭐⭐ advanced |
 | Best for learning | Pipecat pipelines, OpenAI-style tool calling against local Ollama, custom Pipecat services bridging an adapter contract |
-| Tests | 46 |
+| Tests | 52 |
 
 ```bash
 cd examples/camera-agent && uv sync --extra dev

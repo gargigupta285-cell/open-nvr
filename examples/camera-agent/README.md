@@ -77,51 +77,19 @@ not "AGI for cameras":
   per round-trip on CPU. Not Alexa-snappy. Defensible for
   "ask your cameras" but not for streaming dialogue.
 
-## Status: preview
-
-Camera-agent ships in v0.1 as a **preview**, not a tested
-production path. The architecture, code shape, and tests are all
-in place, but three integration points need verification against
-your specific adapter versions before the loop runs end-to-end:
-
-1. **Whisper / Piper response field names.** Different adapter
-   generations name the transcript field `transcript` / `text` /
-   `transcription`, and the synth output as `audio_b64` /
-   `audio_uri` / `audio`. The clients in `adapter_clients.py` try
-   each in turn, but if your deployed adapters use yet another
-   name, STT or TTS will silently no-op — check the adapter's
-   response shape and add an alias in `WhisperClient.transcribe`
-   or `PiperClient.synthesize`.
-2. **WebSocket serializer pairing.** `camera_agent.py` builds the
-   transport with Pipecat's `ProtobufFrameSerializer`. The demo
-   HTML in `demo/index.html` sends raw PCM `Int16Array` over the
-   WebSocket, which will NOT decode against the protobuf serializer.
-   Swap one to match: either change the server to a JSON / raw-PCM
-   serializer (depends on your Pipecat version), or use Pipecat's
-   reference `@pipecat-ai/client-js` library in the browser (which
-   knows the protobuf wire format). The demo is here to demonstrate
-   shape, not to ship as-is.
-3. **BLIP as a KAI-C-registered adapter.** The `describe_camera`
-   tool calls a BLIP adapter via KAI-C, but the SDK-based BLIP
-   service hasn't shipped in `ai-adapter` yet (only the legacy
-   in-tree one exists). Until it does, either route the `caption`
-   tool against the legacy BLIP endpoint directly, or set
-   `caption_adapter` to a different adapter that returns a
-   `caption` field, or temporarily remove `describe_camera` from
-   the tool list. `detect_objects` and `recognize_faces` work
-   today.
-
-These are tracked for v0.2 in the OpenNVR roadmap. For v0.1 the
-example demonstrates the pattern (Pipecat + tool calling against
-live cameras) and the tested infrastructure (config loader, frame
-cache, event ring, tool definitions, 46 unit tests). The voice
-round-trip "just works" once those three integration points are
-pinned for your deployment.
-
 ## Honesty up front
 
 Real-world limitations the example does NOT yet handle:
 
+* **Demo is voice-only — no on-screen transcript.** The bundled
+  `/demo` HTML uses a raw-PCM WebSocket protocol (see
+  `serializer.py`) and the `RawPcmSerializer` drops every non-audio
+  frame on the wire. You'll *hear* the agent speak its answer but
+  the demo page won't surface what you said or what the agent
+  replied as text. A production UI bundles
+  `@pipecat-ai/client-js` plus the matching Pipecat
+  `ProtobufFrameSerializer` on the server and gets transcripts,
+  control frames, and metrics on the same WebSocket.
 * **Audit-chain split.** KAI-C v0.1 only proxies application/json
   inference calls. The streaming voice path (Whisper, Ollama,
   Piper) therefore calls the adapters DIRECTLY — bypassing the
@@ -177,9 +145,12 @@ register() {
     -H "Content-Type: application/json" \
     -d "{\"name\":\"$name\",\"url\":\"$url\"}"
 }
-register yolov8      http://127.0.0.1:9001
+register piper       http://127.0.0.1:9001
+register yolov8      http://127.0.0.1:9002
+register whisper     http://127.0.0.1:9003
+register fast-plate-ocr http://127.0.0.1:9004
 register insightface http://127.0.0.1:9005
-register blip        http://127.0.0.1:9002
+register blip        http://127.0.0.1:9006
 
 # 4. Configure
 cd ../examples/camera-agent
