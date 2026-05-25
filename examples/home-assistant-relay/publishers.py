@@ -115,18 +115,22 @@ class MqttPublisher:
             # it for the unit tests).
             import paho.mqtt.client as mqtt  # type: ignore
 
-            # Explicit MQTTv311 — paho v2's clean_session semantics
-            # only apply to v3.1.1. If you want v5 session-expiry
-            # semantics instead, swap to protocol=mqtt.MQTTv5 +
-            # connect(... clean_start=False, properties=<session-expiry>).
-            # The v3.1.1 + clean_session=False combo here gives us
-            # "broker remembers our subscriptions across reconnects",
-            # which is what we want for the discovery topics.
+            # paho-mqtt 2.x default protocol is MQTTv311; we rely on
+            # the default rather than passing it explicitly because
+            # the constant has moved between minor versions
+            # (``mqtt.MQTTv311`` exists in 2.1 but newer versions
+            # surface it as ``mqtt.MQTTProtocolVersion.MQTTv311``).
+            # Relying on the default keeps us compatible across the
+            # whole >=2.0,<3.0 range. ``clean_session=False`` only
+            # has meaning under v3.x — its purpose is "broker
+            # remembers our subscriptions across reconnects", which
+            # is what we want for the discovery topics. For v5
+            # session-expiry semantics, an operator would fork to
+            # use protocol=MQTTProtocolVersion.MQTTv5 + clean_start.
             client = mqtt.Client(
                 mqtt.CallbackAPIVersion.VERSION2,
                 client_id=self._cfg.client_id,
                 clean_session=False,
-                protocol=mqtt.MQTTv311,
             )
             if self._cfg.username:
                 client.username_pw_set(self._cfg.username, self._cfg.password or "")

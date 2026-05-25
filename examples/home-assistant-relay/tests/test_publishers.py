@@ -136,8 +136,10 @@ async def test_mqtt_discovery_payload_carries_device_class(fake_paho):
     assert body["unique_id"] == "opennvr_front_porch_doorbell_visitor"
     assert body["payload_on"] == "ON"
     assert body["payload_off"] == "OFF"
-    # Device card grouping — every entity goes under one OpenNVR device.
-    assert body["device"]["identifiers"] == ["opennvr"]
+    # Device card grouping — every entity goes under one OpenNVR
+    # device. The identifier embeds the discovery_prefix so two
+    # OpenNVR instances against one HA / broker don't collide.
+    assert body["device"]["identifiers"] == ["opennvr_homeassistant"]
 
 
 @pytest.mark.asyncio

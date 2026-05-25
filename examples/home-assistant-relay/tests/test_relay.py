@@ -220,7 +220,21 @@ async def test_repeat_alert_cancels_pending_auto_off():
     await relay.step(_alert())
     second_task = relay._auto_off_tasks[entity.full_entity_id]
     assert first_task is not second_task
+    # ``cancel()`` only marks the task; the cancellation lands when
+    # the task next reaches an await point. Drain it so the state
+    # transitions from 'cancelling' to 'cancelled' before we assert.
+    try:
+        await first_task
+    except (asyncio.CancelledError, Exception):
+        pass
     assert first_task.cancelled() or first_task.done()
+    # Clean up the second task too so the test exits without a
+    # 'task was destroyed but it is pending' warning.
+    second_task.cancel()
+    try:
+        await second_task
+    except (asyncio.CancelledError, Exception):
+        pass
 
 
 @pytest.mark.asyncio
