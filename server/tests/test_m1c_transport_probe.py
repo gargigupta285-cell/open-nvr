@@ -959,6 +959,16 @@ async def test_provision_path_skips_gate_when_policy_is_none(monkeypatch):
     monkeypatch.setattr(
         MediaMtxAdminService, "is_configured", staticmethod(lambda: True)
     )
+    # is_configured() lying about real state means _base() would
+    # AttributeError on settings.mediamtx_admin_api.rstrip("/") (it's
+    # still None). Stub _base too so the test exercises the actual
+    # provision_path code without tripping on the configuration
+    # contract. Same shape used by the other passing tests in this
+    # file that monkeypatch is_configured.
+    monkeypatch.setattr(
+        MediaMtxAdminService, "_base",
+        staticmethod(lambda: "http://stub.mediamtx.invalid"),
+    )
 
     # policy=None should let plaintext through.
     result = await MediaMtxAdminService.provision_path(
@@ -1091,6 +1101,15 @@ async def test_patch_path_allows_record_only_patches_under_rtsps_required(monkey
     monkeypatch.setattr(mam.httpx, "AsyncClient", _FakeClient)
     monkeypatch.setattr(
         MediaMtxAdminService, "is_configured", staticmethod(lambda: True)
+    )
+    # is_configured() lying about real state means _base() would
+    # AttributeError on settings.mediamtx_admin_api.rstrip("/")
+    # (still None). Stub _base too so the test exercises the patch
+    # gate logic without tripping on the unrelated configuration
+    # contract.
+    monkeypatch.setattr(
+        MediaMtxAdminService, "_base",
+        staticmethod(lambda: "http://stub.mediamtx.invalid"),
     )
 
     # Payload mutates only recording — no `source` key.

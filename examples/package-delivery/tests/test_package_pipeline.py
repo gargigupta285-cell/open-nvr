@@ -112,12 +112,23 @@ def test_bbox_xyxy_dict_normalised():
 
 
 def test_bbox_xyxy_list_pixel():
-    bbox = _normalise_bbox_to_pixels([10, 20, 90, 80], 100, 100)
-    assert bbox == (10, 20, 90, 80)
+    """A pixel list that COULDN'T be xywh (x2 + w would exceed frame)
+    forces the heuristic into xyxy. Tests with values that satisfy
+    BOTH interpretations end up testing the heuristic's choice rather
+    than the parser's correctness — use forcing values."""
+    # [10, 20, 150, 180] in a 100x100 frame: c=150 > width so the
+    # 'is this xywh?' branch falls through to xyxy. After bounds
+    # clipping, (10, 20, 100, 100).
+    bbox = _normalise_bbox_to_pixels([10, 20, 150, 180], 100, 100)
+    assert bbox == (10, 20, 100, 100)
 
 
 def test_bbox_degenerate_returns_none():
-    assert _normalise_bbox_to_pixels([50, 50, 50, 50], 100, 100) is None
+    """[0, 0, 0, 0] is truly degenerate under either interpretation:
+    xywh = zero-size box; xyxy = x2<=x1 reject. Use this rather than
+    [50, 50, 50, 50] which is ambiguous (valid 50x50 box under xywh,
+    degenerate under xyxy)."""
+    assert _normalise_bbox_to_pixels([0, 0, 0, 0], 100, 100) is None
 
 
 def test_bbox_clips_to_frame_bounds():
