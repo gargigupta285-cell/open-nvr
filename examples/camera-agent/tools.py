@@ -183,7 +183,15 @@ class CameraTools:
         except (LookupError, FrameSourceError) as exc:
             return f"Cannot fetch camera {camera_id!r}: {exc}"
         try:
-            response = await self._caption.infer(frame_jpeg=frame)
+            # Send the task explicitly for symmetry with
+            # recognize_faces — BlipService defaults task to
+            # ``scene_caption`` but being explicit makes the wire
+            # shape legible in audit logs and protects against a
+            # future multi-task BLIP adapter that drops the default.
+            response = await self._caption.infer(
+                frame_jpeg=frame,
+                extra={"task": "scene_caption"},
+            )
         except Exception:
             logger.exception("describe_camera: caption call failed")
             return "Caption adapter failed; cannot describe the scene right now."

@@ -5,18 +5,23 @@
 
   Self-contained demo client for the camera-agent example.
 
-  No build step, no framework, ~200 lines of vanilla JS. Connects to
-  the FastAPI WebSocket endpoint, streams microphone audio in via the
-  Pipecat protobuf frame format, and plays back the agent's response
-  audio frames. The Pipecat client library is loaded from a CDN —
-  homelab users with an air-gapped install can swap the script tag
-  for a self-hosted bundle.
+  No build step, no framework, no JS dependencies — ~200 lines of
+  vanilla JS. Connects to the FastAPI WebSocket endpoint and speaks
+  raw int16-PCM in both directions (pairs with the camera-agent's
+  RawPcmSerializer on the server side). The browser uses the Web
+  Audio API for capture (16 kHz mono) and playback (22 kHz mono,
+  Piper's default).
 
-  Honest caveat: this is the SMALLEST conversational client we could
-  write. Pipecat's official @pipecat-ai/client-js does more (proper
-  audio worklets, jitter buffering, reconnect, transcript surfacing).
-  Once OpenNVR adopts a richer in-app voice UI, swap this for the
-  real client. For v0.1 this gets you talking to your cameras.
+  Honest caveats:
+  * Voice-only. Transcripts and agent text are not surfaced on the
+    page — the RawPcmSerializer drops every non-audio frame on the
+    wire so the demo stays vanilla. A production UI bundles
+    @pipecat-ai/client-js and the matching ProtobufFrameSerializer
+    on the server to get transcripts, control frames, and metrics
+    over the same WebSocket.
+  * No jitter buffer, no reconnect, no audio worklet — just the
+    simplest possible glue. Production deployments will outgrow
+    this; that's expected.
 -->
 <html lang="en">
 <head>
@@ -111,17 +116,18 @@
   </main>
 
   <script>
-    // ── Minimal Pipecat protobuf-frame client ───────────────────────
+    // ── Minimal raw-PCM WebSocket client ────────────────────────────
     //
-    // Pipecat's WebSocket transport sends/receives length-prefixed
-    // serialized Frame objects (proto3). For the v0.1 demo we use
-    // the JSON frame serializer that Pipecat's FastAPIWebsocketTransport
-    // also supports — easier to inspect and doesn't require a proto
-    // build step in the browser. Adjust the serializer in
-    // camera_agent.py:_ws() to match if you swap to protobuf.
+    // Pairs with examples/camera-agent/serializer.py (RawPcmSerializer).
+    // Both directions of the WebSocket carry bare int16 little-endian
+    // PCM samples — inbound at 16 kHz (Silero VAD's expected rate),
+    // outbound at the Piper TTS sample rate (typically 22 kHz). No
+    // framing, no protobuf, no JS dep — just bytes.
     //
-    // Audio I/O: capture 16kHz mono PCM via AudioContext (Pipecat's
-    // VAD expects 16kHz). Playback 22kHz mono PCM that Piper produces.
+    // Production UIs that want transcripts / control frames /
+    // metrics on the wire should swap to Pipecat's
+    // ProtobufFrameSerializer on the server and bundle
+    // @pipecat-ai/client-js in the browser.
 
     const startBtn = document.getElementById("start");
     const stopBtn = document.getElementById("stop");

@@ -223,7 +223,14 @@ class PiperClient(_ReusableClientMixin):
         # task name varies across adapter generations — legacy used
         # ``speech_synthesis``; the contract §5.4 spec is ``text_to_speech``.
         # Send the modern name; legacy operators upgrade the adapter.
-        body = {"task": "text_to_speech", "text": text}
+        #
+        # ``inline: true`` asks the SDK Piper service to base64-encode
+        # the generated WAV into ``result.audio_b64`` alongside the
+        # default ``result.audio_uri``. We don't have a shared
+        # filesystem mount to dereference the opennvr://audio/...
+        # URI, so the inline body is the only way we get the audio
+        # bytes back over plain HTTP.
+        body = {"task": "text_to_speech", "text": text, "inline": True}
         client = self._client()
         resp = await client.post(self._url, json=body, headers=headers)
         resp.raise_for_status()
@@ -272,7 +279,15 @@ class PiperClient(_ReusableClientMixin):
                     audio_uri, resolved_uri,
                 )
                 return b""
+        # Common cause: adapter received the inline=true flag but
+        # the underlying audio_uri couldn't be resolved (Piper's
+        # _read_audio_inline swallows resolve_audio_uri failures and
+        # falls back to None, so we end up here with neither field
+        # set). Check the adapter's logs for "could not resolve
+        # audio_uri" or "could not read audio file" entries.
         logger.warning(
-            "Piper adapter response contained no audio_b64 nor audio_uri"
+            "Piper adapter response contained no audio_b64 nor audio_uri; "
+            "if inline=true was sent, check adapter logs for resolve "
+            "or read failures"
         )
         return b""

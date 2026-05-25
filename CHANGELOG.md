@@ -79,25 +79,26 @@ principles: secure by default, sovereign by design, and pluggable by contract.
   read the alert as an event, not a sticky alarm. Closes the loop:
   OpenNVR fires alerts → HA dashboards and automations consume them
   with zero extra wiring beyond the standard HA UI.
-- `camera-agent` — **preview** — a voice agent that grounds its answers
-  in live OpenNVR camera feeds via tool calling. Pipecat pipeline with
-  Silero VAD on a WebSocket transport; custom Pipecat services wrap the
+- `camera-agent` — a voice agent that grounds its answers in live
+  OpenNVR camera feeds via tool calling. Pipecat pipeline with Silero
+  VAD on a WebSocket transport; custom Pipecat services wrap the
   Whisper / Ollama / Piper adapters for the streaming voice path, and
   four registered tools (BLIP scene caption + YOLOv8 detection +
   InsightFace recognition + NATS event history) hit KAI-C for the
   auditable inference. All CPU-runnable; default model `llama3.2:3b`
-  is roughly 3 GB RAM and 5-15 tok/s on a modern CPU. The first OpenNVR
-  example where cameras have agency, not just data — operators ask
-  "what's on the front porch?", the agent runs the right tool against
-  the right camera and answers in voice. Ships as preview in v0.1: the
-  infrastructure (config loader, frame cache, event ring, tool
-  definitions, 46 unit tests) is tested and stable, but three
-  integration points (Whisper / Piper response field names, the
-  Pipecat WebSocket serializer pairing in the demo HTML, and the BLIP
-  SDK-based adapter that hasn't shipped yet) need pinning per-deployment
-  before the streaming voice round-trip runs end-to-end. Tracked for
-  v0.2. A small self-contained `/demo` page demonstrates the shape
-  without React-app changes.
+  is roughly 3 GB RAM and 5-15 tok/s on a modern CPU. The first
+  OpenNVR example where cameras have agency, not just data — operators
+  ask "what's on the front porch?", the agent runs the right tool
+  against the right camera and answers in voice. Ships in v0.1 with
+  the three v0.1 integration gaps closed: the BLIP SDK adapter is
+  now live alongside InsightFace + YOLOv8; the Piper SDK adapter
+  supports inline ``audio_b64`` responses so the camera-agent's
+  Pipecat TTS service gets audio bytes back over plain HTTP; and a
+  camera-agent-local raw-PCM WebSocket serializer lets the
+  self-contained ``/demo`` page work with vanilla JS + AudioContext
+  without bundling Pipecat's JS client. 52 unit tests cover the
+  config loader, frame cache, event ring, tool dispatch, and the
+  raw-PCM serializer.
 
 Each example ships with a `config.example.yml`, a `README.md`, and a focused
 test suite designed to be read in five minutes.

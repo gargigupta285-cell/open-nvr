@@ -27,7 +27,7 @@ whisper_url: http://127.0.0.1:9003
 whisper_token: REPLACE_WITH_OPENNVR_ADAPTER_TOKEN
 ollama_url: http://127.0.0.1:9004
 ollama_token: REPLACE_WITH_OPENNVR_ADAPTER_TOKEN
-piper_url: http://127.0.0.1:9006
+piper_url: http://127.0.0.1:9001
 piper_token: REPLACE_WITH_OPENNVR_ADAPTER_TOKEN
 
 # Names of the vision adapters used by tool calls. The agent calls
