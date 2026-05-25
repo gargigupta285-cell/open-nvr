@@ -4,7 +4,7 @@ Every example here is a **copy-as-template** starting point — minimal, readabl
 and opinionated. Pick one that's close to what you want to build, copy the
 folder, and edit the predicate.
 
-The eight shipped examples cover two orthogonal axes of the OpenNVR pipeline:
+The nine shipped examples cover two orthogonal axes of the OpenNVR pipeline:
 *driving* inference vs *subscribing* to it, and *inference events* vs *alerts*.
 
 ```
@@ -18,8 +18,8 @@ The eight shipped examples cover two orthogonal axes of the OpenNVR pipeline:
                   ├─────────────────────────┼──────────────────────┤
   Subscribes to   │ intrusion-detection¹    │ alerts-subscriber    │
   alert envelopes │ license-plate-          │ camera-agent²        │
-                  │   recognition¹          │                      │
-                  │ smart-doorbell¹         │                      │
+                  │   recognition¹          │ home-assistant-      │
+                  │ smart-doorbell¹         │   relay              │
                   │ package-delivery¹       │                      │
                   └─────────────────────────┴──────────────────────┘
 
@@ -242,30 +242,35 @@ python camera_agent.py --config config.yml
 
 ---
 
-## 🚧 Planned — coming in v0.1
+### [`home-assistant-relay/`](home-assistant-relay)
 
-The next round of viral, demo-friendly examples. **Want to help
-build one?** Open a discussion and we'll match scope to interest.
-
-### `home-assistant-relay/`
-
-**Every OpenNVR alert in your Home Assistant dashboard.** NATS subscriber
-that publishes MQTT to your HA broker (or hits HA's REST API directly), with
-device_class + entity_id mapping. Drops into existing HA dashboards in
-minutes.
+**Every OpenNVR alert in your Home Assistant dashboard.** NATS
+subscriber that bridges `opennvr.alerts.>` into HA entities via MQTT
+discovery (recommended — HA auto-creates the entities on first fire)
+or HA's REST API. Built-in mapping rules for every shipped OpenNVR
+producer-side example; operators override per source / per camera in
+config. Closes the loop: OpenNVR fires alerts → HA dashboards and
+automations consume them with zero extra wiring.
 
 | | |
 |---|---|
-| Pattern | Subscribes to NATS alerts → publishes MQTT / HA REST |
-| Adapters | (none) |
+| Pattern | NATS subscriber → MQTT discovery / HA REST → HA entities |
+| Adapters | (none — this is a subscriber-only bridge) |
 | Difficulty | ⭐⭐ intermediate |
-| Why it's interesting | Massive distribution multiplier — every HA user is a candidate |
+| Best for learning | NATS alert subscription, HA's MQTT discovery contract, two-backend publisher abstraction |
+| Tests | 55 |
+
+```bash
+cd examples/home-assistant-relay && uv sync --extra dev
+cp config.example.yml config.yml      # edit nats_url + mqtt.host / username / password
+python home_assistant_relay.py --config config.yml
+```
 
 ---
 
 ## 💡 More on the roadmap
 
-Beyond the planned example above, these are explicitly welcome contributions
+These are explicitly welcome contributions
 (see also the [adapter wishlist](https://github.com/open-nvr/ai-adapter#-adapters-wed-love-to-see)):
 
 | Category | Idea |
@@ -299,7 +304,7 @@ examples/<example-name>/
 ```
 
 `alerts.py` and the config-loading shape are deliberately consistent across
-all eight shipped examples so you can copy one folder, rename `<example>.py`,
+all nine shipped examples so you can copy one folder, rename `<example>.py`,
 and replace the predicate with your domain logic — everything else (alert
 routing, correlation IDs, NATS publishing, SIGINT handling) is the template.
 
@@ -312,7 +317,7 @@ The fastest path to a first-party example slot:
 1. Open a [discussion](https://github.com/open-nvr/open-nvr/discussions) with
    your idea, the camera setup you'll demo on, and the adapter(s) you'll
    chain.
-2. Fork, branch, and copy one of the eight shipped examples as your starting
+2. Fork, branch, and copy one of the nine shipped examples as your starting
    template.
 3. Replace the predicate (`zone.contains?`, the dwell-time state machine,
    etc.) with your domain logic.

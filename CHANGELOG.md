@@ -66,6 +66,19 @@ principles: secure by default, sovereign by design, and pluggable by contract.
   The whole point is the state machine: copy this folder and replace the
   predicate to ship "car arrived and stayed", "dog left the yard", "shed
   door open longer than X" without rewriting the alert plumbing.
+- `home-assistant-relay` — a NATS subscriber that bridges
+  `opennvr.alerts.>` into Home Assistant entities via MQTT discovery
+  (recommended — HA auto-creates the entities on the first fire with
+  the right device_class, friendly name, and device card) or HA's
+  REST `/api/states` endpoint. Built-in mapping rules cover every
+  shipped OpenNVR producer-side example (smart-doorbell,
+  package-delivery, intrusion-detection, loitering-detection,
+  license-plate-recognition); operators override per source and per
+  camera via the `mappings:` config block. Binary sensors hold ON
+  for a configurable window then auto-flip OFF so HA automations
+  read the alert as an event, not a sticky alarm. Closes the loop:
+  OpenNVR fires alerts → HA dashboards and automations consume them
+  with zero extra wiring beyond the standard HA UI.
 - `camera-agent` — **preview** — a voice agent that grounds its answers
   in live OpenNVR camera feeds via tool calling. Pipecat pipeline with
   Silero VAD on a WebSocket transport; custom Pipecat services wrap the
