@@ -135,12 +135,17 @@ services:
     # ----------------------------------------------------
     # [WINDOWS/MAC] BRIDGE MODE: Uncomment lines below
     ports:
-      # M1b-fixup-v2 F-2: the plaintext RTSP port (:8554) is intentionally
-      # NOT mapped. Under rtspEncryption="strict" MediaMTX does not bind
-      # the plaintext listener, so the port map would have nothing to
-      # forward to. Operators who need plaintext for legacy reasons must
-      # switch to mediamtx.local.yml (and set MEDIAMTX_ALLOW_PLAINTEXT_
-      # OUTPUTS=true) AND add `127.0.0.1:8554:8554` back here.
+      # The plaintext RTSP listener (:8554) is intentionally NOT
+      # port-mapped to the host. mediamtx.docker.yml runs in
+      # rtspEncryption="optional" so the :8554 listener binds, but it's
+      # reachable only from inside the docker network — that's where
+      # KAI-C's inference frame-capture tap reads from
+      # (rtsp://mediamtx:8554/cam-N over loopback, no TLS overhead).
+      # External clients use RTSPS at :8322. Operators who need
+      # plaintext RTSP exposed to the host for legacy tooling must add
+      # `127.0.0.1:8554:8554` back here and accept that JWT auth is
+      # the only protection on that path; see docs/SECURITY_ARCHITECTURE.md
+      # §"RTSP encryption posture" for the trust-boundary rationale.
       - "127.0.0.1:8322:8322" # RTSPS (V-019 / RFC 7826 — TLS-required RTSP)
       - "127.0.0.1:8888:8888" # HLS (HTTPS — hlsEncryption=yes)
       - "127.0.0.1:8889:8889" # WebRTC Signaling (HTTPS — webrtcEncryption=yes)

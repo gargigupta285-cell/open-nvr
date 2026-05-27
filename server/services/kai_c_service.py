@@ -22,9 +22,11 @@ which then forwards requests to AI Adapter servers.
 """
 
 import asyncio
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote as urlquote
 
 import httpx
 
@@ -68,6 +70,24 @@ class KaiCService:
 
         # Async HTTP client for non-blocking requests
         self.http_client = httpx.AsyncClient(timeout=30.0)
+
+        # Cached JWT for MediaMTX loopback-tap reads (see
+        # _get_inference_mediamtx_jwt). Wildcard read scope, refreshed
+        # on a sliding TTL so we don't pay the ~1ms RSA-sign cost on
+        # every frame. ``None`` triggers a mint on first use.
+        #
+        # Thread safety: KaiCService is a singleton accessed from
+        # multiple async inference loops via run_in_executor. The
+        # token field is written without a lock — a benign race at
+        # expiry can wastefully mint twice but never produce wrong
+        # data. We accept that for the simplicity it buys; a real
+        # lock would serialise every mint and per-request URL build.
+        self._inference_jwt: str | None = None
+        self._inference_jwt_expires_at: float = 0.0
+        # Timestamp (time.monotonic) of the most recent
+        # capture-failure-triggered invalidation. Used to short-circuit
+        # mint-storm behaviour during sustained MediaMTX outages.
+        self._inference_jwt_invalidated_at: float = 0.0
 
         main_logger.info(f"KaiCService initialized with KAI-C URL: {self.kai_c_url}")
         main_logger.info(f"Frames directory: {self.frames_dir}")
@@ -122,6 +142,50 @@ class KaiCService:
             main_logger.error(f"Failed to fetch capabilities from KAI-C: {e}")
             raise
 
+    @staticmethod
+    def _redact_rtsp_url_for_log(url: str) -> str:
+        """Strip both query-string secrets and basic-auth userinfo from
+        an RTSP URL for safe logging.
+
+        Two secret-bearing parts of a URL we never want in log files:
+
+        * ``?jwt=<token>`` — the MediaMTX loopback-tap token. Short-
+          lived (60 minutes) but still grants wildcard read access
+          until expiry.
+        * ``user:password@`` — camera credentials embedded in the
+          direct-pull URL. The previous logger format logged these
+          unredacted, which was a pre-existing finding; stripping them
+          here closes that gap at the same time.
+
+        Returns a URL of the form ``scheme://[<redacted>@]host[:port]/path[?<redacted>]``.
+        Best-effort parse — if ``urlparse`` can't make sense of the
+        input we fall back to the query-string strip alone.
+        """
+        from urllib.parse import urlparse, urlunparse
+
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            # Defensive — if parsing somehow fails, at least drop the
+            # query string (cheap substring op, can't raise).
+            if "?" in url:
+                base, _, _ = url.partition("?")
+                return f"{base}?<redacted>"
+            return url
+
+        netloc = parsed.hostname or ""
+        if parsed.port is not None:
+            netloc = f"{netloc}:{parsed.port}"
+        if parsed.username or parsed.password:
+            netloc = f"<redacted>@{netloc}"
+
+        query = "<redacted>" if parsed.query else ""
+        # Drop fragments too — they don't normally appear in RTSP URLs
+        # but if one ever did, log discipline is still right.
+        return urlunparse(
+            (parsed.scheme, netloc, parsed.path, parsed.params, query, "")
+        )
+
     def _capture_frame_sync(self, rtsp_url: str, camera_id: int) -> str | None:
         """
         Synchronous frame capture (runs in thread pool).
@@ -152,7 +216,10 @@ class KaiCService:
             cap.release()
 
             if not ret or frame is None:
-                main_logger.warning(f"Failed to capture frame from {rtsp_url}")
+                main_logger.warning(
+                    "Failed to capture frame from %s",
+                    self._redact_rtsp_url_for_log(rtsp_url),
+                )
                 return None
 
             # Save frame
@@ -171,18 +238,220 @@ class KaiCService:
         """
         Capture a frame from RTSP stream asynchronously.
 
+        When ``INFERENCE_USE_MEDIAMTX_TAP=true`` (default) and
+        ``MEDIAMTX_RTSP_URL`` is configured, the actual capture happens
+        from MediaMTX's loopback path for ``camera_id`` instead of
+        ``rtsp_url`` — see ``_resolve_inference_rtsp_url`` for the
+        rationale. ``rtsp_url`` is preserved as the fallback for the
+        disabled-tap / distributed-deployment case.
+
+        On capture failure with the tap active, we invalidate the
+        cached JWT so the next call re-mints. Without this self-heal,
+        a token that MediaMTX has rejected (clock skew, JWKS rotation,
+        a MediaMTX restart between mint and use) would keep being
+        replayed for the full 50-minute cache TTL — silently breaking
+        inference for that whole window. Invalidating lets the loop
+        recover on the very next polling cycle (~2 seconds at default
+        interval) instead.
+
         Args:
-            rtsp_url: RTSP stream URL
-            camera_id: Camera ID for file naming
+            rtsp_url: Fallback RTSP stream URL (typically camera_config.
+                source_url). Used as-is when the tap is disabled.
+            camera_id: Camera ID for file naming and tap path resolution.
 
         Returns:
             Path to saved frame file, or None if capture failed
         """
+        capture_url = self._resolve_inference_rtsp_url(camera_id, rtsp_url)
+        tap_was_used = capture_url != rtsp_url
         # Run blocking capture in thread pool
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            self.executor, self._capture_frame_sync, rtsp_url, camera_id
+        result = await loop.run_in_executor(
+            self.executor, self._capture_frame_sync, capture_url, camera_id
         )
+        if result is None and tap_was_used:
+            # Don't strand inference on a stale token. cv2.VideoCapture
+            # collapses all RTSP errors into a None return — we can't
+            # distinguish 401 from "MediaMTX is down" from "camera
+            # stream not yet active" from here. Invalidating on tap
+            # failure self-heals the auth-error class of failures
+            # without needing to parse cv2 / ffmpeg internals.
+            #
+            # The back-off timestamp is recorded so _get_inference_
+            # mediamtx_jwt can skip subsequent mint attempts during a
+            # sustained MediaMTX outage — without it, every inference
+            # cycle across every camera would mint a fresh token only
+            # to throw it away on the next capture failure, defeating
+            # the cache. See _INFERENCE_JWT_INVALIDATION_BACKOFF_SECONDS.
+            self._inference_jwt = None
+            self._inference_jwt_expires_at = 0.0
+            self._inference_jwt_invalidated_at = time.monotonic()
+        return result
+
+    # JWT cache TTL knobs — the token MediaMtxJwtService mints has the
+    # lifetime below; we refresh 10 minutes before that boundary to
+    # leave margin for clock skew between processes and avoid a flurry
+    # of last-second refreshes if many cameras fire inference around
+    # the same time. Refresh is derived from lifetime so the two stay
+    # in sync if either knob changes.
+    _INFERENCE_JWT_LIFETIME_MINUTES: int = 60
+    _INFERENCE_JWT_REFRESH_AT_SECONDS: int = (_INFERENCE_JWT_LIFETIME_MINUTES - 10) * 60
+
+    # Back-off after a tap-capture failure that invalidated the JWT
+    # cache. Without this, a sustained MediaMTX outage causes every
+    # inference cycle to mint a fresh token (~1ms RSA-sign each) only
+    # to throw it away on the next capture failure — a "mint storm"
+    # that defeats the whole point of caching. After an invalidation
+    # we skip the next mint for this many seconds so the loop stays
+    # cheap during the outage.
+    _INFERENCE_JWT_INVALIDATION_BACKOFF_SECONDS: float = 30.0
+
+    def _get_inference_mediamtx_jwt(self) -> str | None:
+        """Mint (or return a cached) JWT granting wildcard read access
+        to MediaMTX for the inference loopback tap.
+
+        MediaMTX's ``authMethod: jwt`` global setting means every
+        listener — including the plaintext loopback :8554 — requires a
+        signed token. We mint one with the system identity ``kai-c-
+        inference`` and an explicit regex-wildcard ``read`` scope
+        (``~.*``), cache it for ``_INFERENCE_JWT_REFRESH_AT_SECONDS``,
+        and append it to RTSP URLs as ``?jwt=<token>``.
+        ``authJWTInHTTPQuery: true`` in mediamtx.docker.yml is what
+        lets the token ride on the URL — ffmpeg / OpenCV's RTSP client
+        forwards the query string through unchanged.
+
+        Why an explicit ``~.*`` regex instead of "let MediaMTX default
+        an absent path to wildcard": the latter behavior is documented
+        inconsistently in the MediaMTX permissions model, and a tiny
+        bit of explicitness here is cheaper than the on-call page
+        from "MediaMTX 1.16 changed default-path semantics".
+
+        Returns ``None`` if the JWT service can't mint (missing keys,
+        crypto error). Callers fall back to the non-tap URL in that
+        case so the inference path degrades gracefully instead of
+        breaking entirely.
+        """
+        now = time.monotonic()
+        if self._inference_jwt is not None and now < self._inference_jwt_expires_at:
+            return self._inference_jwt
+
+        # Back-off after a recent invalidation. See
+        # _INFERENCE_JWT_INVALIDATION_BACKOFF_SECONDS for the rationale
+        # (avoiding mint-storm during sustained MediaMTX outage).
+        if (
+            self._inference_jwt_invalidated_at > 0.0
+            and (now - self._inference_jwt_invalidated_at)
+            < self._INFERENCE_JWT_INVALIDATION_BACKOFF_SECONDS
+        ):
+            return None
+
+        try:
+            # Late import — MediaMtxJwtService eagerly loads keys at
+            # first call, which we don't want happening at module
+            # import time.
+            from services.mediamtx_jwt_service import MediaMtxJwtService
+
+            # Pass an explicit regex-wildcard path so the permission
+            # MediaMTX sees is unambiguous: ``{"action": "read",
+            # "path": "~.*"}`` matches every camera path under the
+            # MediaMTX permissions regex grammar.
+            token = MediaMtxJwtService.create_stream_token(
+                user_id=0,
+                username="kai-c-inference",
+                camera_id=None,
+                camera_path="~.*",
+                actions=["read"],
+                expiry_minutes=self._INFERENCE_JWT_LIFETIME_MINUTES,
+            )
+        except Exception as exc:
+            main_logger.warning(
+                "inference RTSP tap: failed to mint MediaMTX JWT (%s) — "
+                "falling back to direct camera URL",
+                exc,
+            )
+            return None
+
+        self._inference_jwt = token
+        self._inference_jwt_expires_at = now + self._INFERENCE_JWT_REFRESH_AT_SECONDS
+        # A successful mint clears the back-off — if MediaMTX comes back
+        # the next capture-failure-triggered invalidation should mint
+        # immediately, not wait out the back-off.
+        self._inference_jwt_invalidated_at = 0.0
+        return token
+
+    def _resolve_inference_rtsp_url(self, camera_id: int, fallback_url: str) -> str:
+        """Return the URL the inference frame-capture loop should read.
+
+        When ``INFERENCE_USE_MEDIAMTX_TAP=true`` (the default) and
+        ``MEDIAMTX_RTSP_URL`` is configured, this returns the MediaMTX
+        loopback path for the camera — e.g.
+        ``rtsp://mediamtx:8554/cam-42?jwt=<token>``. Reading frames from
+        MediaMTX's already-active publisher session avoids opening a
+        second concurrent RTSP connection to the camera (which many
+        consumer cameras refuse) and avoids the per-frame TLS overhead
+        that ``rtsps://mediamtx:8322`` would impose on a same-kernel
+        hop.
+
+        When the tap is disabled, MediaMTX URL isn't configured, or the
+        JWT mint fails, falls back to the caller's URL (typically the
+        camera's raw RTSP URL from camera_config.source_url). The JWT
+        failure path keeps inference working at the cost of the
+        optimization — a degraded mode is better than no inference.
+
+        See docs/SECURITY_ARCHITECTURE.md §"RTSP encryption posture"
+        for the trust-boundary rationale.
+        """
+        # Late import to avoid pulling the full settings module into
+        # KaiCService's import graph at module import time.
+        from core.config import settings
+
+        if not settings.inference_use_mediamtx_tap:
+            return fallback_url
+
+        base = settings.mediamtx_rtsp_url
+        if not base:
+            return fallback_url
+
+        # MediaMTX path naming has two modes (see _build_stream_name in
+        # stream_service.py): ``id`` → ``cam-{camera_id}`` and ``ip`` →
+        # ``cam-{ip_with_dots_to_underscores}``. The resolver only has
+        # ``camera_id`` in scope, so we can construct a correct tap URL
+        # only under ``id`` mode. Under ``ip`` mode we'd have to wire
+        # camera_ip through every caller of capture_frame_from_rtsp —
+        # a non-trivial cross-file refactor we defer past v0.1.
+        # Degrade safely: skip the tap in ``ip`` mode so inference
+        # still works (using the camera URL fallback) instead of
+        # serving a 404 to MediaMTX.
+        path_mode = (getattr(settings, "mediamtx_path_mode", "id") or "id").lower()
+        if path_mode != "id":
+            main_logger.debug(
+                "inference RTSP tap disabled: mediamtx_path_mode=%r (only 'id' "
+                "supported in v0.1; falling back to direct camera URL)",
+                path_mode,
+            )
+            return fallback_url
+
+        token = self._get_inference_mediamtx_jwt()
+        if not token:
+            # JWT mint failed — degrade to direct camera URL rather than
+            # serve a URL MediaMTX will refuse.
+            return fallback_url
+
+        prefix = settings.mediamtx_stream_prefix or "cam-"
+        # urlquote the token defensively. JWTs are header.payload.signature
+        # where each part is base64url (chars A-Za-z0-9-_); the only
+        # reserved char we'd realistically see is the literal "." that
+        # separates the three parts. ``safe='.'`` keeps the structural
+        # dots un-encoded so the URL reads cleanly in logs and matches
+        # what every other JWT-in-URL client sends.
+        tap_url = f"{base.rstrip('/')}/{prefix}{camera_id}?jwt={urlquote(token, safe='.')}"
+        main_logger.debug(
+            "inference RTSP tap: camera_id=%s tap=%s (was %s)",
+            camera_id,
+            tap_url.split('?', 1)[0],  # log without token
+            fallback_url,
+        )
+        return tap_url
 
     async def process_inference(
         self,
@@ -201,7 +470,12 @@ class KaiCService:
 
         Args:
             camera_id: Camera ID
-            rtsp_url: RTSP stream URL
+            rtsp_url: RTSP stream URL — typically the camera's raw RTSP
+                URL from camera_config.source_url. When the MediaMTX
+                loopback tap is enabled (default), the actual capture
+                happens from MediaMTX's path for this camera instead;
+                ``rtsp_url`` is only used as the fallback for the
+                disabled-tap / distributed-deployment case.
             model_name: Model name (e.g., yolov8, yolov11) - KAI-C routes based on this
             task: Task name (e.g., person_detection, person_counting)
             options: Additional options/parameters
@@ -210,7 +484,11 @@ class KaiCService:
             Inference result via KAI-C
         """
         try:
-            # Capture frame from RTSP (async, runs in thread pool)
+            # capture_frame_from_rtsp internally swaps to MediaMTX's
+            # loopback path when the tap is enabled (the local-edge
+            # default) — see _resolve_inference_rtsp_url for the
+            # rationale. The ``rtsp_url`` we pass here is the fallback
+            # for the disabled-tap case.
             frame_uri = await self.capture_frame_from_rtsp(rtsp_url, camera_id)
             if not frame_uri:
                 return {

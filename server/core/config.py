@@ -192,6 +192,31 @@ class Settings(BaseSettings):
     mediamtx_webrtc_port: int = 8889  # WebRTC port
     mediamtx_hls_port: int = 8888  # HLS port
 
+    # ──────────────────────────────────────────────────────────────────
+    # Inference fast-path (MediaMTX loopback tap)
+    # ──────────────────────────────────────────────────────────────────
+    # When True (default), the inference frame-capture loop reads from
+    # MediaMTX's plaintext-loopback listener (``rtsp://mediamtx:8554/
+    # {prefix}{camera_id}``) instead of opening its own RTSP session
+    # directly to the camera. This:
+    #   * eliminates the second concurrent RTSP session the cameras see
+    #     (some consumer cameras cap concurrent sessions at 1-4),
+    #   * removes per-frame TLS encrypt + decrypt overhead on the
+    #     MediaMTX → KAI-C hop (loopback, plaintext, same kernel),
+    #   * keeps MediaMTX as the single source-of-truth for camera
+    #     connection state — recording timeline and inference timeline
+    #     share one RTP clock.
+    #
+    # Set to False for distributed deployments where MediaMTX and KAI-C
+    # are on different hosts and the hop crosses the network — in that
+    # case keep the per-camera RTSP pull, and switch mediamtx.docker.yml
+    # back to rtspEncryption: strict so the plaintext listener stays
+    # un-bound.
+    #
+    # Documented in docs/SECURITY_ARCHITECTURE.md §"RTSP encryption
+    # posture" — the trust-boundary rationale.
+    inference_use_mediamtx_tap: bool = True
+
     # MediaMTX webhook settings
     mediamtx_webhook_token: str | None = None  # Token for webhook verification (legacy)
 

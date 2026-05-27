@@ -1,0 +1,325 @@
+# ==========================================
+# OpenNVR — Tier 0 Quickstart Compose
+# ==========================================
+#
+# The fastest, most opinionated install path: NVR core + one AI
+# adapter (YOLOv8 for object detection). Everything pulls from
+# pre-built images — no source builds, no toolchain, no manual
+# weights download. Target wall time on a normal broadband link
+# (50 Mbps, fresh Docker): under 5 minutes.
+#
+# Quickstart:
+#     cp .env.example .env
+#     ./scripts/generate-secrets.sh --write
+#     docker compose -f docker-compose.tier0.yml up -d
+#
+# Open http://localhost:8000 and follow the one-time setup flow.
+#
+# To layer the camera-agent voice example on top:
+#     docker compose \
+#         -f docker-compose.tier0.yml \
+#         -f docker-compose.camera-agent.yml \
+#         --profile camera-agent up -d
+#
+# To enable additional adapters (Piper TTS, Whisper STT, fast-plate-
+# ocr LPR, InsightFace facial recognition, BLIP captions), see
+# docs/TIER0_ENABLING_ADAPTERS.md. Each is a single image addition
+# and a one-line KAI-C registry entry; the camera-agent overlay is
+# a worked example of the same pattern.
+#
+# What this file is NOT: a production deployment. For production
+# you'll want host-mode networking (see docker-compose.linux.yml),
+# external TLS termination, a managed Postgres, and reverse-proxy
+# auth. Tier 0 is the demo + dev surface — it gets you to "boxes
+# on your camera feed" in five minutes so you can decide whether
+# the rest of the project is worth your evening.
+# ==========================================
+
+services:
+  # ──────────────────────────────────────────────────────────────
+  # PostgreSQL — persistence for cameras, alerts, audit logs.
+  # ──────────────────────────────────────────────────────────────
+  db:
+    image: postgres:15-alpine
+    container_name: opennvr_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - opennvr_db_data:/var/lib/postgresql/data
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      start_period: 40s
+      retries: 5
+
+  # ──────────────────────────────────────────────────────────────
+  # MediaMTX cert init — one-shot self-signed cert generator.
+  # See docker-compose.yml for the long-form rationale; same shape
+  # here so behaviour is identical across install paths.
+  # ──────────────────────────────────────────────────────────────
+  mediamtx-certs-init:
+    image: alpine:3.20
+    container_name: opennvr_mediamtx_certs_init
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        if [ -f /certs/server.crt ] && [ -f /certs/server.key ]; then
+          echo "MediaMTX certs already present; skipping."
+          exit 0
+        fi
+        apk add --no-cache openssl >/dev/null
+        umask 077
+        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+          -keyout /certs/server.key -out /certs/server.crt \
+          -subj "/CN=opennvr-mediamtx" \
+          -addext "subjectAltName=DNS:localhost,DNS:mediamtx,IP:127.0.0.1,IP:::1" \
+          -addext "basicConstraints=critical,CA:FALSE" \
+          -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+          -addext "extendedKeyUsage=serverAuth"
+        chmod 0644 /certs/server.crt
+        echo "Wrote /certs/server.{crt,key}."
+    volumes:
+      - ./mediamtx-certs:/certs
+
+  # ──────────────────────────────────────────────────────────────
+  # MediaMTX — RTSP / HLS / WebRTC streaming server.
+  # We keep the inline multi-stage build here even in Tier 0
+  # because it's just a 15-second binary-copy from the official
+  # MediaMTX image plus ``apk add curl`` for runOnInit webhooks.
+  # Publishing it as a separate GHCR image isn't worth the moving
+  # parts for that small a build.
+  # ──────────────────────────────────────────────────────────────
+  mediamtx:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM bluenviron/mediamtx:1.15.4 AS base
+        FROM alpine:3.20
+        RUN apk add --no-cache curl
+        COPY --from=base /mediamtx /mediamtx
+        ENTRYPOINT ["/mediamtx"]
+    container_name: opennvr_mediamtx
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      mediamtx-certs-init:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8322:8322" # RTSPS (TLS-required RTSP)
+      - "127.0.0.1:8888:8888" # HLS (HTTPS)
+      - "127.0.0.1:8889:8889" # WebRTC signaling (HTTPS)
+      - "127.0.0.1:8189:8189/tcp" # WebRTC ICE
+      - "127.0.0.1:8189:8189/udp" # WebRTC ICE
+      - "127.0.0.1:9997:9997" # API/metrics
+      - "127.0.0.1:9996:9996" # Playback API
+    volumes:
+      - ./mediamtx.docker.yml:/mediamtx.yml:ro
+      - ./mediamtx-certs:/etc/mediamtx-certs:ro
+      - ${RECORDINGS_PATH:-./recordings}:/app/recordings
+    environment:
+      - MEDIAMTX_SECRET=${MEDIAMTX_SECRET}
+      - BACKEND_HOST=${BACKEND_HOST:-opennvr_core}
+      - MTX_AUTHJWTJWKS=http://opennvr_core:8000/.well-known/jwks.json
+      - BACKEND_PORT=${BACKEND_PORT:-8000}
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9997/v3/paths/list"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+
+  # ──────────────────────────────────────────────────────────────
+  # NATS event bus — KAI-C publishes inference events here so
+  # downstream apps (alert relays, custom dashboards) can subscribe.
+  # ──────────────────────────────────────────────────────────────
+  nats:
+    image: nats:2-alpine
+    container_name: opennvr_nats
+    restart: unless-stopped
+    command:
+      - --name
+      - opennvr-nats
+      - --auth
+      - ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set in .env for the NATS event bus}
+      - --http_port
+      - "8222"
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8222/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  # ──────────────────────────────────────────────────────────────
+  # YOLOv8 weights init — one-shot downloader for the ONNX
+  # weights the YOLOv8 adapter expects at /weights/yolov8n.onnx.
+  #
+  # We can't bake the weights into the adapter image because the
+  # build pipeline ships a generic, vendor-neutral adapter; the
+  # specific model weight choice (yolov8n vs yolov8s vs a
+  # fine-tuned in-house model) lives with the operator. The init
+  # container makes the "no manual download" promise true for the
+  # default (yolov8n) case while leaving the override path open
+  # via the YOLOV8_WEIGHTS_URL env var.
+  # ──────────────────────────────────────────────────────────────
+  yolov8-weights-init:
+    image: alpine:3.20
+    container_name: opennvr_yolov8_weights_init
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        WEIGHTS=/weights/yolov8n.onnx
+        if [ -s "$$WEIGHTS" ]; then
+          echo "yolov8n.onnx already present at $$WEIGHTS (size: $$(wc -c < $$WEIGHTS) bytes); skipping."
+          exit 0
+        fi
+        echo "Fetching yolov8n.onnx from $${YOLOV8_WEIGHTS_URL}..."
+        apk add --no-cache curl ca-certificates >/dev/null
+        # Retry up to 5 times — HF CDN occasionally 503s under load.
+        # --retry-all-errors covers transient TCP resets too.
+        curl --fail --location --retry 5 --retry-all-errors --retry-delay 3 \
+          --output "$$WEIGHTS" \
+          "$${YOLOV8_WEIGHTS_URL}"
+        echo "Downloaded $$(wc -c < $$WEIGHTS) bytes to $$WEIGHTS."
+    environment:
+      # Override in .env to use a fine-tuned model or a private
+      # mirror. Default is the upstream Ultralytics ONNX release on
+      # Hugging Face — a stable, anonymous-pullable URL that
+      # matches the model the yolov8 adapter assumes at boot.
+      - YOLOV8_WEIGHTS_URL=${YOLOV8_WEIGHTS_URL:-https://huggingface.co/Ultralytics/YOLOv8/resolve/main/yolov8n.onnx}
+    volumes:
+      - opennvr_yolov8_weights:/weights
+
+  # ──────────────────────────────────────────────────────────────
+  # YOLOv8 adapter — object detection (boxes + class labels).
+  # The Tier 0 default. Comment out the entire block if you want
+  # a no-AI install (NVR + recording + viewing only).
+  # ──────────────────────────────────────────────────────────────
+  yolov8-adapter:
+    image: ghcr.io/open-nvr/yolov8-adapter:${ADAPTER_TAG:-latest}
+    container_name: opennvr_yolov8_adapter
+    restart: unless-stopped
+    depends_on:
+      yolov8-weights-init:
+        condition: service_completed_successfully
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+      - YOLOV8_WEIGHTS_DIR=/weights
+    volumes:
+      - opennvr_yolov8_weights:/weights:ro
+    networks:
+      - opennvr_internal
+    # No port mapping — the adapter is internal-only, reached by
+    # KAI-C over the opennvr_internal network. Operators wanting
+    # to hit /infer directly from outside the compose can add a
+    # ``127.0.0.1:9002:9002`` port mapping.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9002/health', timeout=2).status_code == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+
+  # ──────────────────────────────────────────────────────────────
+  # OpenNVR core — backend + frontend + KAI-C.
+  # ──────────────────────────────────────────────────────────────
+  opennvr-core:
+    image: ghcr.io/open-nvr/core:${CORE_TAG:-latest}
+    container_name: opennvr_core
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      mediamtx:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      yolov8-adapter:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - shared_frames:/app/AI-adapters/AIAdapters/frames
+      - ${RECORDINGS_PATH:-./recordings}:/app/recordings
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - MEDIAMTX_BASE_URL=http://mediamtx:8889
+      - MEDIAMTX_ADMIN_API=http://mediamtx:9997/v3
+      - MEDIAMTX_HLS_URL=http://mediamtx:8888
+      - MEDIAMTX_RTSP_URL=rtsp://mediamtx:8554
+      - MEDIAMTX_RTSPS_URL=rtsps://mediamtx:8322
+      - MEDIAMTX_EXTERNAL_RTSPS_URL=rtsps://localhost:8322
+      - MEDIAMTX_PLAYBACK_URL=http://mediamtx:9996
+      - MEDIAMTX_EXTERNAL_BASE_URL=http://127.0.0.1:8889
+      - MEDIAMTX_EXTERNAL_HLS_URL=http://127.0.0.1:8888
+      - MEDIAMTX_EXTERNAL_PLAYBACK_URL=http://127.0.0.1:9996
+      - KAI_C_URL=http://127.0.0.1:8100
+      - RECORDINGS_HOST_BASE=${RECORDINGS_PATH:-./recordings}
+      - RECORDINGS_CONTAINER_BASE=/app/recordings
+      - RECORDINGS_BASE_PATH=/app/recordings
+      - SECRET_KEY=${SECRET_KEY}
+      - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY}
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - MEDIAMTX_SECRET=${MEDIAMTX_SECRET}
+      # KAI-C points at the yolov8 adapter as "default" — the
+      # camera-agent overlay extends this with explicit per-model
+      # routes (whisper, piper, ollama). Operators enabling more
+      # adapters can extend ADAPTER_URL similarly OR set up a
+      # multi-URL ADAPTER_REGISTRY override in a follow-up release.
+      - ADAPTER_URL=http://yolov8-adapter:9002
+      # Inference frame-capture reads from MediaMTX's plaintext
+      # loopback path (rtsp://mediamtx:8554/cam-N) rather than
+      # opening a second RTSP session directly to the camera. This
+      # eliminates the double-pull most consumer cameras can't
+      # tolerate and saves the per-frame TLS overhead on a hop that
+      # never leaves the host's kernel. Flip to "false" only if
+      # you're running MediaMTX and KAI-C on different hosts; see
+      # docs/SECURITY_ARCHITECTURE.md §"RTSP encryption posture".
+      - INFERENCE_USE_MEDIAMTX_TAP=${INFERENCE_USE_MEDIAMTX_TAP:-true}
+      - MEDIAMTX_STREAM_PREFIX=${MEDIAMTX_STREAM_PREFIX:-cam-}
+      - NATS_URL=nats://nats:4222
+      - FRAMES_DIR=/app/AI-adapters/AIAdapters/frames
+      - HOST=${HOST:-0.0.0.0}
+      - DEBUG=${DEBUG:-False}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 5
+
+# ==========================================
+# Networks
+# ==========================================
+networks:
+  opennvr_internal:
+    driver: bridge
+
+# ==========================================
+# Volumes
+# ==========================================
+volumes:
+  opennvr_db_data:
+  shared_frames:
+  # yolov8 model weights — persistent so the init container only
+  # runs once. Wipe with ``docker volume rm openvr_opennvr_yolov8_weights``
+  # to force a re-download (e.g., after the weights URL changes).
+  opennvr_yolov8_weights:

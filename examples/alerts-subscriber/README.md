@@ -122,6 +122,6 @@ That's the entire extension surface. The NATS connection lifecycle, signal handl
 
 ## What's NOT in v1
 
-- **Durability** — the broker is fire-and-forget. Alerts fired while no subscriber is listening are lost. JetStream durable consumers + replay land with B2.
+- **Durability** — the broker is fire-and-forget. Alerts fired while no subscriber is listening are lost. JetStream durable consumers and replay are planned for a future event-store release.
 - **Filtering by severity in the subscription** — the subject scheme is `(kind, name, camera)` so severity is in the payload, not the subject. If you need server-side severity routing, filter on `alert["severity"]` in `handle_alert` and dispatch from there.
-- **Backpressure** — high alert volumes will buffer in nats-py's pending-msgs queue. If you push to a downstream system that backs up, your subscriber memory grows. The v1 fix is "make `handle_alert` fast and async-buffer downstream calls"; a future slice can add explicit max-pending tuning.
+- **Backpressure** — high alert volumes will buffer in nats-py's pending-msgs queue. If you push to a downstream system that backs up, your subscriber memory grows. The current recommendation is to keep `handle_alert` fast and async-buffer any downstream calls; explicit max-pending tuning may land in a later release.

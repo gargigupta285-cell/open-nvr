@@ -111,6 +111,12 @@ services:
       - BACKEND_HOST=127.0.0.1
       - BACKEND_PORT=${BACKEND_PORT:-8000}
       - MTX_AUTHJWTJWKS=http://127.0.0.1:${BACKEND_PORT:-8000}/.well-known/jwks.json
+      # Host-mode bind: pin the plaintext RTSP listener (used by the
+      # KAI-C inference tap) to loopback so it isn't reachable from
+      # the LAN. In bridge mode this isn't needed — the container
+      # bridge already isolates :8554 — but host mode shares the
+      # host's network stack, so we have to be explicit.
+      - MTX_RTSPADDRESS=127.0.0.1:8554
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:9997/v3/paths/list"]
       interval: 30s

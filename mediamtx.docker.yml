@@ -130,25 +130,34 @@ playbackTrustedProxies: []
 rtsp: yes
 # TCP only for localhost - UDP disabled to prevent external access
 rtspTransports: [tcp]
-# V-019 (Zenodo 17261761 §4.2 Tier 2 / RFC 7826): RTSPS-only on the
-# operator-facing listener. Plaintext RTSP is refused; clients must use
-# rtsps:// with a valid TLS handshake. The operator MUST provide
-# server.crt + server.key (see rtspServerCert/Key below) for MediaMTX
-# to start. If you cannot provide certs and have explicitly accepted
-# the trade-off, set this back to "no" AND set
-# MEDIAMTX_ALLOW_PLAINTEXT_OUTPUTS=true on the OpenNVR backend so the
-# acknowledgement is recorded in the boot audit log.
-rtspEncryption: "strict"
-# M1b-fixup-v2 F-2: rtspAddress is inert under rtspEncryption="strict"
-# — MediaMTX does not bind the plaintext listener at all (per upstream
-# config reference). The line is kept for documentation only: it
-# reminds readers what the plaintext port WOULD be if encryption were
-# loosened, and it does not affect runtime behaviour. rtspsAddress is
-# the real listener — bound to all interfaces inside the container so
-# the docker-compose port map (127.0.0.1:8322:8322) can expose it on
-# the host loopback. Operators using host-network mode should change
-# rtspsAddress to 127.0.0.1:8322 if MediaMTX is bound directly to a
-# routable interface (see docker-compose.linux.yml header comment).
+# RTSP listener policy:
+#   - The TLS listener (rtspsAddress :8322) is the operator-facing
+#     surface. It binds to all interfaces inside the container; the
+#     docker-compose port map (127.0.0.1:8322:8322) exposes it on the
+#     host loopback so external tools that need RTSP get TLS.
+#   - The plaintext listener (rtspAddress :8554) binds too, but is
+#     deliberately NOT mapped to the host — it is only reachable from
+#     other containers on the opennvr_internal Docker network.
+#
+# Why allow plaintext at all? Because the inference path inside the
+# stack reads frames from MediaMTX via rtsp://mediamtx:8554/cam-N —
+# a hop that never leaves the same kernel's loopback. Forcing TLS
+# there pays a per-frame encrypt + decrypt cost (~15-35% of the
+# steady-state CPU budget on Pi-class hardware) to protect two
+# pipes that share the same trust domain. The plaintext-loopback
+# tap matches the trust model: TLS for things that cross the host
+# boundary, plaintext for things that don't.
+#
+# To revert to TLS-only (strict mode) — e.g., if you've moved the
+# adapter or KAI-C onto a different host and the MediaMTX→KAI-C hop
+# now crosses a network — set this back to "strict" AND flip
+# INFERENCE_USE_MEDIAMTX_TAP=false in the backend env so KAI-C
+# stops trying to read the plaintext listener. The acknowledgement
+# of either change lands in the boot audit log.
+#
+# See docs/SECURITY_ARCHITECTURE.md §"RTSP encryption posture" for
+# the trust-boundary rationale in detail.
+rtspEncryption: "optional"
 rtspAddress: :8554
 rtspsAddress: :8322
 # SECURITY: Disable UDP listeners (localhost TCP only)

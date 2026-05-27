@@ -50,8 +50,66 @@ in the issue tracker.
 |---|---|---|
 | RTSPS / SRTP support | Camera-URL schema accepts both `rtsp://` and `rtsps://`; MediaMTX config wires `rtspsAddress` and `srtpAddress`. | `server/schemas.py`; `server/services/mediamtx_admin_service.py`. |
 | Preferring encrypted transport per camera | **V-003.** Each camera carries a `transport_security` policy (`rtsps_required` / `rtsps_preferred` / `plaintext_allowed`) on its `CameraConfig` row. On camera-create the backend runs an async TLS-handshake probe against the camera's RTSPS port and stores the outcome alongside the policy. A `POST /api/v1/cameras/{id}/probe-transport` endpoint re-runs the probe on demand (accepts `?port=<n>` for non-default RTSPS ports). `PUT /api/v1/cameras/{id}/transport-security` is the explicit operator-override endpoint; it sets the `transport_security_operator_set` flag so subsequent re-probes preserve the operator's choice unless `?reset_policy=true`. The decision rule for fresh cameras: probe SUPPORTED → `rtsps_preferred`; probe NOT_SUPPORTED → `plaintext_allowed` with audit log; probe INCONCLUSIVE → `rtsps_preferred` (don't make a security regression on a transient failure). **Runtime enforcement: `enforce_transport_policy` is invoked at both MediaMTX-touching choke points (`provision_path` for path-create / replace, and `patch_path` for source-mutating PATCHes), so all five entry paths into stream provisioning are covered — `push_rtsp_stream`, the startup auto-provisioner (`MediaMtxStartupService._provision_camera_with_retry`), the config-driven re-provisioner (`CameraConfigService.provision`), the admin debug endpoint `POST /admin/streams/push/{id}`, AND the admin patch endpoint `PATCH /admin/paths/{id}` (which can change `source` and was a 5th-bypass-class issue caught in self-review v2). The gate runs BEFORE any MediaMTX HTTP. Unknown policy values (typos, future enum drift, hand-edited DB rows) fail closed — `enforce_transport_policy` refuses anything not in the documented enum. Refusals: routes surface HTTP 409 with a remediation hint; the startup loop marks the camera `status=policy_blocked`, increments a dedicated `policy_blocked` counter in the startup summary, and aborts retries with a `mediamtx.startup.camera_policy_blocked` audit event. The four refusal entry points each emit their own audit event (`camera.transport_policy_refused`, `camera_config.transport_policy_refused`, `mediamtx.startup.camera_policy_blocked`, plus the admin endpoint's 409 trace). `rtsps_preferred` over a plaintext URL logs an informational warning. `plaintext_allowed` and the pre-probe `None` state skip the check.** | `server/services/transport_probe_service.py` (`enforce_transport_policy`, `TransportPolicyViolation`, `url_is_tls`); `server/services/mediamtx_admin_service.py:provision_path` (gate location); `server/services/mediamtx_startup_service.py:_provision_camera_with_retry`; `server/services/camera_config_service.py:provision`; `server/routers/mediamtx_admin.py:push_rtsp_stream`; `server/services/camera_service.py:create_camera`; `server/routers/cameras.py:probe_camera_transport`, `set_camera_transport_security`, `provision_camera_mediamtx`; `server/models.py:CameraConfig.transport_security{,_operator_set,_probe_result,_probed_at}`; migration `b4e2a9c7f1d0_add_camera_transport_security.py`. |
-| Eliminating plaintext outbound to viewers | **V-019.** All three operator-facing transports terminate TLS at MediaMTX itself: `rtspEncryption: "strict"` refuses plaintext RTSP clients on the listener (RFC 7826), `hlsEncryption: yes` makes HLS-over-HTTPS the default for the .m3u8 + segments, and `webrtcEncryption: yes` puts the WHIP/WHEP signaling channel (which carries the `?jwt=` token from `authJWTInHTTPQuery: true`) over HTTPS. WebRTC media remains DTLS-SRTP at the wire. `rtmp: no` and `srt: no` are explicit. The hardened RTSPS listener is exposed at `:8322` (loopback-mapped on the host); the backend emits `urls.rtsps` in `/api/v1/streams/.../tokens` so clients have an unambiguous TLS endpoint. The dev template (`mediamtx.local.yml`) remains permissive but carries a "DO NOT USE IN PRODUCTION" header and requires `MEDIAMTX_ALLOW_PLAINTEXT_OUTPUTS=true` on the OpenNVR side so the deviation is audit-logged and visible at `/system/posture`. **Operator dependency:** TLS requires `server.crt` + `server.key` files in MediaMTX's working directory; `scripts/generate-mediamtx-certs.sh` (POSIX) and `scripts/generate-mediamtx-certs.ps1` (Windows) generate a 10-year self-signed pair with SAN `DNS:localhost,DNS:mediamtx,IP:127.0.0.1`. **Known residual:** the JWT-in-URL pattern (`authJWTInHTTPQuery: true`) is now over TLS but tokens still land in browser history / proxy access logs; switching to a header-based JWT is tracked separately under V-007. | `mediamtx.docker.yml`, `mediamtx.yml`, `mediamtx.local.yml`, `docker-compose.yml`, `docker-compose.linux.yml`, `scripts/generate-mediamtx-certs.{sh,ps1}`; `server/core/config.py:mediamtx_rtsps_url`, `mediamtx_allow_plaintext_outputs`; `server/routers/streams.py:tokens` emits `urls.rtsps`; `server/core/policy.py:current_posture`. |
+| Eliminating plaintext outbound to viewers | **V-019.** All three operator-facing transports terminate TLS at MediaMTX itself: the RTSPS listener at `:8322` (`rtspsAddress`) is the operator-facing surface, `hlsEncryption: yes` makes HLS-over-HTTPS the default for the .m3u8 + segments, and `webrtcEncryption: yes` puts the WHIP/WHEP signaling channel (which carries the `?jwt=` token from `authJWTInHTTPQuery: true`) over HTTPS. WebRTC media remains DTLS-SRTP at the wire. `rtmp: no` and `srt: no` are explicit. The RTSPS listener is exposed at `:8322` (loopback-mapped on the host); the backend emits `urls.rtsps` in `/api/v1/streams/.../tokens` so clients have an unambiguous TLS endpoint. **Plaintext RTSP posture:** `rtspEncryption: "optional"` lets a `:8554` listener bind alongside `:8322` so the KAI-C inference frame-capture loop can read from `rtsp://mediamtx:8554/cam-N` — a same-kernel hop that never leaves the host. The `:8554` listener is deliberately not port-mapped to the host in bridge mode; in host-mode (`docker-compose.linux.yml`) it's pinned to `127.0.0.1:8554` via `MTX_RTSPADDRESS`. JWT auth still applies to that listener — KAI-C mints a wildcard-read token via `MediaMtxJwtService.create_stream_token` and appends it as `?jwt=<token>`. To revert to TLS-only (strict mode), set `rtspEncryption: "strict"` in `mediamtx.docker.yml` AND set `INFERENCE_USE_MEDIAMTX_TAP=false` so KAI-C falls back to pulling the camera directly. See the "RTSP encryption posture" subsection below for the trust-boundary rationale. The dev template (`mediamtx.local.yml`) remains permissive but carries a "DO NOT USE IN PRODUCTION" header and requires `MEDIAMTX_ALLOW_PLAINTEXT_OUTPUTS=true` on the OpenNVR side so the deviation is audit-logged and visible at `/system/posture`. **Operator dependency:** TLS requires `server.crt` + `server.key` files in MediaMTX's working directory; `scripts/generate-mediamtx-certs.sh` (POSIX) and `scripts/generate-mediamtx-certs.ps1` (Windows) generate a 10-year self-signed pair with SAN `DNS:localhost,DNS:mediamtx,IP:127.0.0.1`. **Known residual:** the JWT-in-URL pattern (`authJWTInHTTPQuery: true`) is now over TLS for browser-facing surfaces but tokens still land in browser history / proxy access logs; switching to a header-based JWT is tracked separately under V-007. | `mediamtx.docker.yml`, `mediamtx.yml`, `mediamtx.local.yml`, `docker-compose.yml`, `docker-compose.linux.yml`, `docker-compose.tier0.yml`, `scripts/generate-mediamtx-certs.{sh,ps1}`; `server/core/config.py:mediamtx_rtsps_url`, `mediamtx_allow_plaintext_outputs`, `inference_use_mediamtx_tap`; `server/services/kai_c_service.py:_resolve_inference_rtsp_url`; `server/services/mediamtx_jwt_service.py:create_stream_token`; `server/routers/streams.py:tokens` emits `urls.rtsps`; `server/core/policy.py:current_posture`. |
 | Telnet / UPnP detection on cameras | **Gap — V-014/V-021.** Planned: ONVIF probe records active services and flags Telnet/UPnP. | `server/services/onvif_service.py`. |
+
+#### RTSP encryption posture — the trust-boundary distinction
+
+OpenNVR's RTSP encryption choice is deliberately asymmetric: TLS on the
+operator-facing surface, plaintext on the in-host inference tap. The
+reason is that TLS protects information crossing a trust boundary; two
+processes that share the same kernel and the same Docker network are
+not crossing one, and paying per-frame encrypt + decrypt cost on that
+hop buys nothing.
+
+The three RTSP listeners and what they're for:
+
+| Listener | Address (default) | Who reads it | Encryption |
+|---|---|---|---|
+| Operator-facing RTSP | `:8322` (RTSPS), port-mapped to `127.0.0.1:8322` on the host | External tools the operator points at the NVR (VLC, ffmpeg, third-party recorders) | TLS — clients are on the LAN or further out |
+| Operator-facing HLS / WebRTC | `:8888` / `:8889`, port-mapped to `127.0.0.1` | Browsers running the OpenNVR web UI | TLS — same reason |
+| Internal inference tap | `:8554` (RTSP plaintext), NOT port-mapped in bridge mode; pinned to `127.0.0.1:8554` in host mode | KAI-C's frame-capture loop, same machine | Plaintext — never leaves the host's loopback |
+
+What stays the same regardless of encryption: **JWT authentication
+applies to all three listeners.** MediaMTX's `authMethod: jwt` is
+global; the plaintext listener still refuses anonymous reads. KAI-C
+mints a wildcard-read token via `MediaMtxJwtService.create_stream_token`
+(cached for 50 minutes, refreshed transparently) and appends it as
+`?jwt=<token>` to its RTSP URL. The token rides through ffmpeg's RTSP
+client because MediaMTX has `authJWTInHTTPQuery: true`.
+
+What the inference tap actually buys:
+
+1. **No double-pull of the camera.** Without the tap, MediaMTX opens
+   one RTSP session to the camera (for recording + browser playback)
+   and KAI-C opens a second one (for inference). Many consumer cameras
+   cap concurrent RTSP sessions at 1–4; the double-pull can be the
+   difference between a working camera and a refused connection.
+2. **No per-frame TLS overhead on a loopback hop.** RTSPS to `:8322`
+   would encrypt every RTP packet on a pipe that never leaves the host
+   — measurable CPU cost (~15-35% of the steady-state inference budget
+   on Pi-class hardware) with no threat-model gain.
+3. **One source of truth for the camera connection.** MediaMTX's
+   recording timeline and KAI-C's inference timeline share the same
+   underlying RTP clock, which makes "this alert at 22:14 corresponds
+   to this segment" correlation deterministic instead of best-effort.
+
+When to flip back to strict mode (`rtspEncryption: "strict"` plus
+`INFERENCE_USE_MEDIAMTX_TAP=false`):
+
+- **MediaMTX and KAI-C on different hosts.** If your deployment splits
+  the streaming layer from the inference layer onto separate machines,
+  the MediaMTX→KAI-C hop now crosses a real network boundary and
+  should be TLS-protected. Inference falls back to pulling each camera
+  directly, accepting the double-pull cost.
+- **Operator policy requires "no plaintext anywhere, ever."** Some
+  regulated environments treat plaintext loopback as a finding even
+  when the threat model doesn't justify it. Strict mode + tap-off
+  satisfies the audit without arguing.
+
+Either decision lands in the boot audit log: `INFERENCE_USE_MEDIAMTX_TAP`
+is recorded at startup the same way the other security-relevant config
+is, and a flip from default surfaces in `/system/posture`.
 
 ### 2.3 Fragmented interoperability (paper §3.3)
 
