@@ -2,43 +2,86 @@
 
 # OpenNVR
 
-### Self-hosted, AI-powered video surveillance — secure by default, sovereign by design, yours to extend.
+### The self-hosted NVR you can talk to.
+
+Object detection, license-plate OCR, face recognition, scene captioning, multi-object tracking —
+and a voice agent that grounds its answers in live camera feeds. All running on your hardware.
+No cloud calls by default. Pluggable AI adapter contract. AGPL.
 
 [![CI](https://github.com/open-nvr/open-nvr/actions/workflows/ci.yml/badge.svg)](https://github.com/open-nvr/open-nvr/actions/workflows/ci.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org)
 [![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.17261761-blue.svg)](https://doi.org/10.5281/zenodo.17261761)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
-
-**OpenNVR** is an open-source network video recorder with a pluggable AI adapter ecosystem,
-offline-first network posture, and an end-to-end audit trail from camera to alert.
-Bring your own model. Own your footage. Deploy anywhere.
 
 > **v0.1 is here.** Nine first-party example apps shipping today — from
 > *"is there a person in this zone?"* to *"ask your cameras out loud."*
 > Skip to the [gallery](#-examples).
 
-[Quick start](#-quick-start-3-commands) · [Why OpenNVR](#-why-opennvr) · [Examples](#-examples) · [Architecture](docs/SECURITY_ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md)
+[Quick start](#-quick-start-under-5-minutes) · [Why OpenNVR](#-why-opennvr) · [Examples](#-examples) · [Compliance](docs/COMPLIANCE.md) · [Architecture](docs/SECURITY_ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
 ---
 
-## ⚡ Quick start (3 commands)
+> **Built on published research.** OpenNVR is the open-source reference implementation of
+> *Eliminating Systemic IP Camera Vulnerabilities via Offline-First Open Security Architecture*
+> ([Singh et al., 2025 — DOI 10.5281/zenodo.17261761](https://doi.org/10.5281/zenodo.17261761)).
+> 34 sources spanning CISA advisories, real CVEs (Hikvision, Dahua, Uniview, Edimax, ThroughTek
+> Kalay), the 2021 Verkada breach, NIST CSF 2.0, NIST AI RMF, ISO/IEC 27001, ETSI EN 303 645,
+> GDPR, and India's DPDP Act. Paper §3 → §4 → code mapping in [docs/COMPLIANCE.md](docs/COMPLIANCE.md).
+>
+> **For critical infrastructure, defence, government, and any organisation where IP-camera
+> security is a hard requirement:** the adapter contract lets your tactical AI run on your
+> hardware under your control — models you've fine-tuned, models you can't share with a
+> vendor, analytics whose detection logic itself is operationally sensitive. Camera-layer
+> isolation, middleware you patch on your own cadence, AI you author and run locally,
+> audit chain that proves none of it touched a vendor cloud. See
+> [docs/GOVERNMENT_DEPLOYMENT.md](docs/GOVERNMENT_DEPLOYMENT.md) for the procurement-grade
+> brief.
+
+---
+
+## ⚡ Quick start (under 5 minutes)
+
+Pulls pre-built images straight from GHCR — no toolchain, no source build, no
+manual model downloads. NVR core + YOLOv8 object detection running on your
+camera feed in the time it takes to make a coffee.
 
 ```bash
 git clone https://github.com/open-nvr/open-nvr.git
 cd open-nvr
-./start.sh        # Linux / macOS   (Windows: .\start.ps1)
+cp .env.example .env
+./scripts/generate-secrets.sh --write
+docker compose -f docker-compose.tier0.yml up -d
 ```
 
-Open <http://localhost:8000>, paste the one-time setup token printed in the terminal,
-choose an admin password, and add your first camera.
-AI detection is **off by default for safety** — set `AI_ENABLED=true` in your `.env`
-and restart (`./start.sh build`) when you're ready.
+Open <http://localhost:8000>, paste the one-time setup token from the terminal,
+choose an admin password, and add your first camera. YOLOv8 object detection is
+running on every frame from the moment the camera connects — no extra config.
+
+Want voice control? Layer the camera-agent on top:
+
+```bash
+docker compose -f docker-compose.tier0.yml \
+               -f docker-compose.camera-agent.yml \
+               --profile camera-agent run --rm ollama-model-pull
+docker compose -f docker-compose.tier0.yml \
+               -f docker-compose.camera-agent.yml \
+               --profile camera-agent up -d
+```
+
+Open <http://localhost:9100/demo>, click "Start", and ask
+*"is there a person at the front door?"* — the agent grounds its answer in a
+live frame from your camera and speaks the reply.
 
 Every security feature ships **on by default**. You don't configure security — you configure exceptions.
+
+> **Building from source instead?** The legacy `./start.sh` (Linux/macOS) and
+> `.\start.ps1` (Windows) launchers still work and live alongside the Tier 0
+> compose for contributors and dev workflows. Pre-built images mean nobody has
+> to wait for a 20-minute build to try the project.
 
 ---
 
@@ -77,7 +120,7 @@ the audit log.
 |---|---|---|
 | First-boot admin account | Default credentials or unset auth | **One-time setup token, no shipped password** |
 | Secret strength | Operator's responsibility | **Refuses to boot on placeholder or short secrets** |
-| Cloud egress | On by default | **403 unless `DEPLOYMENT_MODE` is flipped; audit-logged** |
+| Cloud egress | On by default | **403 unless `DEPLOYMENT_MODE` is switched from `offline`; audit-logged** |
 | AI sovereignty | No concept | **Adapters declaring `network_egress` refused under `local_only`** |
 | Camera TLS | Plaintext OK | **RTSPS + HLS-TLS + WebRTC-TLS on by default; plaintext requires opt-in + audit** |
 | Audit trail | Application logs | **End-to-end correlation ID from alert → adapter; append-only event log** |
@@ -133,29 +176,34 @@ every adapter — traceable end to end, by default.
 - Git
 - Docker Desktop (macOS / Windows) **or** Docker Engine + Compose v2 (Linux)
 
-### Step-by-step
+### Tier 0 — pre-built images (recommended)
+
+Pulls everything from GHCR. No source build, no toolchain. Target wall time on
+50 Mbps broadband: under 5 minutes.
 
 ```bash
 git clone https://github.com/open-nvr/open-nvr.git
 cd open-nvr
-./start.sh                    # Linux / macOS
-# Windows PowerShell:
-# .\start.ps1
+cp .env.example .env
+./scripts/generate-secrets.sh --write     # Windows: .\scripts\generate-secrets.ps1 -Write
+docker compose -f docker-compose.tier0.yml up -d
 ```
 
-The smart launcher detects your OS, runs the interactive installer on first boot, and
-just validates-and-starts on every subsequent run. On first boot it will:
+Open the **first-time setup token** the core container prints to its log
+(`docker compose -f docker-compose.tier0.yml logs opennvr-core | grep TOKEN`),
+visit <http://localhost:8000>, paste the token, set an admin password, and add
+your first camera. YOLOv8 object detection runs on every frame from the moment
+the camera connects.
 
-1. Check prerequisites (Docker, Compose, Git).
-2. Ask for recording-storage path and initialization options.
-3. Generate cryptographically random secrets and write `.env` (read by `docker compose`).
-4. Generate self-signed TLS certs for MediaMTX.
-5. Build images and start the stack.
+**What ships in Tier 0:**
 
-When the wizard prints the **first-time setup token banner**, copy the token,
-open <http://localhost:8000>, paste it on the setup form, and choose an admin password.
-
-Subsequent restarts skip the setup-token flow.
+| Service | Image | Purpose |
+|---|---|---|
+| `opennvr-core` | `ghcr.io/open-nvr/core` | Backend + frontend + KAI-C connector |
+| `mediamtx` | local (binary copy from `bluenviron/mediamtx`) | RTSP / HLS / WebRTC streaming |
+| `yolov8-adapter` | `ghcr.io/open-nvr/yolov8-adapter` | Object detection |
+| `db` | `postgres:15-alpine` | State persistence |
+| `nats` | `nats:2-alpine` | Inference event bus |
 
 **Endpoints:**
 
@@ -163,21 +211,40 @@ Subsequent restarts skip the setup-token flow.
 |---|---|
 | Web UI | <http://localhost:8000> |
 | API docs (OpenAPI) | <http://localhost:8000/docs> |
-| MediaMTX | <http://localhost:8889> |
-| AI Adapter (when `AI_ENABLED=true`) | <http://localhost:9100> |
+| MediaMTX HLS | <http://localhost:8888> |
+| MediaMTX WebRTC | <http://localhost:8889> |
+
+### Adding the voice agent
+
+The camera-agent overlay layers Whisper STT + Piper TTS + Ollama LLM on top of
+Tier 0 so you can talk to your cameras:
+
+```bash
+docker compose -f docker-compose.tier0.yml \
+               -f docker-compose.camera-agent.yml \
+               --profile camera-agent run --rm ollama-model-pull     # ~2 GB, one-time
+docker compose -f docker-compose.tier0.yml \
+               -f docker-compose.camera-agent.yml \
+               --profile camera-agent up -d
+```
+
+Open <http://localhost:9100/demo>, click "Start", and speak.
 
 ### Stopping / restarting
 
 ```bash
-./start.sh down       # stop everything
-./start.sh status     # show container health
-./start.sh logs       # tail logs
-./start.sh build      # rebuild images and start
+docker compose -f docker-compose.tier0.yml down            # stop everything
+docker compose -f docker-compose.tier0.yml ps              # show container health
+docker compose -f docker-compose.tier0.yml logs -f         # tail logs
+docker compose -f docker-compose.tier0.yml pull            # refresh to latest images
 ```
 
-> Prefer doing it by hand? The smart launcher is just `install.sh` + `docker compose up -d`.
-> Look in `scripts/install.sh` to see exactly what gets written. For bare-metal
-> development (no Docker), see the next section.
+### Building from source (legacy / dev)
+
+The smart launcher (`./start.sh` on Linux/macOS, `.\start.ps1` on Windows) still
+works and builds every image locally instead of pulling from GHCR. Useful when
+you're modifying the core or running an unreleased commit. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the from-source path.
 
 ---
 
@@ -261,7 +328,11 @@ class MyDetector(AdapterService):
         return HardwareEvaluationResponse(verdict=HardwareVerdict.OK, details="")
 
     def infer(self, payload) -> InferResponse:
-        frame_bytes = payload["__file__"]
+        # Binary payloads land at payload[BODY_BYTES_KEY] — import the constant
+        # from the SDK rather than hardcoding the literal so a future rename
+        # doesn't silently break your adapter.
+        from opennvr_adapter_sdk import BODY_BYTES_KEY
+        frame_bytes = payload[BODY_BYTES_KEY]
         # ... run your model ...
         return InferResponse(result={"detections": [
             {"label": "person", "confidence": 0.93, "bbox": [10, 20, 100, 200]},
@@ -334,7 +405,6 @@ the community has asked for next.
 ## 💬 Community
 
 - **GitHub Discussions** — questions, show & tell, feature ideas
-- **Discord** — coming with the v0.1 launch — real-time help, adapter authoring, homelab tips
 - **Issue tracker** — bugs only, please. Use Discussions for questions.
 
 If OpenNVR saves you a weekend, give us a ⭐ on GitHub — it's the cheapest way to help
@@ -353,11 +423,25 @@ a vulnerability" feature on this repo, or follow the disclosure process in
 
 ## 📚 Documentation
 
-- [User Manual](USER_MANUAL.md) — using the web interface
+**Getting started**
+
 - [Docker Quickstart](DOCKER_QUICKSTART.md) — the recommended install path
+- [User Manual](USER_MANUAL.md) — using the web interface
 - [Local Setup](docs/LOCAL_SETUP.md) — bare-metal developer setup
-- [Security Architecture](docs/SECURITY_ARCHITECTURE.md) — threat model, controls, roadmap
+- [Use Cases by Industry](docs/USE_CASES.md) — does OpenNVR fit your environment?
+- [Comparisons](docs/COMPARISONS.md) — honest evaluation vs Frigate / ZoneMinder / Verkada / Viseron / Shinobi
+
+**Architecture & security**
+
+- [Security Architecture](docs/SECURITY_ARCHITECTURE.md) — threat model, V-* control inventory
+- [Compliance Mapping](docs/COMPLIANCE.md) — paper §3 → §4 → code, plus framework alignment
+- [Government Deployment Brief](docs/GOVERNMENT_DEPLOYMENT.md) — procurement one-pager + operational sovereignty
 - [AI Adapter Contract](docs/AI_ADAPTER_CONTRACT.md) — the wire spec for adapter authors
+
+**Project**
+
+- [Roadmap](docs/ROADMAP.md) — what's shipped, what's coming
+- [Support](docs/SUPPORT.md) — community channels and commercial-support paths
 - [Changelog](CHANGELOG.md) — what's new, version by version
 - [Contributing](CONTRIBUTING.md) — PR flow and coding standards
 
@@ -379,6 +463,6 @@ See [`LICENSE`](LICENSE) for the full terms.
 
 <div align="center">
 
-**Star us ⭐ · [Try the quickstart](#-quick-start-3-commands) · [Read the contract](docs/AI_ADAPTER_CONTRACT.md) · [Join the community](#-community)**
+**Star us ⭐ · [Try the quickstart](#-quick-start-under-5-minutes) · [Read the contract](docs/AI_ADAPTER_CONTRACT.md) · [Join the community](#-community)**
 
 </div>

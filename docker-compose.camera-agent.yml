@@ -1,0 +1,199 @@
+# ==========================================
+# OpenNVR — camera-agent overlay
+# ==========================================
+#
+# Adds the voice-agent demo on top of Tier 0. Lets you ask your
+# cameras out loud — "is there a person at the front door?" — and
+# hear the answer spoken back. Built on Pipecat + Silero VAD +
+# Whisper STT + Ollama LLM + Piper TTS, all CPU-friendly.
+#
+# Quickstart (assumes Tier 0 is already configured):
+#
+#     # Pull the Ollama model the agent uses (one-time, ~2GB):
+#     docker compose -f docker-compose.tier0.yml \
+#                    -f docker-compose.camera-agent.yml \
+#                    --profile camera-agent \
+#                    run --rm ollama-model-pull
+#
+#     # Bring up the overlay:
+#     docker compose -f docker-compose.tier0.yml \
+#                    -f docker-compose.camera-agent.yml \
+#                    --profile camera-agent up -d
+#
+# Open http://localhost:9100/demo, click "Start", and speak.
+#
+# ── A note on packaging maturity ───────────────────────────────
+#
+# v0.1 ships the camera-agent service ``build:``-from-source.
+# v0.1.1 will publish ghcr.io/open-nvr/camera-agent + a dedicated
+# ghcr.io/open-nvr/ollama-adapter that wraps the Ollama HTTP API in
+# the AI Adapter Contract v1 shape, so this overlay becomes a pure
+# ``image:`` pull (sub-5-minute install matching Tier 0). Until that
+# lands the overlay relies on:
+#
+#   * The monolithic ``ai-adapter`` image (Tier 0 doesn't pull this
+#     — only the per-adapter yolov8 image — so this overlay does
+#     the heavy pull on first ``compose up``).
+#   * Building the camera-agent image from the repo's
+#     examples/camera-agent/ source on first ``compose up`` (~90s on
+#     a fast machine — the Dockerfile is tiny, no native deps).
+#
+# Both are clearly marked in the service definitions below.
+# ==========================================
+
+services:
+  # ──────────────────────────────────────────────────────────────
+  # Monolithic AI adapter image — serves Whisper STT, Piper TTS,
+  # and the Ollama adapter wrapper on a single port (9100). Built
+  # from ../ai-adapter for now; v0.1.1 will replace this with
+  # per-adapter images pulled from GHCR.
+  # ──────────────────────────────────────────────────────────────
+  ai-adapter:
+    profiles: [camera-agent]
+    build:
+      context: ../ai-adapter
+      dockerfile: Dockerfile
+    image: opennvr/ai-adapter:local-build
+    container_name: opennvr_ai_adapter
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+      # The Ollama adapter inside this image calls Ollama at this URL.
+      - OLLAMA_BASE_URL=http://ollama:11434
+    volumes:
+      - ../ai-adapter/model_weights:/app/model_weights
+      - shared_frames:/app/frames
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9100/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s  # heavy adapter — give it cold-start time
+      retries: 5
+
+  # ──────────────────────────────────────────────────────────────
+  # Ollama — local LLM runtime. We use the official upstream image
+  # which is stable, well-maintained, and identical to what
+  # developers run on their laptops today.
+  # ──────────────────────────────────────────────────────────────
+  ollama:
+    profiles: [camera-agent]
+    image: ollama/ollama:0.5.4
+    container_name: opennvr_ollama
+    restart: unless-stopped
+    volumes:
+      - opennvr_ollama_models:/root/.ollama
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
+  # ──────────────────────────────────────────────────────────────
+  # Ollama model pull — one-shot. Run explicitly with:
+  #   docker compose ... run --rm ollama-model-pull
+  # before the first ``up`` so the LLM is ready when the agent
+  # starts. Default model: llama3.2:3b (~2 GB). Override via the
+  # OLLAMA_MODEL env var in .env.
+  # ──────────────────────────────────────────────────────────────
+  ollama-model-pull:
+    profiles: [camera-agent]
+    image: ollama/ollama:0.5.4
+    container_name: opennvr_ollama_pull
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: ["/bin/sh"]
+    command:
+      - -c
+      - |
+        set -e
+        MODEL="$${OLLAMA_MODEL:-llama3.2:3b}"
+        echo "Pulling Ollama model: $$MODEL"
+        OLLAMA_HOST=http://ollama:11434 ollama pull "$$MODEL"
+        echo "Model ready."
+    environment:
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:3b}
+    volumes:
+      - opennvr_ollama_models:/root/.ollama
+    networks:
+      - opennvr_internal
+
+  # ──────────────────────────────────────────────────────────────
+  # camera-agent — the voice loop. Built from local source for
+  # v0.1; v0.1.1 will pull ghcr.io/open-nvr/camera-agent.
+  #
+  # The agent's config.yml is generated from a template by the
+  # ``camera-agent-config-init`` init container below so secrets
+  # come from .env, not the repo.
+  # ──────────────────────────────────────────────────────────────
+  camera-agent-config-init:
+    profiles: [camera-agent]
+    image: alpine:3.20
+    container_name: opennvr_camera_agent_config_init
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        apk add --no-cache gettext >/dev/null
+        # ``envsubst`` will only replace the variables we list,
+        # leaving other ``$`` sigils (e.g. system_prompt YAML
+        # multiline syntax) untouched. This is essential because
+        # YAML's pipe-block syntax doesn't need escaping but
+        # envsubst would otherwise be too eager.
+        envsubst '$$INTERNAL_API_KEY $$CAMERA_AGENT_LISTEN_HOST $$OLLAMA_MODEL' \
+          < /template/config.docker.yml \
+          > /generated/config.yml
+        echo "Wrote /generated/config.yml from template."
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:3b}
+    volumes:
+      - ./examples/camera-agent:/template:ro
+      - opennvr_camera_agent_config:/generated
+
+  camera-agent:
+    profiles: [camera-agent]
+    build:
+      context: .
+      dockerfile: examples/camera-agent/Dockerfile
+    image: opennvr/camera-agent:local-build
+    container_name: opennvr_camera_agent
+    restart: unless-stopped
+    depends_on:
+      camera-agent-config-init:
+        condition: service_completed_successfully
+      ai-adapter:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      opennvr-core:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:9100:9100"  # demo UI
+    volumes:
+      - opennvr_camera_agent_config:/app/config:ro
+    command:
+      - --config
+      - /app/config/config.yml
+    networks:
+      - opennvr_internal
+
+volumes:
+  # Ollama model store — persisted so the LLM survives ``compose
+  # down``. ``ollama-model-pull`` writes here once; subsequent
+  # restarts re-use the cached weights.
+  opennvr_ollama_models:
+  # Generated config.yml lives here so the camera-agent container
+  # can mount it read-only without exposing the secret-bearing
+  # config to the repo.
+  opennvr_camera_agent_config:

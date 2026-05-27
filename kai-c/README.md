@@ -38,7 +38,7 @@ As of v2.0 KAI-C is the registry and audit layer per §11 of the [AI Adapter Con
 
 **Audit event vocabulary (subset for v1)**: `adapter.registered`, `adapter.deregistered`, `adapter.fingerprint_mismatch`, `adapter.capability_drift`, `adapter.unavailable`, `inference.completed`, `inference.failed`, `inference.refused_sovereignty`. JSONL format on disk at `$KAI_C_AUDIT_LOG` (defaults to `/var/log/opennvr/kai-c-audit.jsonl`).
 
-**Deferred to follow-up** (documented in the design doc §11): NATS / SIEM forwarding, operator-UI approval flow, hash-chained audit integrity (v1.5), fair-queuing per-camera token bucket implementation, full WS streaming proxy.
+**Deferred to a future release** (tracked against the [AI Adapter Contract](../docs/AI_ADAPTER_CONTRACT.md) §11): NATS / SIEM forwarding, operator-UI approval flow, hash-chained audit integrity, fair-queuing per-camera token bucket implementation, full WS streaming proxy.
 
 ### Known limitation — legacy `/infer` is unaudited
 

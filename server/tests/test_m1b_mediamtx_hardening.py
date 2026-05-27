@@ -107,15 +107,33 @@ def test_yaml_parses_cleanly(filename: str) -> None:
     ["mediamtx.docker.yml", "mediamtx.yml"],
 )
 def test_hardened_templates_enforce_tls(filename: str) -> None:
-    """V-019: hardened templates must require TLS on all viewer transports."""
+    """V-019: hardened templates must require TLS on every operator-facing
+    transport.
+
+    ``rtspEncryption`` is allowed to be either ``"strict"`` (no plaintext
+    listener at all — the original hardening posture) or ``"optional"``
+    (RTSPS stays the operator-facing listener at :8322; plaintext :8554
+    binds for the in-host KAI-C inference tap and is NOT exposed to the
+    host network — see docs/SECURITY_ARCHITECTURE.md §"RTSP encryption
+    posture"). Both values keep the TLS listener bound, which is what
+    V-019 cares about. ``"yes"`` is rejected — it's not in the MediaMTX
+    enum and would brick the boot, which is the regression that
+    originally motivated this test.
+    """
     cfg = yaml.safe_load((REPO_ROOT / filename).read_text())
-    # rtspEncryption must be the literal string "strict" (not "yes" — that
-    # value is not in the MediaMTX enum and would brick the boot, which is
-    # exactly what we shipped in the broken M1b commit and fixed here).
-    assert cfg.get("rtspEncryption") == "strict", (
-        f"{filename}: rtspEncryption must be 'strict', got "
-        f"{cfg.get('rtspEncryption')!r}"
+    rtsp_enc = cfg.get("rtspEncryption")
+    assert rtsp_enc in ("strict", "optional"), (
+        f"{filename}: rtspEncryption must be 'strict' or 'optional', got "
+        f"{rtsp_enc!r}"
     )
+    # If optional mode is in play, the RTSPS listener must still exist
+    # at :8322 — the V-019 enforcement is "TLS on the operator surface",
+    # not "no plaintext anywhere internal".
+    if rtsp_enc == "optional":
+        assert cfg.get("rtspsAddress"), (
+            f"{filename}: rtspEncryption=optional requires rtspsAddress to "
+            f"be set so the TLS listener remains the operator-facing surface"
+        )
     assert cfg.get("hlsEncryption") is True, (
         f"{filename}: hlsEncryption must be enabled"
     )

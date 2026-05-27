@@ -1,0 +1,73 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# camera-agent config consumed by docker-compose.camera-agent.yml.
+#
+# Variables of the form ${VAR} are substituted by the
+# camera-agent-config-init container at compose-up time using
+# envsubst. Only the variables explicitly listed in the init
+# container's envsubst invocation are replaced — everything else
+# (e.g. the system_prompt multi-line block) is left untouched.
+#
+# DO NOT edit the substituted values directly. To change a secret,
+# update .env and re-run ``docker compose up`` so the init container
+# re-templates the file.
+
+# KAI-C inside opennvr-core. Adapter calls flow here for audit.
+kaic_url: http://opennvr-core:8100
+kaic_api_key: ${INTERNAL_API_KEY}
+
+# Streaming voice path — direct to the monolithic ai-adapter image
+# which serves Whisper STT + Piper TTS + the Ollama wrapper on
+# port 9100. v0.1.1 will split these into per-adapter images on
+# their canonical ports (9001 piper, 9003 whisper) and replace this
+# overlay's ``ai-adapter`` service with three lighter pulls.
+whisper_url: http://ai-adapter:9100
+whisper_token: ${INTERNAL_API_KEY}
+ollama_url: http://ai-adapter:9100
+ollama_token: ${INTERNAL_API_KEY}
+piper_url: http://ai-adapter:9100
+piper_token: ${INTERNAL_API_KEY}
+
+# Vision tools — routed through KAI-C. Names match what KAI-C
+# registers via its ADAPTER_REGISTRY. The Tier 0 compose registers
+# yolov8 as ``default``; v0.1.1 will register all three by name.
+detection_adapter: yolov8
+recognition_adapter: insightface
+caption_adapter: blip
+
+# LLM tuning. llama3.2:3b is the docker-compose.camera-agent.yml
+# default — fits comfortably in 3 GB of RAM at ~5-15 tok/s on CPU.
+# Bump to llama3.1:8b-instruct for better tool-calling quality if
+# you have the RAM (~6 GB). Whichever model you pick, it MUST
+# support tool calling — see https://ollama.com/blog/tool-support.
+llm_model: ${OLLAMA_MODEL}
+llm_temperature: 0.4
+llm_max_tokens: 256
+
+frame_cache_ttl_seconds: 2.0
+event_ring_size: 256
+
+# NATS broadcast — picks up inference events fanned out by KAI-C so
+# the recent_events tool can answer "did anyone walk past in the
+# last 30 minutes?". The token matches the NATS --auth value in the
+# Tier 0 compose (which uses INTERNAL_API_KEY).
+nats_inference_url: nats://nats:4222
+nats_inference_token: ${INTERNAL_API_KEY}
+
+host: ${CAMERA_AGENT_LISTEN_HOST}
+port: 9100
+
+# Empty cameras list to start — operators add their own once the
+# stack is up. The demo page still works without cameras (it just
+# can't ground answers in live frames), so this lets the install
+# complete cleanly even before any RTSP source is configured.
+cameras: []
+
+system_prompt: |
+  You are a helpful, concise voice assistant for a home with security
+  cameras. The user asks questions about what's happening on those
+  cameras. Always use your tools to ground answers in live camera
+  data — don't guess. Respond in 1-2 short sentences because your
+  reply is spoken aloud. If the user's question can't be answered
+  from the cameras, say so briefly.

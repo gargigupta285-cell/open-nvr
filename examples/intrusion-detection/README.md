@@ -159,7 +159,7 @@ If you want to build a new monitoring app for OpenNVR — package detection, loi
 
 Everything else — KAI-C call, correlation_id, audit trail, alert dispatch, frame fetching, config loading, SIGINT handling — is the same template.
 
-That template is exactly what §12.4 of the design doc calls "first-party example as a first-class community contribution lane." Submit a PR adding your example under `examples/{your-slug}/` and you join the catalogue.
+The OpenNVR examples directory is structured as a first-class community contribution lane: anything that fits this template is welcome. Submit a PR adding your example under `examples/{your-slug}/` and you join the catalogue.
 
 ## Roadmap
 

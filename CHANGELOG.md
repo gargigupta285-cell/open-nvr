@@ -14,10 +14,17 @@ principles: secure by default, sovereign by design, and pluggable by contract.
 #### Architecture
 
 - **Pluggable AI adapter ecosystem.** Any model behind a REST or WebSocket
-  endpoint becomes a first-class detector via the AI Adapter Contract v1.
-  YOLOv8 object detection, InsightFace recognition, Whisper ASR, and Piper TTS
-  ship as reference adapters. Wire spec lives in
-  [`docs/AI_ADAPTER_CONTRACT.md`](docs/AI_ADAPTER_CONTRACT.md).
+  endpoint becomes a first-class capability via the AI Adapter Contract v1.
+  Seven reference adapters ship at v0.1: YOLOv8 object detection (ONNX,
+  WebSocket streaming), InsightFace face detection + recognition with REST
+  face-DB enrollment, Whisper ASR via faster-whisper, Piper TTS with inline
+  audio response, fast-plate-ocr license-plate recognition, BLIP scene
+  captioning, and ByteTrack multi-object tracking (the first post-processor
+  adapter — composes with any detection-shaped upstream by chaining through
+  KAI-C). Plus the Ollama integration with OpenAI-style tool calling. Wire
+  spec lives in [`docs/AI_ADAPTER_CONTRACT.md`](docs/AI_ADAPTER_CONTRACT.md);
+  authoring guide and template scaffold in the sister
+  [`ai-adapter`](https://github.com/open-nvr/ai-adapter) repo.
 - **`opennvr-adapter-sdk`.** Apache-2.0 SDK that adapter authors install to
   write a new detector in ~30 lines of code. Lives in the
   `open-nvr/ai-adapter` repository; PyPI publish wires off the first
@@ -103,12 +110,40 @@ principles: secure by default, sovereign by design, and pluggable by contract.
 Each example ships with a `config.example.yml`, a `README.md`, and a focused
 test suite designed to be read in five minutes.
 
+#### Performance
+
+- **Inference fast-path: KAI-C taps MediaMTX's loopback RTSP instead of
+  double-pulling the camera.** The inference frame-capture loop now reads
+  from `rtsp://mediamtx:8554/cam-N` (plaintext, internal-only) instead of
+  opening a second concurrent RTSP session directly to each camera.
+  Eliminates the double-pull most consumer cameras can't tolerate and
+  removes the per-frame TLS overhead the previous path would have paid on
+  a same-kernel hop. Pi-class hardware sees roughly 15–35% headroom back
+  in the steady-state inference budget. JWT auth still applies — KAI-C
+  mints a wildcard-read token through `MediaMtxJwtService` and appends it
+  to the URL as `?jwt=<token>`. Operators in distributed deployments can
+  flip back to the per-camera RTSP pull via
+  `INFERENCE_USE_MEDIAMTX_TAP=false` plus `rtspEncryption: "strict"`
+  in `mediamtx.docker.yml`. Trust-boundary rationale documented in
+  [`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md)
+  §"RTSP encryption posture".
+
 #### Installation
 
+- **Tier 0 install path** (`docker-compose.tier0.yml`). Pulls pre-built
+  container images from `ghcr.io/open-nvr/*` — no source build, no
+  toolchain, no manual model downloads. NVR core + YOLOv8 detection in
+  ~5 minutes wall-clock on a typical home broadband link. Camera-agent
+  voice overlay is one additional compose flag (`-f
+  docker-compose.camera-agent.yml --profile camera-agent`). YOLOv8
+  weights auto-fetched from Hugging Face on first boot.
+- **Pre-built container images** on GHCR: `ghcr.io/open-nvr/core` plus
+  the seven per-adapter images (yolov8 / piper / whisper /
+  fast-plate-ocr / insightface / blip / bytetrack). Published by the
+  `publish-images.yml` workflow on every release tag.
 - **Interactive installer.** `./start.sh` (Linux / macOS) and `.\start.ps1`
-  (Windows) detect your OS, generate cryptographically random secrets, create
-  self-signed TLS certificates for MediaMTX on first boot, build the images,
-  and bring the stack up.
+  (Windows) still work as the source-build path — useful when running an
+  unreleased commit or modifying the core itself.
 - **`make secrets` / `make secrets-env` / `make check-secrets`** for
   bare-metal developer workflows.
 - **Reusable React frontend** with a first-time-setup flow that gates admin
@@ -121,6 +156,29 @@ test suite designed to be read in five minutes.
 - [`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md) — threat
   model, control mapping, and the academic paper that informs the architecture
   ([Zenodo DOI 10.5281/zenodo.17261761](https://doi.org/10.5281/zenodo.17261761)).
+- [`docs/COMPLIANCE.md`](docs/COMPLIANCE.md) — paper §3 → §4 → code mapping
+  plus framework alignment table (CISA Secure-by-Design, NIST CSF 2.0,
+  NIST AI RMF, ISO/IEC 27001, ETSI EN 303 645, GDPR, India's DPDP Act).
+  Procurement-grade evidence trail.
+- [`docs/GOVERNMENT_DEPLOYMENT.md`](docs/GOVERNMENT_DEPLOYMENT.md) — printable
+  procurement one-pager. FCC Covered List substitution argument plus the
+  "operational sovereignty — your AI, your tactics, your hardware" framing
+  for defence / critical-infrastructure / regulated deployments.
+- [`docs/USE_CASES.md`](docs/USE_CASES.md) — per-industry fit guide for
+  12 segments (critical infra, defence, government, healthcare, education,
+  industrial, logistics, retail LP, cannabis compliance, construction,
+  aviation / maritime / ports, smart city) with honest scope caveats.
+- [`docs/COMPARISONS.md`](docs/COMPARISONS.md) — honest head-to-head with
+  Frigate, ZoneMinder, Shinobi, Viseron, and Verkada. Acknowledges what
+  each does well before stating where OpenNVR fits differently.
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — what's shipped, v0.2 plans
+  (YOLOv11, CLIP semantic search, pose, audio events, AD/SAML SSO,
+  multi-host, TelemetrySource), v0.3+ direction (go2rtc evaluation,
+  federated AI, hardware trust anchors).
+- [`docs/SUPPORT.md`](docs/SUPPORT.md) — community support channels and
+  commercial-support tiers (deployment, custom adapters, compliance
+  evidence packs, SLA, sponsored development) via
+  [contact@cryptovoip.in](mailto:contact@cryptovoip.in).
 - [`docs/LOCAL_SETUP.md`](docs/LOCAL_SETUP.md) — bare-metal developer setup.
 - [`docs/DOCKER_SETUP.md`](docs/DOCKER_SETUP.md) — Docker-only path.
 - Per-example `README.md` files documenting each reference application.

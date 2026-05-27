@@ -303,14 +303,22 @@ async def get_stream_info(
         or "http://127.0.0.1:9996"
     )
 
-    # M1b-fixup-v2 F-2 / F-8: under rtspEncryption="strict" MediaMTX does
-    # not bind the plaintext RTSP listener at all (per upstream config
-    # reference). The legacy `urls.rtsp` is therefore unusable — clients
-    # following it get ECONNREFUSED. We emit `None` for backwards
-    # compatibility (existing clients that key into ['urls']['rtsp'] see
-    # an explicit signal rather than a KeyError) and direct them at
-    # `urls.rtsps` instead. `rtsp_disabled_reason` makes the intent
-    # discoverable from the API itself.
+    # Plaintext RTSP is not exposed to external clients regardless of
+    # whether MediaMTX is configured in "strict" or "optional" mode:
+    #
+    #   * strict mode — plaintext listener doesn't bind at all.
+    #   * optional mode — plaintext :8554 binds but is internal-only:
+    #     not port-mapped to the host in bridge compose, pinned to
+    #     127.0.0.1 in host-mode compose. It exists solely so KAI-C's
+    #     inference tap can read from MediaMTX over loopback. Browser
+    #     clients and external tools never see it.
+    #
+    # We emit ``urls.rtsp: None`` either way for backwards compatibility
+    # (clients keying into ['urls']['rtsp'] get an explicit signal
+    # rather than a KeyError) and direct them at ``urls.rtsps`` instead.
+    # ``rtsp_disabled_reason`` makes the intent discoverable from the
+    # API itself. See docs/SECURITY_ARCHITECTURE.md §"RTSP encryption
+    # posture" for the trust-boundary rationale.
     return {
         "camera_id": camera_id,
         "stream_name": stream_name,
@@ -323,8 +331,8 @@ async def get_stream_info(
             "rtsps": f"{rtsps_base.rstrip('/')}/{stream_name}",
             "rtsp": None,
             "rtsp_disabled_reason": (
-                "plaintext RTSP disabled by V-019 / rtspEncryption=strict; "
-                "use urls.rtsps"
+                "plaintext RTSP is internal-only (used by the in-host "
+                "inference tap); use urls.rtsps for external clients"
             ),
             "playback": f"{playback_base.rstrip('/')}/{stream_name}",
         },

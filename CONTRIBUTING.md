@@ -1,453 +1,332 @@
 # Contributing to OpenNVR
 
-Thank you for your interest in contributing to OpenNVR! We welcome contributions from developers, security researchers, AI/ML engineers, and documentation writers. This guide will help you get started.
+Thanks for thinking about contributing. The shortest possible summary: fork,
+branch off `main`, write tests, open a PR with a small / focused changeset.
+Everything else on this page is detail.
 
-## 🌟 Ways to Contribute
+## What we want most
 
-### 1. 🐛 Bug Reports & Feature Requests
-- Check [existing issues](https://github.com/[your-org]/opennvr/issues) before creating new ones
-- Use issue templates when available
-- Provide detailed reproduction steps for bugs
-- Include system information (OS, versions, logs)
+In rough order of impact:
 
-### 2. 💻 Code Contributions
-- Fix bugs or implement new features
-- Optimize performance bottlenecks
-- Add tests to improve coverage
-- Refactor code for better maintainability
+1. **New AI adapters.** YOLOv11, tracker (ByteTrack / BoT-SORT), pose
+   estimation, CLIP for semantic search, PaddleOCR, depth estimation. See
+   the [AI adapter authoring guide](https://github.com/open-nvr/ai-adapter#-write-your-own-adapter)
+   in the sister repo — the SDK keeps a working adapter at around 30 lines.
+2. **New example apps.** Everything under `examples/` is a copy-as-template
+   starting point. New examples that pair an existing adapter with a
+   different predicate (fall detection, package theft, dwell-time heatmaps)
+   land cleanly because the shape is already proven.
+3. **Bug reports with reproducers.** A focused issue with the camera type,
+   adapter version, exact log line, and minimum repro saves hours.
+4. **Documentation.** Docs that teach the same thing twice or that drifted
+   away from the code are higher-impact than they look — if you spot one,
+   PR the fix.
+5. **Security-hardening improvements.** Reproducer + suggested mitigation
+   gets prioritised. For vulnerabilities themselves, see [SECURITY.md](SECURITY.md)
+   first — please don't open public issues for those.
 
-### 3. 🤖 AI Model Contributions
-- Submit new model handlers for the AI Adapter registry
-- Optimize existing models for better accuracy/performance
-- Add support for new AI frameworks or cloud providers
-- Create benchmarks and evaluation scripts
+## Setting up to contribute
 
-### 4. 📖 Documentation
-- Improve README and guides
-- Write tutorials or blog posts
-- Create video demonstrations
-- Translate documentation to other languages
-
-### 5. 🔍 Security Research
-- Report vulnerabilities responsibly (see [SECURITY.md](SECURITY.md))
-- Contribute security hardening improvements
-- Review code for security issues
-- Add security test cases
-
----
-
-## 🚀 Getting Started
-
-### 1. Fork and Clone
+You need both repos side-by-side:
 
 ```bash
-# Fork repository on GitHub, then:
-git clone https://github.com/YOUR_USERNAME/opennvr.git
-cd opennvr
-git remote add upstream https://github.com/[your-org]/opennvr.git
+git clone https://github.com/open-nvr/open-nvr.git
+git clone https://github.com/open-nvr/ai-adapter.git
+cd open-nvr
 ```
 
-### 2. Set Up Development Environment
+Then pick the path that matches what you're doing:
 
-#### Backend (Python)
+### Fast iteration (Docker)
+
+Best for testing your changes end-to-end against the same stack the Tier 0
+install runs on. Slower per-iteration than the bare-metal path below because
+every change rebuilds an image.
+
 ```bash
-cd server
-uv venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-uv sync  # Installs dependencies including dev group
-
-# Install pre-commit hooks (optional but recommended)
-pre-commit install
+cp .env.example .env
+./scripts/generate-secrets.sh --write
+./start.sh build               # builds opennvr-core locally from your tree
 ```
 
-#### Frontend (TypeScript/React)
-```bash
-cd app
-npm install
-```
+### Bare-metal dev shell (no Docker)
 
-#### AI Adapters
+Best for working on the Python code itself. Each subsystem runs in its own
+terminal, restarts fast on change, hot-reloads via uvicorn / Vite.
+
 ```bash
-cd AI-adapters/AIAdapters
+# Backend (Python)
+cd open-nvr/server
+uv venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
 uv sync
+alembic upgrade head
+python start.py
+
+# KAI-C (in a second terminal)
+cd open-nvr/kai-c
+uv venv && source .venv/bin/activate
+uv sync
+python start.py
+
+# Frontend (in a third terminal)
+cd open-nvr/app
+npm install
+npm run dev                              # http://localhost:5173
+
+# AI adapter monolith (in a fourth terminal, optional)
+cd ai-adapter
+uv venv && source .venv/bin/activate
+uv sync --extra all --extra cpu
+uv run python download_models.py
+uv run uvicorn app.main:app --reload --port 9100
+
+# MediaMTX (in a fifth terminal — binary, not a venv)
+./mediamtx open-nvr/mediamtx.local.yml
 ```
 
-### 3. Create a Feature Branch
+Bare-metal walkthrough with prerequisites and gotchas:
+[`docs/LOCAL_SETUP.md`](docs/LOCAL_SETUP.md).
+
+## Branching and PR flow
 
 ```bash
-git checkout -b feature/your-feature-name
-# or
-git checkout -b bugfix/issue-123
+# Start a branch off main
+git checkout -b feature/<short-name>     # or fix/<short-name>
+
+# Make your changes, write tests, run tests locally
+pytest                                    # in server/, kai-c/, and any examples/* you touched
+
+# Push and open the PR against main
+git push -u origin feature/<short-name>
 ```
 
----
+**Tests are required.** Every behaviour change needs a test. PRs without tests
+are blocked — not as a paperwork ritual, but because the codebase only stays
+maintainable if its invariants are encoded somewhere a future contributor will
+see.
 
-## 📝 Code Guidelines
+**One topic per PR.** Drive-by refactors that happen alongside the real change
+go in their own PR. Reviewers can't push back on "the small refactor looks
+weird" when the PR title is about something else.
 
-### Python Code Style
+**Reviewers respond fast and pull no punches.** Don't take it personally; we
+review code the same way we expect to be reviewed.
 
-We follow **PEP 8** with the following specifics:
+## Coding standards
 
-- **Type hints** are required for function signatures
-- **Docstrings** required for all public functions (Google style)
-- **Line length**: 100 characters max
-- **Import order**: standard library → third-party → local (use `isort`)
+The standards below are enforced by CI. Local `pre-commit install` runs them
+on every commit; CI runs them again on every PR.
 
-**Example**:
+### Python (server, kai-c, examples, ai-adapter)
+
+- **Python 3.11+.** Type hints required on function signatures.
+- **Black + isort + ruff.** Line length 100, isort uses the `black` profile.
+- **mypy** is informational, not blocking — fix what you can.
+- **Docstrings** on every public function. Google style. If a comment
+  explains *why* (not *what*) it gets in; if it parrots the code it doesn't.
+
 ```python
 from typing import Optional
 
 def get_camera_by_id(camera_id: int, db: Session) -> Optional[Camera]:
-    """
-    Retrieve a camera by its ID.
+    """Retrieve a camera by its database ID.
 
-    Args:
-        camera_id: The unique identifier of the camera
-        db: Database session
-
-    Returns:
-        Camera object if found, None otherwise
-    
-    Raises:
-        DatabaseError: If database query fails
+    Returns None if no camera with that ID exists. Caller is responsible
+    for treating None as "not found" rather than "transient DB error" —
+    those raise DatabaseError.
     """
     return db.query(Camera).filter(Camera.id == camera_id).first()
 ```
 
-**Linting & Formatting**:
-```bash
-# Format code
-black server/
-isort server/
+### TypeScript (`app/`)
 
-# Check linting
-flake8 server/
-mypy server/
-```
+- **ESLint** configured in `app/eslint.config.js`. `npm run lint` and
+  `npm run type-check`.
+- **No `any`** unless absolutely necessary (and noted in a comment).
+- **Functional components with hooks.** PascalCase files for components,
+  camelCase for utilities.
 
-### TypeScript Code Style
+### Commit messages
 
-- **ESLint** configured in `app/eslint.config.js`
-- **Type safety**: No `any` types unless absolutely necessary
-- **Component structure**: Functional components with hooks
-- **File naming**: PascalCase for components, camelCase for utilities
-
-**Example**:
-```typescript
-interface CameraProps {
-  cameraId: number;
-  onStreamStart?: () => void;
-}
-
-export const CameraLiveView: React.FC<CameraProps> = ({ cameraId, onStreamStart }) => {
-  const [isStreaming, setIsStreaming] = useState<boolean>(false);
-  
-  // Component logic...
-};
-```
-
-**Linting**:
-```bash
-cd app
-npm run lint
-npm run type-check
-```
-
-### Commit Messages
-
-We use **Conventional Commits** format:
+[Conventional Commits](https://www.conventionalcommits.org/) — the bot in CI
+parses these for the changelog generator, so the format matters:
 
 ```
 <type>(<scope>): <subject>
 
-<body>
-
-<footer>
+<optional body>
+<optional footer>
 ```
 
-**Types**:
-- `feat`: New feature
-- `fix`: Bug fix
-- `docs`: Documentation changes
-- `style`: Code style changes (formatting, no logic change)
-- `refactor`: Code refactoring
-- `perf`: Performance improvements
-- `test`: Adding or updating tests
-- `chore`: Maintenance tasks
+Common types: `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `chore`.
 
-**Examples**:
+```text
+feat(adapters): add YOLOv11 detector with ByteTrack tracking
+fix(auth): keep session alive across active streaming reconnects
+docs(quickstart): clarify Windows path syntax for RECORDINGS_PATH
+```
+
+## Adding a new AI adapter
+
+The SDK pattern is the supported way to ship a new adapter — a contract-
+compliant container, ~30 lines of Python, no changes to OpenNVR itself.
+
 ```bash
-feat(ai): add YOLOv11 model handler with ByteTrack
-fix(auth): prevent session timeout during active streaming
-docs(readme): update installation instructions for Windows
-refactor(api): simplify camera configuration validation
+pip install opennvr-adapter-sdk
 ```
-
----
-
-## 🤖 Contributing AI Models
-
-### AI Adapter Architecture
-
-OpenNVR uses a modular **handler pattern** for AI models. Each model handler:
-
-1. Inherits from `BaseModelHandler`
-2. Implements `get_supported_tasks()` and `infer()` methods
-3. Registered in `adapter/config.py`
-
-### Step-by-Step Model Contribution
-
-#### 1. Create Model Handler
 
 ```python
-# AI-adapters/AIAdapters/adapter/models/your_model_handler.py
-from .base_handler import BaseModelHandler
-from typing import Dict, List, Any
-import onnxruntime as ort
+from datetime import datetime, timezone
+from opennvr_adapter_sdk import (
+    AdapterApp, AdapterService, BodyShape, BODY_BYTES_KEY,
+    HardwareEvaluationResponse, HardwareVerdict,
+    InferResponse, ModelInfo,
+)
 
-class YourModelHandler(BaseModelHandler):
-    """Handler for [Model Name] - [Brief description]."""
-    
-    def __init__(self, model_path: str):
-        """
-        Initialize the model handler.
-        
-        Args:
-            model_path: Path to model weights
-        """
-        super().__init__(model_path)
-        self.session = ort.InferenceSession(model_path)
-        # Load model-specific configurations
-        
-    def get_supported_tasks(self) -> List[str]:
-        """Return list of tasks this model can perform."""
-        return ["task_name_1", "task_name_2"]
-    
-    def infer(self, task: str, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Run inference on input data.
-        
-        Args:
-            task: Task identifier
-            input_data: Input data dictionary with 'frame' key
-            
-        Returns:
-            Inference results matching the task's response schema
-        """
-        self.validate_task(task)
-        
-        # Load and preprocess image
-        frame = load_image_from_uri(input_data["frame"]["uri"])
-        
-        # Run inference
-        results = self._run_model(frame)
-        
-        # Format response
-        return self._format_results(results, task)
+class MyDetector(AdapterService):
+    def load(self):
+        # Eagerly load weights. Called once at startup before /health goes green.
+        ...
+
+    def is_ready(self) -> bool:
+        return True
+
+    def fingerprint(self) -> str | None:
+        return "sha256:..."          # sha256 of the model weights on disk
+
+    def model_info(self) -> ModelInfo:
+        return ModelInfo(
+            name="my-model", version="1.0.0",
+            framework="onnx", fingerprint=self.fingerprint(),
+        )
+
+    def hardware_evaluation(self) -> HardwareEvaluationResponse:
+        return HardwareEvaluationResponse(
+            verdict=HardwareVerdict.OK, reasoning="ok",
+            checked_at=datetime.now(timezone.utc), details={},
+        )
+
+    def infer(self, payload) -> InferResponse:
+        frame_bytes = payload[BODY_BYTES_KEY]
+        # ... run your model ...
+        return InferResponse(
+            model_name="my-model", model_version="1.0.0",
+            inference_ms=42,
+            result={"detections": [{"label": "person", "confidence": 0.93}]},
+        )
+
+app = AdapterApp(
+    service=MyDetector(),
+    name="my-detector", version="1.0.0", vendor="me", license="MIT",
+    tasks_advertised=["object_detection"],
+    body_shape=BodyShape.IMAGE,
+).fastapi_app
 ```
 
-#### 2. Register in Config
+Run with `uvicorn my_module:app --port 9001`, point KAI-C's
+`ADAPTER_URL` at it, and you're online.
 
-```python
-# AI-adapters/AIAdapters/adapter/config.py
+Full walkthrough in the [SDK README](https://github.com/open-nvr/ai-adapter/blob/main/opennvr_adapter_sdk/README.md)
+and reference implementations in `ai-adapter/adapters/yolov8/`,
+`adapters/whisper/`, `adapters/piper/`.
 
-MODEL_CONFIGS = {
-    # ... existing models ...
-    "your_model": {
-        "path": "model_weights/your_model.onnx",
-        "handler_class": "YourModelHandler",
-        "description": "Brief description of your model"
-    }
-}
+**Adding to the reference monolith instead?** The `ai-adapter` repo's
+`app/adapters/` directory uses an older `BaseAdapter` plugin pattern that
+predates the SDK. It's still supported for contributors extending the
+bundled server, but it's not the path we recommend for new adapters — the
+SDK pattern gives you a contract-compliant container with no OpenNVR code
+changes. See [`ai-adapter/CONTRIBUTING.md`](https://github.com/open-nvr/ai-adapter/blob/main/CONTRIBUTING.md)
+for the monolith path.
 
-ENABLED_TASKS = {
-    # ... existing tasks ...
-    "task_name_1": True,
-    "task_name_2": True
-}
-```
+## Adding a new example app
 
-#### 3. Add Response Schema
+Examples are first-class community contribution surface. The shape is
+deliberate so reviewers can read one and know where everything lives in
+the others.
 
-```python
-# AI-adapters/AIAdapters/adapter/response_schemas.py
+1. Open a [discussion](https://github.com/open-nvr/open-nvr/discussions) with
+   your idea, the camera setup you'll demo against, and the adapter(s) you'll
+   chain.
+2. Fork, branch, and `cp -r` one of the shipped examples whose shape is
+   closest to yours as your starting template.
+3. Replace the predicate (`zone.contains?`, the dwell-time state machine,
+   etc.) with your domain logic. Keep `alerts.py`, the config-loading shape,
+   and the test surface roughly as they are.
+4. Open a PR. Reviewers look for: clarity, test coverage of the predicate,
+   honest documentation of what the example does NOT yet do, and consistency
+   with the rest of the gallery.
 
-RESPONSE_SCHEMAS = {
-    # ... existing schemas ...
-    "task_name_1": {
-        "field_name": {
-            "type": "string",
-            "description": "Description of the field",
-            "example": "example_value"
-        }
-    }
-}
-```
+If yours lands as a first-party example, your name goes on it.
 
-#### 4. Create Tests
+## Running tests
 
-```python
-# AI-adapters/AIAdapters/tests/test_your_model.py
-import pytest
-from adapter.models.your_model_handler import YourModelHandler
-
-def test_your_model_inference():
-    handler = YourModelHandler("model_weights/your_model.onnx")
-    
-    input_data = {
-        "frame": {"uri": "kavach://frames/camera_0/test.jpg"}
-    }
-    
-    result = handler.infer("task_name_1", input_data)
-    
-    assert "expected_field" in result
-    assert result["expected_field"] is not None
-```
-
-#### 5. Document Performance
-
-Create a benchmark file:
-
-```markdown
-# Model: YourModel
-- **Task**: task_name_1
-- **Framework**: ONNX Runtime / PyTorch / TensorFlow
-- **Input Size**: 640x640
-- **Hardware**: Intel i7-10700 (CPU only)
-- **Avg Latency**: ~500ms
-- **Accuracy**: mAP@0.5: 0.85
-- **Model Size**: 25MB
-```
-
-#### 6. Submit Pull Request
-
-Include:
-- ✅ Handler implementation
-- ✅ Config registration
-- ✅ Tests with >80% coverage
-- ✅ Performance benchmarks
-- ✅ Usage documentation
-- ✅ Model weights (if <100MB) or download script
-
----
-
-## 🧪 Testing
-
-### Backend Tests
+Every subsystem has its own `pytest` suite. Run them where they live:
 
 ```bash
-cd server
-pytest                       # Run all tests
-pytest -v                    # Verbose output
-pytest tests/test_auth.py    # Specific test file
-pytest --cov=.               # With coverage report
+# Backend
+cd server && pytest
+
+# KAI-C orchestrator
+cd kai-c && pytest
+
+# Example apps (each is independent)
+cd examples/intrusion-detection && pytest
+cd examples/camera-agent && uv sync --extra dev && pytest
+
+# Frontend
+cd app && npm test
 ```
 
-### Frontend Tests
+Coverage reports: `pytest --cov=.` (Python) or `npm test -- --coverage`
+(frontend).
 
-```bash
-cd app
-npm test                     # Run all tests
-npm test -- --coverage       # With coverage
-```
+CI runs the full matrix on every PR. Local green is a strong signal but not
+a guarantee — CI also runs the smoke matrix that boots each adapter image
+end-to-end, which won't run on your laptop without Docker.
 
-### AI Adapter Tests
+## PR checklist
 
-```bash
-cd AI-adapters/AIAdapters
-pytest tests/
-```
+The PR template will ask you to confirm these. Going through the list before
+opening the PR saves a review cycle.
 
-### Integration Tests
+- [ ] Code follows the style guide above (`pre-commit` is green).
+- [ ] Tests added or updated for the behaviour change.
+- [ ] Docs updated if user-visible behaviour changed.
+- [ ] CHANGELOG entry added under `## Unreleased` if the change is
+      user-visible.
+- [ ] PR title follows Conventional Commits.
+- [ ] PR description states *what* the change does and *why* — a sentence
+      each is fine.
 
-```bash
-# Start all services first, then:
-pytest integration_tests/
-```
-
----
-
-## 📋 Pull Request Process
-
-1. **Update Documentation**: If you changed behavior, update relevant docs
-2. **Add Tests**: New features require tests
-3. **Run Linters**: Ensure code passes all checks
-4. **Update Changelog**: Add entry to CHANGELOG.md (if exists)
-5. **Create PR**: Use the pull request template
-6. **Respond to Reviews**: Address feedback promptly
-
-### PR Checklist
-
-- [ ] Code follows project style guidelines
-- [ ] Self-review completed
-- [ ] Comments added for complex logic
-- [ ] Documentation updated
-- [ ] Tests added/updated
-- [ ] All tests passing
-- [ ] No new warnings introduced
-- [ ] PR description clearly explains changes
-
----
-
-## 🏷️ Issue Labels
+## Issue labels
 
 | Label | Description |
 |-------|-------------|
-| `bug` | Something isn't working |
-| `enhancement` | New feature or request |
-| `documentation` | Documentation improvements |
-| `good first issue` | Good for newcomers |
-| `help wanted` | Extra attention needed |
-| `security` | Security-related issue |
-| `ai-model` | AI model contribution |
-| `performance` | Performance optimization |
+| `bug` | Something is broken |
+| `enhancement` | New feature or feature request |
+| `documentation` | Docs improvements |
+| `good first issue` | Reasonable starting point for new contributors |
+| `help wanted` | We'd accept a PR for this; nobody is actively working on it |
+| `security` | Security-relevant; coordinate via [SECURITY.md](SECURITY.md) |
+| `ai-adapter` | Adapter authoring / SDK changes |
+| `performance` | Latency / throughput / memory regressions |
 
----
+## Code of conduct
 
-## 🤝 Code of Conduct
+We want this to stay a project people enjoy contributing to. The bar is:
 
-### Our Pledge
+- Welcoming, inclusive language.
+- Respectful disagreement is fine — personal attacks are not.
+- No harassment, no doxxing, no inflammatory off-topic posting.
 
-We are committed to providing a welcoming and inclusive environment for all contributors.
+Report violations to **contact@cryptovoip.in**. Reports are confidential.
 
-### Standards
+## Getting help while you contribute
 
-**Positive behavior**:
-- Using welcoming and inclusive language
-- Respecting differing viewpoints
-- Accepting constructive criticism gracefully
-- Focusing on what's best for the community
+- **Documentation** — [docs/](docs/), particularly
+  [`AI_ADAPTER_CONTRACT.md`](docs/AI_ADAPTER_CONTRACT.md) and
+  [`SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md).
+- **Discussions** — for "is this the right approach?" questions.
+- **Issues** — for "I think I found a bug" reports.
 
-**Unacceptable behavior**:
-- Harassment or discriminatory language
-- Trolling or inflammatory comments
-- Public or private harassment
-- Publishing others' private information
-
-### Enforcement
-
-Violations can be reported to [contact email]. All complaints will be reviewed and investigated.
-
----
-
-## 📞 Getting Help
-
-- **Documentation**: Check [docs/](docs/) folder
-- **Issues**: Search existing issues or create new one
-- **Discussions**: Use GitHub Discussions for questions
-- **Discord**: [Join our community](https://discord.gg/opennvr) *(if applicable)*
-
----
-
-## 🎉 Recognition
-
-Contributors will be recognized in:
-- README.md contributors section
-- Release notes for significant contributions
-- Community showcase for notable features
-
-Thank you for helping make OpenNVR better! 🚀
-
----
-
-**Questions?** Feel free to ask in [GitHub Discussions](https://github.com/[your-org]/opennvr/discussions) or open an issue.
+Thanks for being here.

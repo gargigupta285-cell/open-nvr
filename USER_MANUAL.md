@@ -1,318 +1,237 @@
-# OpenNVR - User Manual
+# OpenNVR User Manual
 
-## 🚀 Quick Start (For Testing)
+This page covers using OpenNVR after the install is up. Install lives in
+[DOCKER_QUICKSTART.md](DOCKER_QUICKSTART.md); the bare-metal dev shell
+lives in [`docs/LOCAL_SETUP.md`](docs/LOCAL_SETUP.md).
 
-### Step 1: Pull Docker Images
-```bash
-docker compose pull
-```
-This downloads all required containers from Docker Hub.
+## First-boot setup token
 
-### Step 2: Start Application
-```bash
-docker compose up -d
-```
-
-### Step 3: Access the Application
-- **Web Interface**: http://localhost:8000
-- **Default Login**: 
-  - Username: `admin`
-  - Password: `admin123`
-
----
-
-## ⚠️ CRITICAL SECURITY NOTICE
-
-**The default configuration uses INSECURE dummy credentials!**
-
-### What's Insecure?
-The `docker-compose.yml` file contains these **DUMMY** values:
-- `POSTGRES_PASSWORD: CHANGE_THIS_PASSWORD_123`
-- `SECRET_KEY: INSECURE_CHANGE_ME_SECRET_KEY_DUMMY_12345`
-- `CREDENTIAL_ENCRYPTION_KEY: INSECURE_CHANGE_ME_CREDENTIAL_KEY_67890`
-- `INTERNAL_API_KEY: INSECURE_CHANGE_ME_API_KEY_ABCDEF`
-- `MEDIAMTX_SECRET: INSECURE_CHANGE_ME_MEDIAMTX_SECRET`
-
-**Additionally, `mediamtx.yml` also contains the dummy secret:**
-- `X-MTX-Secret: INSECURE_CHANGE_ME_MEDIAMTX_SECRET` (appears in 2 webhook configurations)
-
-### Why This Matters?
-- Anyone can access your database
-- Anyone can decrypt stored credentials
-- Anyone can forge authentication tokens
-- Your system is **NOT PRODUCTION-READY** until you change these!
-
-### 📝 Files You Must Edit for Production:
-1. **`docker-compose.yml`** (already downloaded) - Change 5 dummy secrets
-2. **`mediamtx.yml`** (already downloaded) - Change `MEDIAMTX_SECRET` in 2 webhook lines
-
----
-
-## 🔐 Securing Your Installation (REQUIRED for Production)
-
-### Method 1: Edit Files Directly (Recommended for Docker Hub Users)
-
-This is the simplest approach - just edit two files and restart containers.
-
-#### Step 1: Generate Strong Secrets
-Use these commands to generate 5 secure random values:
-
-**On Linux/Mac:**
-```bash
-# Run this 5 times to get 5 different secrets
-openssl rand -hex 32
-```
-
-**On Windows (PowerShell):**
-```powershell
-# Run this 5 times to get 5 different secrets
--join ((65..90) + (97..122) + (48..57) | Get-Random -Count 32 | % {[char]$_})
-```
-
-**Example output (use your own, not these!):**
-```
-8f3a9c2e1d7b5a4f6c8e9a1b3d5f7a9c
-a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2
-9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f8
-b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7
-c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8
-```
-
-#### Step 2: Edit `docker-compose.yml`
-Open `docker-compose.yml` and find the `opennvr-core` service section.
-
-**Find these lines (around line 64-67):**
-```yaml
-      - SECRET_KEY=${SECRET_KEY:-INSECURE_CHANGE_ME_SECRET_KEY_DUMMY_12345}
-      - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY:-INSECURE_CHANGE_ME_CREDENTIAL_KEY_67890}
-      - INTERNAL_API_KEY=${INTERNAL_API_KEY:-INSECURE_CHANGE_ME_API_KEY_ABCDEF}
-      - MEDIAMTX_SECRET=${MEDIAMTX_SECRET:-INSECURE_CHANGE_ME_MEDIAMTX_SECRET}
-```
-
-**Replace with your actual secrets:**
-```yaml
-      - SECRET_KEY=a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2
-      - CREDENTIAL_ENCRYPTION_KEY=9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f8
-      - INTERNAL_API_KEY=b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7
-      - MEDIAMTX_SECRET=c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8
-```
-
-**Also find the database password (around line 13):**
-```yaml
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_THIS_PASSWORD_123}
-```
-
-**Replace with:**
-```yaml
-      POSTGRES_PASSWORD: 8f3a9c2e1d7b5a4f6c8e9a1b3d5f7a9c
-```
-
-**And update the DATABASE_URL (around line 54):**
-```yaml
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-opennvr_user}:${POSTGRES_PASSWORD:-CHANGE_THIS_PASSWORD_123}@db:5432/${POSTGRES_DB:-opennvr_db}
-```
-
-**Replace with:**
-```yaml
-      - DATABASE_URL=postgresql://opennvr_user:8f3a9c2e1d7b5a4f6c8e9a1b3d5f7a9c@db:5432/opennvr_db
-```
-
-#### Step 3: Edit `mediamtx.yml`
-Open `mediamtx.yml` and find the webhook configurations.
-
-**Find these TWO lines (line 338 and 364):**
-```yaml
-runOnInit: 'curl -X GET -H "X-MTX-Secret: INSECURE_CHANGE_ME_MEDIAMTX_SECRET" ...'
-runOnRecordSegmentComplete: 'curl -X GET -H "X-MTX-Secret: INSECURE_CHANGE_ME_MEDIAMTX_SECRET" ...'
-```
-
-**Replace `INSECURE_CHANGE_ME_MEDIAMTX_SECRET` with the SAME secret you used for `MEDIAMTX_SECRET` in docker-compose.yml:**
-```yaml
-runOnInit: 'curl -X GET -H "X-MTX-Secret: c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8" ...'
-runOnRecordSegmentComplete: 'curl -X GET -H "X-MTX-Secret: c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8" ...'
-```
-
-⚠️ **CRITICAL**: The `X-MTX-Secret` in `mediamtx.yml` MUST match `MEDIAMTX_SECRET` in `docker-compose.yml`!
-
-#### Step 4: Restart Containers
-```bash
-docker compose down
-docker compose up -d
-```
-
-✅ Done! Your installation is now secured.
-
-⚠️ **IMPORTANT**: After changing `CREDENTIAL_ENCRYPTION_KEY`, you'll need to re-enter all camera passwords as the old encrypted passwords won't decrypt correctly.
-
----
-
-### Method 2: Using `.env` File (Optional - For Git Developers)
-
-If you're developing and using Git, you may prefer keeping secrets in a separate `.env` file to avoid committing them.
-
-**Why use this method?**
-- Keeps secrets out of `docker-compose.yml` (which might be in Git)
-- The `.env` file is already in `.gitignore` and won't be committed
-- Docker Compose automatically reads `.env` file
-
-**Steps:**
-1. Copy `.env.example` to `.env`: `cp .env.example .env`
-2. Edit `.env` and replace all 5 dummy secrets with strong random values
-3. Edit `mediamtx.yml` to match the `MEDIAMTX_SECRET` you set in `.env`
-4. Restart: `docker compose down && docker compose up -d`
-
-See `.env.example` for the template with all variables documented.
-
----
-
-## 📖 What Each Secret Does
-
-| Secret Name | Purpose | Used By | Where to Change |
-|------------|---------|---------|------------------|
-| `POSTGRES_PASSWORD` | Database password | PostgreSQL & Backend | `docker-compose.yml` (2 places: db service + DATABASE_URL) |
-| `SECRET_KEY` | JWT token signing, session encryption | Backend API | `docker-compose.yml` |
-| `CREDENTIAL_ENCRYPTION_KEY` | Encrypts camera credentials in DB | Backend (Camera Service) | `docker-compose.yml` |
-| `INTERNAL_API_KEY` | Service-to-service authentication | Backend ↔ AI Adapters | `docker-compose.yml` |
-| `MEDIAMTX_SECRET` | Stream authentication token | MediaMTX ↔ Backend | **BOTH `docker-compose.yml` AND `mediamtx.yml` (2 webhooks)** |
-
----
-
-## 🔄 Updating Your Installation
-
-### Pulling Latest Images
-```bash
-# Pull updates from Docker Hub
-docker compose pull
-
-# Restart with new images
-docker compose down
-docker compose up -d
-```
-
-### Viewing Logs
-```bash
-# All services
-docker compose logs -f
-
-# Specific service
-docker compose logs -f opennvr-core
-docker compose logs -f ai-adapters
-docker compose logs -f db
-```
-
----
-
-## 🛠️ Common Operations
-
-### Change Admin Password (First Login)
-1. Login with default credentials: `admin` / `admin123`
-2. Go to **Settings** → **User Management**
-3. Change admin password immediately!
-
-### Adding Cameras
-1. Navigate to **Cameras** → **Add Camera**
-2. Enter camera details (IP, credentials, stream path)
-3. Camera passwords are encrypted using `CREDENTIAL_ENCRYPTION_KEY`
-
-### Viewing Recordings
-- Recordings are stored in: `./Recordings/` directory
-- Organized by camera and date: `Recordings/cam-1/2026/01/17/`
-
----
-
-## 🐛 Troubleshooting
-
-### Container Won't Start
-```bash
-# Check logs
-docker compose logs
-
-# Check if ports are already in use
-netstat -ano | findstr "8000"  # Windows
-lsof -i :8000                  # Linux/Mac
-```
-
-### Database Connection Failed
-```bash
-# Check if database is healthy
-docker compose ps
-
-# Ensure POSTGRES_PASSWORD matches in both db and opennvr-core services
-```
-
-### AI Detection Not Working
-```bash
-# Check AI adapter logs
-docker compose logs ai-adapters
-
-# Ensure model weights are downloaded
-ls -l AI-adapters/AIAdapters/model_weights/
-```
-
----
-
-## 🔒 Security Best Practices
-
-1. ✅ **Change ALL default secrets** before production use
-2. ✅ **Use strong random passwords** (32+ characters)
-3. ✅ **Never commit secrets** to Git (use `.env` file if using Git - it's in `.gitignore`)
-4. ✅ **Change admin password** on first login
-5. ✅ **Use HTTPS** in production (reverse proxy like Nginx)
-6. ✅ **Limit port exposure** to trusted networks only
-7. ✅ **Regular backups** of `opennvr_db_data` volume
-8. ✅ **Keep images updated** with security patches
-
----
-
-## 📊 System Requirements
-
-- **RAM**: 8GB minimum, 16GB recommended
-- **Storage**: 
-  - 10GB for Docker images
-  - Additional space for recordings (1GB per camera per day @ 4Mbps)
-- **CPU**: 4 cores minimum (6+ for AI processing)
-- **GPU**: Optional (NVIDIA GPU accelerates AI detection)
-
----
-
-## 🆘 Support
-
-- **Documentation**: See `docs/` folder
-- **Issues**: Report on GitHub repository
-- **Architecture**: See `docs/ARCHITECTURE.md`
-- **Security**: See `docs/SECURITY.md`
-
----
-
-## ⚡ Quick Reference Commands
+The very first time the core starts it prints a one-time setup token to
+its log:
 
 ```bash
-# Start system
-docker compose up -d
-
-# Stop system
-docker compose down
-
-# Stop and delete all data (DANGEROUS!)
-docker compose down -v
-
-# Update to latest version
-docker compose pull && docker compose up -d
-
-# View logs
-docker compose logs -f
-
-# Restart specific service
-docker compose restart opennvr-core
-
-# Check running containers
-docker compose ps
-
-# Access database directly
-docker compose exec db psql -U opennvr_user -d opennvr_db
+docker compose -f docker-compose.tier0.yml logs opennvr-core | grep -i 'setup token'
 ```
 
----
+Open <http://localhost:8000>, paste the token on the setup screen, then
+choose an admin username and password. The token is single-use; subsequent
+restarts skip this flow because an admin already exists.
 
-**Last Updated**: February 17, 2026  
-**Version**: 1.0.0
+There are no shipped default credentials. If you lose the password before
+adding a second admin account, the recovery path is to reset the
+`opennvr_db_data` Docker volume and start over — see
+[Recovery](#recovery) below.
+
+## Web UI tour
+
+The dashboard is organised into five main areas, each backed by a section
+in the left-side navigation.
+
+### Cameras
+
+This is where you add and manage the RTSP / ONVIF sources OpenNVR records
+from.
+
+**Adding an ONVIF camera (recommended):**
+
+1. Click **Cameras → Add camera**.
+2. Choose **Discover via ONVIF**.
+3. Enter the camera's ONVIF username and password (most IP cameras print
+   these on a label; default `admin / admin` is common but vendor-
+   specific).
+4. Pick the camera from the discovered list. OpenNVR auto-fills the RTSP
+   URL, codec, and resolution from the ONVIF profile.
+5. Click **Save**. The camera should turn green in the dashboard within
+   ~30 seconds.
+
+**Adding a camera by RTSP URL (fallback):**
+
+1. Click **Cameras → Add camera**.
+2. Choose **Manual RTSP**.
+3. Paste the RTSP URL (typically `rtsp://user:pass@camera.ip:554/stream1`
+   — check your camera's documentation).
+4. Click **Test connection** before saving — OpenNVR probes the stream
+   and reports back whether it can decode it.
+5. Click **Save**.
+
+**Per-camera settings worth visiting:**
+
+- **Recording → Retention** — days to keep recorded segments before
+  rotating them out. Default 7. Set per-camera based on how much disk
+  you've allocated.
+- **Recording → Schedule** — 24/7 by default. Switch to motion-triggered
+  via the "AI detection" checkbox if you've enabled inference on that
+  camera.
+- **AI detection → Enabled** — toggles per-camera inference. Tier 0
+  defaults to YOLOv8 detection on every frame; disable here if you don't
+  want detection on a particular camera.
+- **TLS → Allow plaintext RTSP** — off by default. Turning this on
+  requires a confirmation dialog and lands in the audit log.
+
+### Live view
+
+The live-view page shows a grid of all enabled cameras. Click any tile to
+go fullscreen on that camera. Detection overlays (bounding boxes, class
+labels) render in real time when AI detection is enabled for that camera.
+
+WebRTC is the default transport. If the browser can't establish a WebRTC
+connection (corporate networks, restrictive firewalls), the player falls
+back to HLS — same content, ~3 second latency penalty.
+
+### Playback
+
+The playback page lists recorded segments for a date range you pick.
+Filters:
+
+- **By camera** — single camera or all.
+- **By event type** — "all recordings", "motion-triggered",
+  "AI-triggered".
+- **By time range** — calendar picker, or quick presets (last hour,
+  today, yesterday, last 7 days).
+
+Click a segment to play it. The scrubber respects the seek window the
+recording was indexed with; for finer-grained seeking on long recordings,
+zoom the scrubber via the magnifier icon.
+
+Export is via the **⋯** menu on a segment row → **Download MP4**. Exports
+are remuxed (not re-encoded) so they preserve original quality.
+
+### AI models
+
+This page lists every AI adapter KAI-C has registered. For each adapter
+you can see:
+
+- **Status** — `healthy`, `loading`, or `error` based on the adapter's
+  `/health` endpoint.
+- **Model fingerprint** — sha256 of the weights file. If you've enabled
+  drift detection (default), this is polled every 60 seconds; a
+  fingerprint change between polls fires an `adapter.fingerprint_mismatch`
+  audit event.
+- **Capabilities** — declared body shape, advertised tasks, sovereignty
+  posture, fair-queuing intent.
+- **Per-camera enable / disable** — toggle which cameras the adapter
+  runs against.
+
+The Tier 0 install ships YOLOv8 only. Additional adapters (Whisper,
+Piper, fast-plate-ocr, InsightFace, BLIP) are pulled in by the
+camera-agent overlay or by enabling them manually in `docker-compose.tier0.yml`
+and adding KAI-C registry entries.
+
+### Audit log
+
+Every inference, every registration, every adapter refusal lands here
+with an `X-Correlation-Id` that joins the alert → middleware → adapter
+chain. Useful for:
+
+- **Investigating "why did this alert fire at 22:14?"** — filter on the
+  alert's correlation_id, see the exact adapter call and the model
+  fingerprint at the time.
+- **Verifying no cloud calls happened** — filter on
+  `inference.refused_sovereignty`. Empty result = the local-only policy
+  held.
+- **Tracking model drift** — filter on `adapter.fingerprint_mismatch`.
+
+Audit events also publish to NATS on the `opennvr.audit.*` subject scheme
+for downstream consumers (SIEM, custom dashboards). See the
+[`alerts-subscriber` example](examples/alerts-subscriber) for a copy-as-
+template subscriber.
+
+## Common operations
+
+### Change your admin password
+
+Click your username in the top-right → **Profile** → **Change password**.
+
+Admin credentials live in the database, not in environment variables.
+Setting `DEFAULT_ADMIN_PASSWORD` in `.env` has no effect after first
+boot.
+
+### Add another admin
+
+**User management → Add user** → role `admin`. The new admin signs in
+with the credentials you set, then changes their password on first
+login.
+
+### View logs
+
+```bash
+# Everything
+docker compose -f docker-compose.tier0.yml logs -f
+
+# A specific service
+docker compose -f docker-compose.tier0.yml logs -f opennvr-core
+docker compose -f docker-compose.tier0.yml logs -f yolov8-adapter
+docker compose -f docker-compose.tier0.yml logs -f mediamtx
+```
+
+The core service logs are also visible in the web UI under **Settings →
+Server logs** if you don't want to drop to a shell.
+
+### Update to the latest images
+
+```bash
+docker compose -f docker-compose.tier0.yml pull
+docker compose -f docker-compose.tier0.yml up -d
+```
+
+The database schema migrates automatically on core startup. Manual
+migrations are never required for a normal upgrade.
+
+### Recovery
+
+If you've lost the admin password and there's no second admin to reset
+it through the UI, the only recovery is to reset the database volume and
+re-run the first-boot setup flow:
+
+```bash
+docker compose -f docker-compose.tier0.yml down -v
+docker compose -f docker-compose.tier0.yml up -d
+```
+
+**This deletes the camera list, user accounts, and audit log.**
+Recordings on disk are kept — the volume that holds them is separate.
+After reset, add your cameras back via the UI.
+
+## Troubleshooting
+
+### "Camera offline" but the camera itself works
+
+- Verify the RTSP URL with `ffprobe -v error -rtsp_transport tcp <url>`
+  from outside Docker.
+- Check whether the camera requires `rtsp_transport=tcp` (some do — it's
+  a common cause of "works in VLC, not in OpenNVR"). The per-camera
+  settings page lets you switch.
+
+### Detection overlays don't render
+
+- Confirm the YOLOv8 adapter is healthy on **AI models**. If `loading`,
+  wait — first inference call triggers weight load (~5-10 seconds).
+- Confirm per-camera **AI detection** is enabled.
+- Open the browser console — overlay-render errors usually log a useful
+  message.
+
+### Database connection errors
+
+```bash
+docker compose -f docker-compose.tier0.yml restart db
+docker compose -f docker-compose.tier0.yml ps          # wait for db to be Up (healthy)
+docker compose -f docker-compose.tier0.yml restart opennvr-core
+```
+
+### Disk filling up
+
+Recordings under `RECORDINGS_PATH` are the most common culprit. Per-
+camera retention defaults to 7 days; lower it via **Cameras → per-camera
+settings → Recording → Retention** if disk pressure is high.
+
+```bash
+docker system df               # see where the rest of the space is going
+```
+
+## Support
+
+- **Questions** → [GitHub Discussions](https://github.com/open-nvr/open-nvr/discussions)
+- **Bug reports** → [GitHub Issues](https://github.com/open-nvr/open-nvr/issues)
+- **Security** → [SECURITY.md](SECURITY.md)
+- **Install** → [DOCKER_QUICKSTART.md](DOCKER_QUICKSTART.md)
+- **Contributing** → [CONTRIBUTING.md](CONTRIBUTING.md)

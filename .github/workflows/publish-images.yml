@@ -1,0 +1,181 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: Apache-2.0
+#
+# Build + publish workflow for the opennvr-core container image.
+#
+# Tier 0 install (docker-compose.tier0.yml) pulls this image straight
+# from GHCR instead of building from source — a fresh install on a
+# normal home machine drops from ~5 minutes (frontend build + Python
+# deps + native libs) to ~30 seconds (pull + start). Combined with
+# the pre-built adapter images in the ai-adapter repo, the full Tier
+# 0 demo is under 5 minutes wall time on a typical broadband link.
+#
+# Triggered on:
+#   - Pull request touching the Dockerfile, server/, kai-c/, app/,
+#     or this workflow file → build only, no push. Catches a broken
+#     Dockerfile or missing-file issue before merge.
+#   - Push to main          → build + push :main and :sha-<short>.
+#     Tier 0 compose can pin :main for the bleeding-edge install path.
+#   - Tag matching ``v*``    → build + push :<version>, :latest,
+#     :sha-<short>. The release path.
+#
+# Architecture: linux/amd64 only for v0.1. The opennvr-core image
+# Python deps include opencv + psycopg which have arm64 wheels, so
+# arm64 is a fast-follow once we've validated the Pi 5 path end-to-
+# end. Documented in the Tier 0 README.
+
+name: publish-images
+
+on:
+  # No ``paths`` filter on push — GitHub applies push path filters to
+  # both branches AND tags, which means a release tag pointing at a
+  # commit that doesn't touch the listed paths would silently skip
+  # publishing. Build-on-every-main-push is cheap (BuildKit cache,
+  # core changes rarely) and the alternative landmine is not worth it.
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - "server/**"
+      - "kai-c/**"
+      - "app/**"
+      - "docker-entrypoint.sh"
+      - "supervisord.conf"
+      - ".github/workflows/publish-images.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: publish-images-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-push:
+    name: opennvr-core
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags + labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/open-nvr/core
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.title=OpenNVR Core
+            org.opencontainers.image.description=OpenNVR backend + frontend + KAI-C connector. Tier 0 install ships this as a single container.
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+            org.opencontainers.image.vendor=OpenNVR
+            org.opencontainers.image.documentation=https://github.com/open-nvr/open-nvr/blob/main/README.md
+
+      - name: Build${{ github.event_name != 'pull_request' && ' + push' || ' (no push)' }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            ${{ github.event_name == 'pull_request' && 'ghcr.io/open-nvr/core:local-smoke' || '' }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # GHA cache keeps the frontend + Python dep layers warm
+          # across runs. mode=max caches all stages including the
+          # heavy ``uv sync`` layer.
+          cache-from: type=gha,scope=opennvr-core
+          cache-to: type=gha,scope=opennvr-core,mode=max
+
+      # On PR we verify the image at least boots far enough to start
+      # listening. We can't run the full stack here (no postgres /
+      # mediamtx), so we just check that the supervisord process tree
+      # comes up and the /health endpoint becomes reachable once we
+      # plug in a stub DATABASE_URL. The point is to catch boot-time
+      # ImportError / missing-file regressions, not full E2E.
+      - name: Smoke-test the built image (PR only)
+        if: github.event_name == 'pull_request'
+        env:
+          IMAGE: ghcr.io/open-nvr/core:local-smoke
+        run: |
+          set -euo pipefail
+
+          # One cleanup function for everything we spin up — each
+          # ``trap "X" EXIT`` call REPLACES the previous trap rather
+          # than appending, so chained traps silently drop the earlier
+          # cleanups. Defining one function and trapping it once is
+          # the only correct pattern.
+          cleanup() {
+            docker logs smoke-core 2>&1 | tail -200 >&2 || true
+            docker rm -f smoke-core smoke-db >/dev/null 2>&1 || true
+            docker network rm opennvr-smoke >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker network create opennvr-smoke
+
+          # Throwaway postgres so the core process clears its startup
+          # DB probe. /health doesn't require a fully provisioned
+          # schema — alembic upgrades and the core's healthcheck path
+          # are independent.
+          docker run -d --name smoke-db --network opennvr-smoke \
+            -e POSTGRES_USER=opennvr \
+            -e POSTGRES_PASSWORD=smoke-pass \
+            -e POSTGRES_DB=opennvr \
+            postgres:15-alpine
+          for i in $(seq 1 30); do
+            if docker exec smoke-db pg_isready -U opennvr >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+
+          # Minimum env to clear the strong-secret validator. The
+          # validator requires non-placeholder strings of at least
+          # 32 chars — the values below are deliberately verbose so
+          # any future bump to the minimum length doesn't break this.
+          docker run -d --name smoke-core --network opennvr-smoke \
+            -e DATABASE_URL=postgresql://opennvr:smoke-pass@smoke-db:5432/opennvr \
+            -e SECRET_KEY=smoke-key-not-real-just-long-enough-to-pass-the-validator-xxx \
+            -e CREDENTIAL_ENCRYPTION_KEY=smoke-cred-key-not-real-just-long-enough-to-pass-x \
+            -e INTERNAL_API_KEY=smoke-internal-key-not-real-just-long-enough-to-pass-xx \
+            -e MEDIAMTX_SECRET=smoke-mtx-secret-not-real-just-long-enough-to-pass-xxx \
+            -e DEPLOYMENT_MODE=local \
+            -p 127.0.0.1:8000:8000 \
+            "$IMAGE"
+
+          # Cold-start budget: alembic migrations + supervisord
+          # bringup + uvicorn boot. 120s is comfortable.
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8000/health >/dev/null; then
+              echo "opennvr-core healthy after ${i}x2s."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::opennvr-core never reached /health within 2 minutes." >&2
+          exit 1
