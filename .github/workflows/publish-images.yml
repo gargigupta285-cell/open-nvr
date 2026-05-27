@@ -114,11 +114,11 @@ jobs:
           cache-to: type=gha,scope=opennvr-core,mode=max
 
       # On PR we verify the image at least boots far enough to start
-      # listening. We can't run the full stack here (no postgres /
-      # mediamtx), so we just check that the supervisord process tree
-      # comes up and the /health endpoint becomes reachable once we
-      # plug in a stub DATABASE_URL. The point is to catch boot-time
-      # ImportError / missing-file regressions, not full E2E.
+      # listening. We can't run the full stack here (no mediamtx, no
+      # adapter), so we plug in stubs and check that the supervisord
+      # process tree comes up and /health becomes reachable. The
+      # point is to catch boot-time ImportError / missing-file
+      # regressions, not full E2E.
       - name: Smoke-test the built image (PR only)
         if: github.event_name == 'pull_request'
         env:
@@ -141,41 +141,88 @@ jobs:
           docker network create opennvr-smoke
 
           # Throwaway postgres so the core process clears its startup
-          # DB probe. /health doesn't require a fully provisioned
-          # schema — alembic upgrades and the core's healthcheck path
-          # are independent.
+          # DB probe. /health itself doesn't touch the DB, but it IS
+          # served from inside the lifespan handler that runs
+          # init_db() (alembic + create_initial_data). A blocked /
+          # slow migration delays /health implicitly — hence the
+          # generous health-wait budget below.
           docker run -d --name smoke-db --network opennvr-smoke \
             -e POSTGRES_USER=opennvr \
             -e POSTGRES_PASSWORD=smoke-pass \
             -e POSTGRES_DB=opennvr \
             postgres:15-alpine
+          db_ready=0
           for i in $(seq 1 30); do
-            if docker exec smoke-db pg_isready -U opennvr >/dev/null 2>&1; then break; fi
+            if docker exec smoke-db pg_isready -U opennvr >/dev/null 2>&1; then
+              db_ready=1
+              break
+            fi
             sleep 2
           done
+          if [ "$db_ready" != "1" ]; then
+            echo "::error::postgres did not become ready in 60s — aborting smoke." >&2
+            docker logs smoke-db 2>&1 | tail -100 >&2 || true
+            exit 1
+          fi
 
-          # Minimum env to clear the strong-secret validator. The
-          # validator requires non-placeholder strings of at least
-          # 32 chars — the values below are deliberately verbose so
-          # any future bump to the minimum length doesn't break this.
+          # Generate cryptographically random secrets that satisfy the
+          # strong-secret validator (rejects placeholder-pattern
+          # strings) AND the Fernet-key validator
+          # (CREDENTIAL_ENCRYPTION_KEY must be a valid 32-byte
+          # url-safe-base64 key — Fernet's strict format).
+          #
+          # All four use openssl rather than python3 + cryptography.
+          # openssl is part of the base runner image; cryptography is
+          # currently pre-installed on ubuntu-latest but that's a
+          # transitive guarantee a future runner refresh could remove,
+          # and we'd rather not eat a CI break for that. The
+          # ``openssl rand -base64 32 | tr '+/' '-_'`` form produces
+          # the url-safe-base64 of 32 random bytes — exactly the
+          # 44-char shape Fernet expects (verified end-to-end against
+          # cryptography.Fernet's own decoder).
+          SMOKE_SECRET_KEY=$(openssl rand -hex 32)
+          SMOKE_INTERNAL_API_KEY=$(openssl rand -hex 32)
+          SMOKE_MEDIAMTX_SECRET=$(openssl rand -hex 32)
+          SMOKE_FERNET_KEY=$(openssl rand -base64 32 | tr '+/' '-_')
+
+          # Env vars supervisord.conf needs at parse time:
+          #   * ADAPTER_URL — kai-c program block expands this via
+          #     %(ENV_ADAPTER_URL)s. Supervisord refuses to load the
+          #     config file if any %(ENV_*)s reference points at an
+          #     undefined var, regardless of whether that program
+          #     ever runs. We pass a placeholder URL — kai-c will
+          #     fail to reach the adapter behind it, but /health on
+          #     the core doesn't depend on kai-c being healthy.
+          #   * INTERNAL_API_KEY — same mechanism, already set below.
+          #
+          # DEPLOYMENT_MODE valid values are offline / hybrid / cloud
+          # (server/core/config.py — Literal type). "offline" is the
+          # default and the right value for a CI smoke test where
+          # cloud connectivity isn't relevant.
           docker run -d --name smoke-core --network opennvr-smoke \
             -e DATABASE_URL=postgresql://opennvr:smoke-pass@smoke-db:5432/opennvr \
-            -e SECRET_KEY=smoke-key-not-real-just-long-enough-to-pass-the-validator-xxx \
-            -e CREDENTIAL_ENCRYPTION_KEY=smoke-cred-key-not-real-just-long-enough-to-pass-x \
-            -e INTERNAL_API_KEY=smoke-internal-key-not-real-just-long-enough-to-pass-xx \
-            -e MEDIAMTX_SECRET=smoke-mtx-secret-not-real-just-long-enough-to-pass-xxx \
-            -e DEPLOYMENT_MODE=local \
+            -e SECRET_KEY="$SMOKE_SECRET_KEY" \
+            -e CREDENTIAL_ENCRYPTION_KEY="$SMOKE_FERNET_KEY" \
+            -e INTERNAL_API_KEY="$SMOKE_INTERNAL_API_KEY" \
+            -e MEDIAMTX_SECRET="$SMOKE_MEDIAMTX_SECRET" \
+            -e DEPLOYMENT_MODE=offline \
+            -e ADAPTER_URL=http://localhost:9100 \
             -p 127.0.0.1:8000:8000 \
             "$IMAGE"
 
-          # Cold-start budget: alembic migrations + supervisord
-          # bringup + uvicorn boot. 120s is comfortable.
-          for i in $(seq 1 60); do
+          # Cold-start budget: docker image cold-start (~5-15s) +
+          # alembic walking every revision against an empty DB
+          # (10-30s on a slow runner) + create_initial_data seeding
+          # roles / permissions / admin (DB writes) + uvicorn binding.
+          # Realistic total is 30-90s but the long-tail is what
+          # produces flakes — 90 iterations × 2s = 180s is generous
+          # enough to absorb a cold-cache GitHub runner.
+          for i in $(seq 1 90); do
             if curl -sf http://127.0.0.1:8000/health >/dev/null; then
               echo "opennvr-core healthy after ${i}x2s."
               exit 0
             fi
             sleep 2
           done
-          echo "::error::opennvr-core never reached /health within 2 minutes." >&2
+          echo "::error::opennvr-core never reached /health within 3 minutes." >&2
           exit 1
