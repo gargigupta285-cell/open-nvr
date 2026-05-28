@@ -10,18 +10,7 @@ which adapters you compose and what predicates you write on top of them.
 The examples gallery ([`examples/README.md`](../examples/README.md)) is the
 copy-as-template starting point for any segment-specific app.
 
-## How to read this page
-
-For each segment we list:
-
-- **Why OpenNVR fits.** What about the architecture matches the segment's
-  threat model or operational reality.
-- **Out-of-the-box.** What you get from a Tier 0 install plus the adapters
-  shipped in `ai-adapter`.
-- **Configure / extend.** What requires writing a predicate (~50 lines of
-  Python following an example app), authoring a custom adapter (~30 lines
-  following the template), or both.
-- **Honest caveats.** Where v0.1 has gaps the segment will notice.
+Each segment is structured the same way: what about the architecture matches its threat model or operational reality, what's available straight from a Tier 0 install plus shipped adapters, what requires writing a predicate (~50 lines of Python following an example app) or authoring a custom adapter (~30 lines following the template), and the gaps v0.1 will hit. A note on what "custom adapter" means across this page: the SDK wrapping itself is ~30 lines per the template scaffold; the *model* — PPE compliance, weapon detection, fall detection, drone classifiers — is an ML-engineering effort proportional to the false-positive-rate budget the operator can tolerate. For mission-critical FPR thresholds, expect tens of thousands of site-specific annotated frames, not a weekend. The [`SUPPORT.md`](SUPPORT.md) commercial-support track exists for deployments that need this model work delivered under contract.
 
 ---
 
@@ -45,20 +34,7 @@ baseline, and fence-line analytics with site-specific intrusion patterns are
 all custom-adapter work. Each is roughly one weekend of model fine-tuning
 plus the ~30-line SDK wrapper.
 
-**Caveats.** No native SCADA integration in v0.1; alerts flow to NATS and
-you bridge to your SCADA stack via the `alerts-subscriber` example.
-Drone detection in v0.1 is custom-visual-classifier work (community
-models exist, fine-tuning to your local airspace baseline is the
-ML-engineering effort); acoustic drone detection becomes available with
-the v0.2 audio-events adapter category. **A note on "custom adapter"
-scope across this page:** the *SDK wrapping* is ~30 lines per the
-template scaffold; the *model itself* (PPE compliance, weapon detection,
-fall detection, drone classifiers, etc.) is an ML-engineering effort
-proportional to the false-positive-rate budget the operator can tolerate.
-For mission-critical FPR thresholds, expect tens of thousands of
-site-specific annotated frames, not a weekend. The
-[`SUPPORT.md`](SUPPORT.md) commercial-support track exists for
-deployments that need this model work delivered under contract.
+**Caveats.** No native SCADA integration in v0.1; alerts flow to NATS and you bridge to your SCADA stack via the `alerts-subscriber` example. Drone detection in v0.1 is custom-visual-classifier work (community models exist, fine-tuning to your local airspace baseline is the ML-engineering effort); acoustic drone detection becomes available with the v0.2 audio-events adapter category.
 
 ---
 
@@ -344,25 +320,9 @@ that v0.1 doesn't fully model; commercial-support engagement recommended.
 
 ## What v0.1 doesn't cover well yet
 
-OpenNVR isn't the right answer for everything. Where v0.1 has real gaps:
+OpenNVR isn't the right answer for everything. Tier 0 scales comfortably to about 50 cameras on commodity hardware; beyond that the project supports multi-host deployments but doesn't yet make them easy. Body-worn cameras with frequent connectivity transitions aren't a first-class target — OpenNVR expects fixed RTSP / ONVIF endpoints, and body-cam buffered-upload patterns require glue you'd need to write. Drone and UAV mobile platforms need the geo-aware moving-camera `TelemetrySource` abstraction planned for v0.2. Audio-first deployments work for the speech path (Whisper STT and Piper TTS ship) but audio-event detection — gunshot, glass-break, dog-bark — requires a new adapter category, also planned for v0.2.
 
-- **Hospitality / retail with very high camera counts on a single host.**
-  Tier 0 scales to ~50 cameras on commodity hardware; beyond that you're
-  into multi-host deployments which v0.1 supports but doesn't make easy.
-- **Body-worn cameras with frequent connectivity transitions.** OpenNVR
-  expects fixed RTSP / ONVIF cameras; body-cam buffered upload patterns
-  aren't first-class.
-- **Drone / UAV mobile platforms.** Geo-aware moving-camera analytics
-  require the `TelemetrySource` abstraction that's planned for v0.2 but
-  not in v0.1.
-- **Audio-first deployments.** Whisper STT and Piper TTS ship, but audio-
-  event detection (gunshot, glass-break, dog-bark) requires a custom
-  adapter category that isn't yet in the shipped seven. Planned for
-  v0.2 — see [ROADMAP.md](ROADMAP.md).
-
-For these, see the [Roadmap](ROADMAP.md) for timing and the
-[Adapter template](https://github.com/open-nvr/ai-adapter/tree/main/templates/adapter-template)
-if you want to contribute.
+For timing on the gaps above see the [Roadmap](ROADMAP.md), and if you want to contribute against them the [Adapter template](https://github.com/open-nvr/ai-adapter/tree/main/templates/adapter-template) is the starting point.
 
 ## Don't see your segment?
 

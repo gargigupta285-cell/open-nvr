@@ -193,18 +193,7 @@ to a release window. Pull requests and design discussions are welcome.
 
 ## How to influence the roadmap
 
-For specific capabilities you'd like prioritised:
-
-- **Open a Discussion** at https://github.com/open-nvr/open-nvr/discussions
-  with the use case and your environment. We weight roadmap by
-  user-reported pull, not engineering convenience.
-- **Contribute the adapter.** The template scaffold (~30 lines of
-  Python) means many roadmap items can be community-built. The
-  [adapter authoring guide](https://github.com/open-nvr/ai-adapter#-write-your-own-adapter)
-  is the on-ramp.
-- **Sponsor the work.** For commercial deployments where you'd like
-  specific capabilities accelerated, see [SUPPORT.md](SUPPORT.md) for
-  the commercial path.
+There are three honest ways to move items up the list. Open a [Discussion](https://github.com/open-nvr/open-nvr/discussions) describing the use case and your environment — we weight the roadmap by user-reported pull, not engineering convenience, and a thread that draws other voices is the strongest signal. If the item is an adapter, contribute it directly: the template scaffold turns most adapter authoring into ~30 lines of Python plus your model, and the [authoring guide](https://github.com/open-nvr/ai-adapter#-write-your-own-adapter) is the on-ramp. For commercial deployments where you'd like specific capabilities accelerated under contract, see [SUPPORT.md](SUPPORT.md) for the commercial path.
 
 ## What you can rely on
 

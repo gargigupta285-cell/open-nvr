@@ -17,7 +17,7 @@ open-source reference implementation.
 
 | Paper § / Weakness | Architectural countermeasure | OpenNVR implementation |
 |---|---|---|
-| **§3.1 Public exposure and credential abuse.** Default / backdoor credentials in firmware (CISA advisories for AVTECH, Edimax). Internet-reachable cameras with weak auth (Mirai, Persirai). | Isolated camera network. No shipped default password. Strong-secret enforcement at boot. | One-time setup token printed at first boot — no admin password ships in the image. Strong-secret validator refuses to boot if `SECRET_KEY`, `INTERNAL_API_KEY`, `CREDENTIAL_ENCRYPTION_KEY`, or `MEDIAMTX_SECRET` are placeholders or shorter than the minimum length. MediaMTX bound to loopback by default. See `SECURITY_ARCHITECTURE.md` V-018 / V-019. |
+| **§3.1 Public exposure and credential abuse.** Default / backdoor credentials in firmware (CISA advisories for AVTECH, Edimax). Internet-reachable cameras with weak auth (Mirai, Persirai). | Isolated camera network. No shipped default password. Strong-secret enforcement at boot. | One-time setup token printed at first boot — no admin password ships in the image. Strong-secret validator refuses to boot if `SECRET_KEY`, `INTERNAL_API_KEY`, `CREDENTIAL_ENCRYPTION_KEY`, or `MEDIAMTX_SECRET` are placeholders or shorter than the minimum length. MediaMTX bound to loopback by default. See `SECURITY_ARCHITECTURE.md` V-001 / V-002 / V-015. |
 | **§3.2 Insecure protocols and legacy services.** Plaintext RTSP / RTP in commercial cameras by default (despite RFC 7826 + RFC 3711 mandating TLS / SRTP). Telnet / UPnP left active. | TLS/SRTP enforcement at the middleware. Plaintext refused for operator-facing transports. | RTSPS at `:8322`, HLS-TLS at `:8888`, WebRTC-TLS at `:8889` are the only externally-mapped media transports. Per-camera `transport_security` policy (`rtsps_required` / `rtsps_preferred` / `plaintext_allowed`) with TLS-handshake probe on camera-create, runtime enforcement at every stream-provisioning entry point. RTMP and SRT explicitly disabled. See `SECURITY_ARCHITECTURE.md` V-003 / V-019. |
 | **§3.3 Fragmented interoperability.** Inconsistent ONVIF compliance, proprietary extensions that weaken secure defaults, heterogeneous fleets where basic protections can't be uniformly applied. | ONVIF Core Specification compliance for device onboarding. Open standards (IETF) for transport. | `server/services/onvif_service.py` discovers Profile S / Profile T per camera; `server/services/onvif_digest_service.py` provides the tested digest-auth fallback path for cameras that need it. Credential vault never exposes plaintext passwords to the UI. Centralized RBAC + per-camera settings in `CameraConfig`. |
 | **§3.4 Vendor-controlled cloud and AI pipelines.** Cloud-managed storage / analytics that require decryption outside customer control. AI integrations that violate data / AI sovereignty. | Customer-managed encryption keys. AI workloads run locally or in customer-chosen configurations. | Two independent gates, both default-deny. (1) `DEPLOYMENT_MODE=offline` (default) makes every cloud-touching route — cloud recording, cloud inference, federated streams — return HTTP 403; flipping to `hybrid` or `cloud` is itself audit-logged at boot. (2) `AI_SOVEREIGNTY=local_only` (default) refuses to register AI adapters that declare `network_egress`; flipping to `federated` or `cloud_allowed` permits them and is similarly audit-logged. Camera credentials encrypted at rest with Fernet (`CREDENTIAL_ENCRYPTION_KEY` is operator-managed). |
@@ -41,21 +41,9 @@ frameworks. OpenNVR inherits that alignment.
 
 ## What's explicitly out of scope
 
-The paper's §8 documents residual risks that the architecture does not
-address. We surface them here because honesty about scope is part of
-defensibility:
+The paper's §8 documents residual risks that the architecture does not address, and we surface them here because honesty about scope is part of defensibility.
 
-- **Vendor firmware vulnerabilities in the cameras themselves.** Architectural
-  isolation removes most exploitation paths, but a malicious insider on the
-  isolated VLAN could still exploit unpatched device-level flaws.
-  Paper §8.1.
-- **Insider and physical threats.** OpenNVR assumes a controlled physical
-  perimeter. Locked racks, port security, and tamper detection are operator
-  controls outside the architecture's scope. Paper §8.2.
-- **Hardware supply-chain implants.** Undocumented SoC backdoors would
-  bypass network isolation entirely. No large-scale evidence of this in
-  commercial cameras, but it remains a theoretical residual risk.
-  Paper §8.3.
+Vendor firmware vulnerabilities in the cameras themselves remain a residual risk — architectural isolation removes most exploitation paths, but a malicious insider on the isolated VLAN could still exploit unpatched device-level flaws (§8.1). Insider and physical threats sit with the operator — OpenNVR assumes a controlled physical perimeter, so locked racks, port security, and tamper detection are operator controls outside the architecture's scope (§8.2). Hardware supply-chain implants — undocumented SoC backdoors that would bypass network isolation entirely — remain a theoretical residual risk; no large-scale evidence exists in commercial cameras but the threat model acknowledges it (§8.3).
 
 ## Procurement use
 

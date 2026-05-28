@@ -65,20 +65,9 @@ implementation. Every paper § maps to OpenNVR code; the mapping is at
 
 ## What it aligns with
 
-| Framework | What it covers |
-|---|---|
-| **CISA Secure-by-Design** | Secure defaults, customer-managed cryptography, minimized attack surface. |
-| **NIST CSF 2.0** | Identify / Protect / Detect / Respond / Recover — full lifecycle. |
-| **NIST AI RMF 1.0** | AI sovereignty enforcement at the adapter contract layer. |
-| **ISO/IEC 27001:2022** | Certificate-based auth, RBAC, append-only audit log, ISMS evidence. |
-| **ETSI EN 303 645** | Consumer-IoT baseline: no default passwords, secure update path, encrypted comms. |
-| **GDPR (EU)** | Customer-owned keys, customer-controlled retention, no vendor-cloud egress. |
-| **DPDP Act 2023 (India)** | Same posture — local-only processing, operator-managed retention. |
+OpenNVR's architecture maps cleanly onto the major frameworks compliance officers ask about: CISA Secure-by-Design (secure defaults, customer-managed cryptography, minimised attack surface); NIST Cybersecurity Framework 2.0 across Identify / Protect / Detect / Respond / Recover; NIST AI Risk Management Framework 1.0 (AI sovereignty enforcement at the adapter-contract layer); ISO/IEC 27001:2022 (certificate-based auth, RBAC, append-only audit log as ISMS evidence); ETSI EN 303 645 for the consumer-IoT baseline (no default passwords, secure update path, encrypted communications); and the data-protection regimes (EU GDPR and India DPDP Act 2023 — customer-owned keys, operator-controlled retention, no vendor-cloud egress).
 
-The framework-by-framework evidence trail is in
-[`docs/COMPLIANCE.md`](COMPLIANCE.md). For ISO 27001 / SOC 2 evidence packs,
-the audit-chain quick reference at the bottom of that page maps each
-auditor question to its answer in the OpenNVR audit log.
+The framework-by-framework evidence trail with paper-section citations and the OpenNVR control mapping is in [`docs/COMPLIANCE.md`](COMPLIANCE.md). For ISO 27001 or SOC 2 evidence packs, that page's audit-chain quick reference maps each auditor question to its answer in the OpenNVR audit log.
 
 ## Operational sovereignty: your AI, your tactics, your hardware
 
@@ -100,16 +89,9 @@ share with a vendor for classification reasons. Bring a model whose
 inference behaviour you cannot disclose to anyone who didn't sign your
 NDA. The contract is the interface; what's behind it is yours.
 
-This matters concretely:
+This matters concretely. On defence and military bases it shows up as perimeter-intrusion classifiers trained on your specific terrain and threat signatures, asset-tracking models tied to your inventory, and behaviour-anomaly detectors weighted for your operational tempo — none of which can leave the base. In critical infrastructure (power, water, telecom) it looks like equipment-tamper detectors trained on your specific cabinet and substation imagery, drone-detection models tuned to your local airspace baseline, and fence-line and yard-monitoring analytics that escalate to your SCADA stack rather than a vendor's. In government facilities it's visitor-flow analytics with retention policies set by your records office (not a vendor's TOS), tailgating and access-deviation detection bound to your badge system, and package screening with item lists that change weekly without waiting on a vendor product cycle.
 
-| Domain | What "your AI" looks like in practice |
-|---|---|
-| **Defence / military bases** | Perimeter intrusion classifiers trained on your specific terrain and threat signatures. Asset-tracking models tied to your inventory. Behaviour-anomaly detectors weighted for your operational tempo. None of which can leave the base. |
-| **Critical infrastructure (power, water, telecom)** | Equipment-tamper detectors trained on your specific cabinet and substation imagery. Drone-detection models tuned to your local airspace baseline. Fence-line and yard-monitoring analytics that escalate to your SCADA stack, not a vendor's. |
-| **Government facilities** | Visitor-flow analytics with retention policies your records office sets, not a vendor's TOS. Tailgating and access-deviation detection bound to your badge system. Package screening with item lists that change weekly without a vendor product cycle. |
-| **Healthcare** | Fall and patient-deterioration models that respect HIPAA boundaries by never leaving the host. Restricted-area logic with site-specific rules (medication rooms, NICU corridors, behavioural-health units) that no vendor product covers. |
-| **Education** | Weapon-detection models you can re-train as adversaries adapt. After-hours intrusion detection with school-specific schedules. Behavioural alerting with rules your safety committee — not a vendor — defines. |
-| **Industrial / OT** | PPE compliance against site-specific rules. Hazardous-zone entry detection tied to your lockout-tagout system. Equipment-behaviour anomaly models trained on your normal operational baseline. |
+In healthcare it's fall and patient-deterioration models that respect HIPAA boundaries because they never leave the host, plus restricted-area logic with site-specific rules (medication rooms, NICU corridors, behavioural-health units) that no vendor product covers. In education it's weapon-detection models you can re-train as adversaries adapt, after-hours intrusion with school-specific schedules, and behavioural alerting with rules your safety committee — not a vendor — defines. In industrial and OT environments it's PPE compliance against site-specific rules, hazardous-zone entry detection tied to your lockout-tagout system, and equipment-behaviour anomaly models trained on your normal operational baseline.
 
 What this transforms, in plain terms: tactical doctrine that today lives
 in human-staffed control rooms, in standard operating procedures, and in
@@ -162,39 +144,13 @@ between buying a surveillance product and operating a surveillance
 
 ## What it costs
 
-- **Software:** AGPL v3 — no per-camera license fees, no per-seat fees,
-  no cloud subscription.
-- **Hardware:** runs on commodity x86 from Raspberry Pi-class to
-  enterprise servers. Reuse what you have. Storage scaling is whatever
-  retention you configure (1080p H.264 at 24×7 is roughly 25 GB / camera
-  / week, much less with motion-triggered recording).
-- **Commercial support and indemnification:** available through
-  **[contact@cryptovoip.in](mailto:contact@cryptovoip.in)**. Includes
-  deployment assistance, custom-adapter authoring, compliance evidence
-  packs, and SLA-backed incident response for regulated environments.
+The software is AGPLv3 — no per-camera licence fees, no per-seat fees, no cloud subscription. The hardware is commodity x86, anywhere from Raspberry Pi-class up to enterprise servers, so existing equipment is typically reusable. Storage scales linearly with the retention you configure: 1080p H.264 at 24×7 is roughly 25 GB per camera per week, much less with motion-triggered recording. Commercial support and indemnification are available through **[contact@cryptovoip.in](mailto:contact@cryptovoip.in)** and cover deployment assistance, custom-adapter authoring, compliance evidence packs, and SLA-backed incident response for regulated environments.
 
 ## What it doesn't do
 
-We're up-front about scope (paper §8):
+A few things are honestly outside the scope of what OpenNVR delivers (paper §8). It doesn't replace the cameras themselves — you keep your existing fleet, and OpenNVR reduces what the camera vendor can compromise by isolating it behind middleware you control, but device-level firmware CVEs remain the vendor's to patch. It doesn't provide hardware tamper detection; locked racks, port security, and tamper alarms are operator controls outside the architecture. It doesn't guarantee against insider threats — a malicious actor with physical access to the camera VLAN could still exploit unpatched device flaws, and architectural isolation reduces but doesn't eliminate the attack surface. And it doesn't defend against hardware supply-chain implants in the cameras themselves; undocumented SoC backdoors would bypass network isolation entirely, and while no widespread evidence exists in commercial cameras today, the paper acknowledges this as a theoretical residual risk (§8.3).
 
-- **Doesn't replace the cameras.** You keep your existing fleet. OpenNVR
-  reduces what the camera vendor can compromise by isolating it behind a
-  middleware layer you control. It does not patch device-level firmware
-  CVEs — that remains the camera vendor's responsibility.
-- **Doesn't provide hardware tamper detection.** Locked racks, port
-  security, and tamper alarms are operator controls outside OpenNVR's
-  scope.
-- **Doesn't guarantee against insider threats.** A malicious actor with
-  physical access to the camera VLAN could still exploit unpatched
-  device flaws. Architectural isolation reduces the attack surface but
-  doesn't eliminate it.
-- **Doesn't defend against hardware supply-chain implants.** Undocumented
-  SoC backdoors would bypass network isolation. No widespread evidence
-  this exists in commercial cameras, but the paper notes it as a
-  theoretical residual risk (§8.3).
-
-These limitations are part of the architecture's defensibility — they're
-documented, scoped, and verifiable.
+These limitations are part of the architecture's defensibility, not against it — they're documented, scoped, and verifiable.
 
 ## Getting started
 
@@ -219,6 +175,4 @@ with the SDK + template scaffold.
 
 ## Contact
 
-- **Technical questions:** [GitHub Discussions](https://github.com/open-nvr/open-nvr/discussions)
-- **Security disclosures:** [GitHub Security Advisories](https://github.com/open-nvr/open-nvr/security/advisories) or `security@cryptovoip.in`
-- **Procurement, commercial licensing, SLA support:** **[contact@cryptovoip.in](mailto:contact@cryptovoip.in)**
+Technical questions go in [GitHub Discussions](https://github.com/open-nvr/open-nvr/discussions). Security disclosures go through [private GHSA reporting](https://github.com/open-nvr/open-nvr/security/advisories) or `security@cryptovoip.in`. For procurement, commercial licensing, and SLA-backed support, write to **[contact@cryptovoip.in](mailto:contact@cryptovoip.in)**.
