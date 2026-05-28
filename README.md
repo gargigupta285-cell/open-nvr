@@ -29,6 +29,8 @@ The architecture is published — a peer-citable paper this year, 34 references,
 
 ## What makes it different
 
+**It's secure by design.** Network isolation between the camera plane, the middleware gateway, and the analytics layer is the architecture, not a configuration toggle. Credentials are encrypted at rest with Fernet, RTSP travels over RTSPS to anything outside the host, and two independent default-deny gates — `DEPLOYMENT_MODE=offline` and `AI_SOVEREIGNTY=local_only` — keep cloud routes and AI egress returning HTTP 403 until an operator explicitly opens them. The six classes of systemic IP-camera weakness the paper enumerates — default credentials, hard-coded keys, unsigned firmware updates, exposed management interfaces, vendor backdoors, opaque telemetry — are structurally eliminated rather than mitigated case by case. Threat model and control mapping in [`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md).
+
 **It's auditable.** Every inference threads a correlation ID from the alert that fired, through the middleware that proxied it, to the model that made the call. Model weights are fingerprinted with sha256 and polled for drift. Cloud routes return HTTP 403 by default. The audit log answers *"why did this alert fire?"* without guesswork. Procurement-grade evidence in [`docs/COMPLIANCE.md`](docs/COMPLIANCE.md).
 
 **Its AI layer is open.** Any model behind a REST or WebSocket endpoint becomes a first-class capability through the AI Adapter Contract — a published wire spec. Object detection, license-plate OCR, face recognition, scene captioning, multi-object tracking, ASR, TTS, LLM tool-calling all ship out of the box. The SDK to write your own is Apache-2.0 and runs around thirty lines of Python.
@@ -145,32 +147,11 @@ Seven reference adapters and a one-command scaffold to start your own live in th
 
 Each example is a copy-as-template starting point. Replace the predicate — the zone check, the dwell timer, the plate watchlist — with your domain logic and you have a domain-specific NVR. Gallery walkthrough and the "drives inference vs subscribes to events" axis-grid in [`examples/README.md`](examples/README.md).
 
-## Why it matters
+## Community
 
-Cameras are the most-installed AI sensor on earth. They sit at every doorway, every traffic light, every parking lot, every storefront, every school corridor, every factory floor, every hospital hallway. They watch the world more than humans do.
+Bugs go in [Issues](https://github.com/open-nvr/open-nvr/issues), design questions in [Discussions](https://github.com/open-nvr/open-nvr/discussions), security reports via [private GHSA advisory](https://github.com/open-nvr/open-nvr/security/advisories/new). PR flow is in [`CONTRIBUTING.md`](CONTRIBUTING.md); the [roadmap](docs/ROADMAP.md) names where help is wanted next.
 
-The default architecture for these cameras — vendor-managed cloud, opaque firmware, closed AI — concentrates extraordinary power in a small number of companies whose security track record is what we cited at the top of this page. When the vendor gets breached, you get breached. When the vendor decides what the AI looks for, your tactics are theirs. When the vendor sunsets your model, you have no recourse.
-
-The world doesn't need another camera vendor. It needs the open-source substrate underneath — one where the recording, the analytics, the audit log, and the AI all run under the operator's control, and where the contract for *what AI does what* is published instead of proprietary.
-
-That's what OpenNVR is. Not a product. A piece of infrastructure that puts surveillance back in the hands of the people it's supposed to serve.
-
-## Who we are
-
-OpenNVR is built by a small team across the security-research and AI-systems fields. The architecture paper is by Varun Pratap Singh, Suraj Raj Bhandari, Arjun Singh, Rajani Kushwaha, and Sahaj Kaura ([Singh et al., 2025](https://doi.org/10.5281/zenodo.17261761)).
-
-We're building this because the industry has had eight years to fix the IP-camera problem and hasn't. The architecture paper is published so anyone — researchers, regulators, procurement officers, security auditors — can verify the claims. The code is here so anyone can run it. The licence makes operator sovereignty non-negotiable.
-
-We think that's the right exchange for software that exists to put surveillance under operator control.
-
-## Get involved
-
-- **Try it.** The quickstart above is honest. Five minutes, real cameras, working AI.
-- **Build on it.** The adapter contract is the front door. Author a model, ship a container, ship a use-case app on top.
-- **Contribute back.** [`CONTRIBUTING.md`](CONTRIBUTING.md) covers PR flow. The [roadmap](docs/ROADMAP.md) names where help is wanted next — pose estimation, semantic search via CLIP, audio-event detection, federated AI.
-- **Talk.** Design discussions in [GitHub Discussions](https://github.com/open-nvr/open-nvr/discussions). Bugs in [Issues](https://github.com/open-nvr/open-nvr/issues). Security disclosures via [GHSA private reporting](https://github.com/open-nvr/open-nvr/security/advisories/new).
-
-For commercial deployments — deployment assistance, custom adapter authoring under NDA, compliance evidence packs, SLA-backed support, sponsored development — [contact@cryptovoip.in](mailto:contact@cryptovoip.in).
+Commercial deployments — deployment assistance, NDA adapter authoring, compliance evidence packs, SLA-backed support — [contact@cryptovoip.in](mailto:contact@cryptovoip.in).
 
 ## Documentation
 
@@ -182,9 +163,7 @@ For commercial deployments — deployment assistance, custom adapter authoring u
 
 ## License
 
-The OpenNVR server is **AGPLv3**. The [`opennvr-adapter-sdk`](https://github.com/open-nvr/ai-adapter/tree/main/opennvr_adapter_sdk) is **Apache-2.0** so adapters can ship under any compatible license — including proprietary or classified for the organisations where that matters.
-
-The AGPL is deliberate. If you build a service on OpenNVR and offer it over a network, you ship your modifications back. We think that's the right exchange for software that exists to put surveillance under operator control.
+OpenNVR is **AGPLv3**. The [adapter SDK](https://github.com/open-nvr/ai-adapter/tree/main/opennvr_adapter_sdk) is **Apache-2.0**, so adapters you write can ship under any compatible license — including proprietary or classified for the organisations where that matters.
 
 ---
 
