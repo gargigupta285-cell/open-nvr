@@ -1,37 +1,14 @@
 # Comparisons with Other NVR Projects
 
-If you're evaluating OpenNVR against existing self-hosted or commercial
-options, this page is for you. We try to be honest about what each
-alternative does well — bashing competitors makes for poor positioning
-and worse engineering.
+If you're evaluating OpenNVR against existing self-hosted or commercial options, this page is for you. We try to be honest about what each alternative does well — bashing competitors makes for poor positioning and worse engineering.
 
-The short version: **OpenNVR isn't trying to replace Frigate for the
-hobbyist Home Assistant user who's happy with what they have.** We're
-solving a different problem — auditable AI surveillance with operator-
-controlled tactical AI — that the existing options either don't address
-or address only partially. If the table below makes Frigate / ZoneMinder /
-your current solution sound like the right choice for you, that's fine.
-We'd rather you pick the right tool than churn into ours.
+The short version: OpenNVR isn't trying to replace Frigate for the hobbyist Home Assistant user who's happy with what they have. We're solving a different problem — auditable AI surveillance with operator-controlled tactical AI — that the existing options either don't address or address only partially. If reading the comparisons below makes your current tool sound like the right choice, that's fine. We'd rather you pick the right tool than churn into ours.
 
-## At a glance
+## Quick orientation
 
-| Concern | Frigate | ZoneMinder | Shinobi | Viseron | Verkada | **OpenNVR** |
-|---|---|---|---|---|---|---|
-| **Licence** | MIT | GPLv2 | GPLv3 / AGPLv3 (CE) + Shinobi Pro commercial | MIT | Proprietary, SaaS | **AGPLv3 + Apache-2.0 SDK** |
-| **AI capability scope** | First-class detection, face recognition (0.16), LPR (0.16), CLIP semantic search (0.14), GenAI descriptions via external provider (0.15). Additions land in-tree. | Detection-and-recognition plugins | Plugin system, narrow | Detection-and-recognition plugins | Vendor-managed cloud AI | **Open Adapter Contract v1 — any task class with a published wire spec; ~30-line SDK; third-party adapters under any compatible licence** |
-| **Voice agent** | — | — | — | — | — | **Yes (camera-agent example)** |
-| **Audit chain per inference** | Event log | Application log | Log file | Log file | Vendor cloud log | **End-to-end X-Correlation-Id** |
-| **Model fingerprint drift detection** | — | — | — | — | — | **sha256 polled every 60s** |
-| **Sovereignty enforcement** | — | — | — | — | Vendor cloud by design | **`local_only` policy refuses egressing adapters** |
-| **No shipped default password** | Setup wizard | Setup-wizard since 1.36; older versions shipped `admin/admin` | Setup wizard | Configure on first boot | N/A (SaaS) | **One-time setup token; refuses placeholder secrets** |
-| **TLS-by-default for viewer transports** | Optional | Optional | Optional | Optional | Yes (vendor-managed) | **RTSPS / HLS-TLS / WebRTC-TLS on, plaintext audit-logged** |
-| **Published threat model / architecture paper** | — | — | — | — | Marketing whitepapers | **Peer-citable: DOI 10.5281/zenodo.17261761** |
-| **Home Assistant integration** | Deep, native | Add-on | Add-on | HA-aligned | — | **Via `home-assistant-relay` example (MQTT discovery)** |
-| **Hardware-accelerated detection** | Coral / OpenVINO / TensorRT / Hailo (broad first-class support) | OpenCV / Coral | Limited | Limited | Vendor-managed | **GPU via PyTorch / ONNX adapters; Coral / TensorRT possible via custom adapters (gap vs Frigate at v0.1)** |
-| **HEVC / H.265 quality** | Good (via go2rtc) | OK | OK | OK | Vendor-managed | **OK (MediaMTX; go2rtc evaluation in v0.3)** |
-| **Project maturity** | Active since 2021 | 20+ years | 8+ years | 4+ years | Commercial | **v0.1 — new** |
-| **Community size** | Very large | Large but legacy | Moderate | Small | N/A | **Building** |
-| **Commercial support** | Community + Frigate+ paid tier | Community | Community + Shinobi Pro | Community | Vendor product | **contact@cryptovoip.in** |
+Frigate is the most popular self-hosted NVR for homelab and Home Assistant users, with mature hardware-accelerated detection (Coral, OpenVINO, TensorRT, Hailo) and a recently expanded AI capability set (face recognition, LPR, CLIP semantic search, GenAI descriptions). New capabilities land in-tree under MIT. ZoneMinder is the twenty-year-old legacy choice — broad camera compatibility, deeply documented, GPLv2, designed before the modern AI-surveillance era. Shinobi is the prosumer-SMB option with a polished UI, narrower plugin AI surface, and a dual-licence model (GPLv3 / AGPLv3 community plus Shinobi Pro commercial). Viseron is the closest architectural peer — a small Python-native NVR with a clean detector abstraction, MIT-licensed, Home-Assistant-aligned. Verkada is the commercial cloud incumbent — proprietary, SaaS, vendor-managed AI, no operator-side infrastructure.
+
+OpenNVR differs from all of them on the same five axes: a published Open Adapter Contract v1 so third-party AI ships outside the main repo under any compatible licence; an end-to-end `X-Correlation-Id` audit chain with sha256 model-fingerprint drift detection; two independent default-deny sovereignty gates (`DEPLOYMENT_MODE=offline`, `AI_SOVEREIGNTY=local_only`); a peer-citable architecture paper (DOI 10.5281/zenodo.17261761); and a voice-agent example. The sections below go through each comparison in prose — what each project does well, where the architectures genuinely diverge, and who should pick which.
 
 ## Frigate — the most-asked comparison
 
@@ -104,9 +81,7 @@ capabilities ZoneMinder's plugin model doesn't reach.
 
 ## Shinobi — the prosumer / commercial-adjacent option
 
-**What Shinobi does well.** Polished web UI for non-technical operators,
-clear commercial-support path, broad protocol support, motion-detection
-out of the box. Shinobi serves a "prosumer SMB" segment well.
+**What Shinobi does well.** Polished web UI for non-technical operators, clear commercial-support path, broad protocol support, motion-detection out of the box. Shinobi serves a "prosumer SMB" segment well. Default install runs a setup wizard rather than shipping credentials, and TLS is optional and operator-configured.
 
 **Where the architectures diverge.** Shinobi's plugin system is narrower
 than OpenNVR's adapter contract — most AI work is done through a small
@@ -123,10 +98,7 @@ Apache-2.0 SDK so you can ship adapters under any licence.
 
 ## Viseron — the closest peer
 
-**What Viseron does well.** Modern Python codebase, clean detector
-abstraction, Home Assistant alignment, MIT licence, small focused
-codebase that's actually readable. Viseron deserves more attention than
-it gets.
+**What Viseron does well.** Modern Python codebase, clean detector abstraction, Home Assistant alignment, MIT licence, small focused codebase that's actually readable. Viseron deserves more attention than it gets. Configure-on-first-boot rather than shipped default credentials; TLS is optional and operator-configured.
 
 **Where the architectures diverge.** Viseron and OpenNVR are
 solving overlapping problems with different priorities. Viseron emphasises
@@ -146,9 +118,7 @@ plugin scope.
 
 ## Verkada — the commercial cloud incumbent
 
-**What Verkada does well.** Polished, well-supported, comprehensive
-hardware portfolio, easy operator UX, no infrastructure for the customer
-to maintain.
+**What Verkada does well.** Polished, well-supported, comprehensive hardware portfolio, easy operator UX, no infrastructure for the customer to maintain. TLS is vendor-managed end-to-end and credential management is SaaS-controlled — the customer never sees or holds the keys.
 
 **Where the architectures diverge.** This is the comparison the paper
 names directly. The 2021 Verkada aggregation-layer breach — privileged
@@ -170,18 +140,9 @@ swap one centralised aggregation vendor for another.
 
 ## Honest about where we're not yet competitive
 
-| Area | Where competitors are ahead |
-|---|---|
-| Polish + UX | Frigate, Shinobi, Verkada are years ahead of v0.1's web UI. |
-| Hardware-accelerated detection | Frigate's Coral / OpenVINO / TensorRT / Hailo coverage is broader than what `ai-adapter` ships out of the box. |
-| HEVC reliability | Frigate (via go2rtc) handles cheaper HEVC cameras better than MediaMTX. go2rtc evaluation is on the v0.3 roadmap. |
-| Home Assistant native integration | Frigate's HA integration is deeper than our `home-assistant-relay` example bridge. |
-| Community size | Frigate has 5 years of accumulated users and contributors. |
+A v0.1 release earns its honesty section. The polish and UX of Frigate, Shinobi, and Verkada are years ahead of OpenNVR's web frontend today. Hardware-accelerated detection coverage — Coral, OpenVINO, TensorRT, Hailo — is broader in Frigate than in what the `ai-adapter` repo ships out of the box, though anything reachable from Python is one adapter away. HEVC reliability via MediaMTX is acceptable but Frigate's go2rtc handles cheap HEVC cameras better; go2rtc evaluation is on the v0.3 roadmap. Frigate's Home Assistant integration is deeper than the `home-assistant-relay` bridge OpenNVR ships as an example. And Frigate has five years of accumulated users and contributors; OpenNVR is still building that community.
 
-We're not pretending to displace those advantages. We're betting that the
-audience for whom the audit chain, sovereignty enforcement, AI breadth, and
-published architectural paper *matter* is large enough — and underserved
-enough by the existing options — to be the right thing to build.
+None of that is an argument that those advantages don't matter — they do. The argument is that the audience for whom the audit chain, sovereignty enforcement, contract-driven AI, and published architectural paper *matter* is large enough, and underserved enough by the existing options, to be the right thing to build alongside the polish work.
 
 ## How to evaluate honestly
 

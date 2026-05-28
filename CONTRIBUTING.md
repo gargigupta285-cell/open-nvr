@@ -8,8 +8,8 @@ Everything else on this page is detail.
 
 In rough order of impact:
 
-1. **New AI adapters.** YOLOv11, tracker (ByteTrack / BoT-SORT), pose
-   estimation, CLIP for semantic search, PaddleOCR, depth estimation. See
+1. **New AI adapters.** YOLOv11, BoT-SORT tracking, pose estimation, CLIP for
+   semantic search, PaddleOCR, depth estimation, audio-event detection. See
    the [AI adapter authoring guide](https://github.com/open-nvr/ai-adapter#-write-your-own-adapter)
    in the sister repo — the SDK keeps a working adapter at around 30 lines.
 2. **New example apps.** Everything under `examples/` is a copy-as-template
@@ -313,20 +313,8 @@ opening the PR saves a review cycle.
 
 ## Code of conduct
 
-We want this to stay a project people enjoy contributing to. The bar is:
-
-- Welcoming, inclusive language.
-- Respectful disagreement is fine — personal attacks are not.
-- No harassment, no doxxing, no inflammatory off-topic posting.
-
-Report violations to **contact@cryptovoip.in**. Reports are confidential.
+We want this to stay a project people enjoy contributing to. The expectation is welcoming, inclusive language and respectful disagreement; personal attacks, harassment, doxxing, and inflammatory off-topic posting are not part of that. Report violations to **contact@cryptovoip.in** — reports are confidential.
 
 ## Getting help while you contribute
 
-- **Documentation** — [docs/](docs/), particularly
-  [`AI_ADAPTER_CONTRACT.md`](docs/AI_ADAPTER_CONTRACT.md) and
-  [`SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md).
-- **Discussions** — for "is this the right approach?" questions.
-- **Issues** — for "I think I found a bug" reports.
-
-Thanks for being here.
+For deeper reference reading, [`docs/AI_ADAPTER_CONTRACT.md`](docs/AI_ADAPTER_CONTRACT.md) covers the wire spec and [`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md) covers the threat model. Open a [Discussion](https://github.com/open-nvr/open-nvr/discussions) for "is this the right approach?" questions before you start writing code, and an [Issue](https://github.com/open-nvr/open-nvr/issues) for "I think I found a bug" reports.

@@ -1,68 +1,22 @@
-# AI Adapter Contract — design (A1)
+# AI Adapter Contract v1
 
-> **Status.** Draft for review. Locks the HTTP/WebSocket surface every
-> AI Adapter must implement so OpenNVR / KAI-C / example apps can speak
-> to any model — first-party or community-contributed — without
-> coordinating on a per-model basis. No code in this revision is wired
-> up; this document is the load-bearing artefact reviewers should
-> critique before any adapter migration begins.
+> **Status.** Implemented and shipped in OpenNVR v0.1. This document is the wire spec every adapter — first-party or community-contributed — must conform to so OpenNVR, KAI-C, and example apps can speak to any model without per-model coordination.
 >
-> **New here? Read [Why use ai-adapter](https://github.com/open-nvr/ai-adapter#why-use-ai-adapter-vs-loading-your-model-directly) first.** This document is the *what* — the wire shapes every adapter must speak. The README explains the *why*: which cross-cutting concerns (audit chain, fingerprint drift, sovereignty enforcement, operator-controlled permissions) earn the layer's keep, with a worked comparison vs `from ultralytics import YOLO` and a data-flow diagram for the intrusion-detection example.
+> **New here?** The [`ai-adapter` README](https://github.com/open-nvr/ai-adapter#why-use-ai-adapter-vs-loading-your-model-directly) explains *why* the layer exists (audit chain, fingerprint drift, sovereignty enforcement, operator-controlled permissions, worked comparison vs `from ultralytics import YOLO`). This document is the *what* — the exact HTTP/WebSocket shapes.
 >
-> **What lives outside this doc.** The NATS event bus, Redis caches,
-> MCP server, pgvector + RAG, and example apps each have their own
-> design docs when they ship.
+> **Outside this doc.** The NATS event bus, the example-app patterns, and the MCP server have their own design docs.
 
 ---
 
 ## 0. TL;DR — what every reader gets in one screen
 
-**If you're an operator/org:** existing cameras (Hikvision, Dahua,
-Axis, Reolink, generic ONVIF / RTSP) integrate via the OpenNVR
-camera wizard — auto-discovery, transport-security probe, one stable
-UUID per camera that adapters and apps will use forever (§12.1).
-Every adapter declares permissions up front (GPU? Network egress?
-Filesystem paths?), needs your approval on first registration, runs
-inside a sandbox that enforces the approved list, and writes an
-immutable audit trail of every inference and every policy refusal
-that you can search from the UI and forward to your Splunk/ELK/Syslog
-(§11.2). The narrower subset that needs human attention — sovereignty
-refusals, fingerprint mismatches, app-fired "person in restricted
-zone" — routes to UI badges, Slack, Discord, PagerDuty, email
-(§11.5). If a model gets swapped under you, KAI-C tells you. If
-sovereignty says "local_only", no adapter that declared network
-egress can register. This is the single trust contract.
+For operators: existing cameras (Hikvision, Dahua, Axis, Reolink, generic ONVIF / RTSP) integrate via the OpenNVR camera wizard with auto-discovery, a transport-security probe, and one stable UUID per camera that adapters and apps will use forever (§12.1). Every adapter declares its permissions up front (GPU, network egress, filesystem paths), needs operator approval on first registration, runs inside a sandbox that enforces the approved list, and writes an immutable audit trail of every inference and every policy refusal (§11.2). The narrower subset that needs human attention — sovereignty refusals, fingerprint mismatches, app-fired "person in restricted zone" — routes to UI badges, Slack, Discord, PagerDuty, and email (§11.5). If a model gets swapped under you KAI-C tells you; if sovereignty says `local_only`, no adapter that declared network egress can register. That's the single trust contract.
 
-**If you're a developer:** you implement six HTTP endpoints (with one
-WebSocket) and you get sandboxing, fair queuing per camera, audit
-logging, sovereignty enforcement, blue-green deploys, alerting
-plumbing, and operator UX for free. The minimum viable adapter is
-~30 lines of FastAPI (§3.7); a production adapter adds bearer-token
-auth in another ~10 lines (§3.8). Point the conformance kit at your
-service; if green, KAI-C accepts it (§11.4). Two SDKs are shipped:
-`opennvr-adapter-sdk` for wrapping a model, `opennvr-app-sdk` for
-*using* adapters to build an app (camera discovery, inference
-streaming, alert emission). The contract is intentionally weakly
-typed where it can be (free-form `tasks_advertised`, free-form
-`result` shapes) so you're never bottlenecked on us. Adapters and
-apps can live in your own repos — the community catalogue (§12.4)
-lists conforming entries; you keep ownership and get a "Conforming
-to OpenNVR Adapter Contract v1" badge.
+For developers: implementing six HTTP endpoints (with one WebSocket) earns sandboxing, fair queuing per camera, audit logging, sovereignty enforcement, blue-green deploys, alerting plumbing, and operator UX for free. The minimum viable adapter is ~30 lines of FastAPI (§3.7); a production adapter adds bearer-token auth in another ~10 lines (§3.8). The conformance kit (`python -m conformance ...`) green-lights an adapter for KAI-C registration (§11.4). Two SDKs ship — `opennvr-adapter-sdk` for wrapping a model and `opennvr-app-sdk` for *using* adapters to build an app. The contract is intentionally weakly typed where it can be (free-form `tasks_advertised`, free-form `result` shapes) so you're never bottlenecked on us, and adapters can live in your own repo with a "Conforming to OpenNVR Adapter Contract v1" badge.
 
-**If you're a security reviewer:** §3.8 (auth + correlation),
-§8 (permissions + sandbox), §11.1 (sovereignty enforcement),
-§11.2 (audit trail + SIEM export), §11.3 (capability drift), and
-§11.5 (alert routing) are the six contracts that turn "an adapter
-ran" into "and here is who let it run, what it asked for, what it
-actually did, and how the operator was notified." Hash-chained
-audit integrity is v1.5.
+For security reviewers: §3.8 (auth + correlation), §8 (permissions + sandbox), §11.1 (sovereignty enforcement), §11.2 (audit trail + SIEM export), §11.3 (capability drift), and §11.5 (alert routing) are the six contracts that turn "an adapter ran" into "and here is who let it run, what it asked for, what it actually did, and how the operator was notified." Hash-chained audit integrity is on the v0.3 roadmap.
 
-**If you're an organization planning a deployment:** the use-case
-catalogue in §12.2 lists 12 named examples covering intrusion
-detection, package theft, LPR, loitering, PPE compliance, fall
-detection, fire/smoke, crowd counting, camera health, forensic
-search, and the watchman voice agent. Intrusion-detection and the
-watchman agent ship first; the rest are the contribution roadmap.
+For organisations planning a deployment: the use-case catalogue in §12.2 covers intrusion detection, package theft, LPR, loitering, PPE compliance, fall detection, fire/smoke, crowd counting, camera health, forensic search, and the camera-agent voice loop. Intrusion-detection, the agent, and several others ship in v0.1; the rest are the public roadmap and the contribution surface.
 
 ---
 
@@ -781,9 +735,7 @@ two versions of the same adapter (`face_recognition:v1.2` and
 newer version, drains the old, retires it. Versions are part of the
 adapter URL in the registry (`/api/v1/adapters/face_recognition/v1.3`).
 
-This sounds heavy but it falls out almost for free if we plan for it
-now and is painful to retrofit. Implementation lands in milestone B
-or later.
+The side-by-side blue/green pattern is what powers in-place adapter upgrades without an outage window — landed in v0.1 alongside the registry endpoints.
 
 ## 11. KAI-C aggregator behaviour
 
@@ -1178,33 +1130,26 @@ probes transport security, and gives the operator
 defaults for username/password and resolution. Apps don't see this
 flow — they only see the resulting stable `camera_id`.
 
-### 12.2 Use-case catalog (what we plan to ship)
+### 12.2 Use-case catalog
 
-The intent is: by milestone end, OpenNVR ships with 6–8 first-party
-examples covering the most-asked-for NVR + AI use cases. Each is a
-template community contributors can copy. The full target catalogue:
+The catalogue covers the most-asked NVR + AI use cases. Each entry is a runnable example shipped as a Docker container with a README; community contributors are the source of the rest. The shipped-first-party bar is "passes the conformance kit and ships with tests."
 
 | Slug | Use case | Adapters needed | Status |
 |---|---|---|---|
 | `intrusion-detection` | Person/vehicle in zone after-hours | object_detection | **Shipped (first reference example)** |
 | `loitering-detection` | Person stays in zone > N minutes | object_detection + tracking | **Shipped** |
-| `watchman-agent` | Voice-interactive watchman ("what's at the gate?") | ASR + TTS + LLM | Planned |
-| `license-plate-recognition` | License-plate recognition (whitelist / denylist) | LPR adapter (new) | Planned |
-| `smart-doorbell` | Family vs stranger recognition + Telegram alert | face recognition | Planned |
-| `package-delivery` | Porch package arrival + theft detection | object_detection + classification | Planned |
-| `home-assistant-relay` | Bridge OpenNVR alerts to Home Assistant | n/a (subscriber) | Planned |
+| `camera-agent` | Voice-interactive agent ("what's at the gate?") | ASR + TTS + LLM | **Shipped** |
+| `license-plate-recognition` | License-plate recognition (whitelist / denylist) | object_detection + LPR | **Shipped** |
+| `smart-doorbell` | Family vs stranger recognition + alert routing | face recognition | **Shipped** |
+| `package-delivery` | Porch package arrival + theft detection | object_detection + tracking | **Shipped** |
+| `home-assistant-relay` | Bridge OpenNVR alerts to Home Assistant | n/a (subscriber) | **Shipped** |
 | `camera-health` | Detect blurry/obstructed/offline cameras | classification | Roadmap |
 | `crowd-count` | Headcount in zone (retail, public safety) | counting | Roadmap |
 | `ppe-compliance` | Hardhat/vest detection (construction sites) | classification | Roadmap |
-| `fall-detect` | Slip-and-fall (elder care, retail) | pose | Roadmap |
+| `fall-detect` | Slip-and-fall (elder care, retail) | pose | Roadmap (v0.2) |
 | `fire-smoke` | Early fire/smoke warning | classification | Roadmap |
-| `forensic-search` | "Show me everyone in red between 2-4pm" | CLIP + pgvector | Roadmap |
+| `forensic-search` | "Show me everyone in red between 2-4pm" | CLIP + pgvector | Roadmap (v0.3) |
 | `audit-replay` | Semantic search across recorded events | embeddings + RAG | Roadmap |
-
-Each example ships as a runnable Docker container with a README and
-screenshots. Community contributors fill the gaps — an example
-becomes "first-party" only after it passes the conformance kit and
-ships with tests.
 
 ### 12.3 Example app structure
 
@@ -1246,11 +1191,7 @@ URL + conformance-kit run output.
 submit to `open-nvr/community/apps.yml`. The catalogue listing
 links to your repo; you keep ownership.
 
-**3. Reference adapter / first-party example.** PR directly into
-`ai-adapter/app/adapters/` or `open-nvr/examples/`. Must pass
-conformance kit + have tests + be maintained. Reserved for adapters
-that solve a foundational need (the existing 8) or examples that
-fill a high-priority slot in the catalogue.
+**3. Reference adapter / first-party example.** PR directly into `ai-adapter/adapters/` or `open-nvr/examples/`. Must pass the conformance kit, have tests, and be maintained. Reserved for adapters that solve a foundational need (the seven shipped — YOLOv8, InsightFace, Whisper, Piper, fast-plate-ocr, BLIP, ByteTrack — plus follow-ups on the roadmap) or examples that fill a high-priority slot in the catalogue.
 
 **Recognition.** First-party authors are credited in the example's
 README + the community catalogue. Adapter and app authors who pass
@@ -1263,68 +1204,44 @@ v2 will bump only after a deprecation window. The
 `supported_contract_versions` field lets adapters declare which
 versions they accept so KAI-C can route correctly during transitions.
 
-## 13. Migration matrix — the 8 existing adapters
+## 13. Shipped adapters (v0.1 reference set)
 
-Each adapter in `ai-adapter/app/adapters/` needs to be brought up to
-the contract. Ordered by complexity (simplest first to validate the
-design with low risk):
+Seven adapters ship in v0.1, all conforming to this contract and pulled from `ghcr.io/open-nvr/*-adapter`. They cover the body shapes a starter NVR deployment needs (image, audio, text) and serve as reference implementations for new contributors.
 
-| Adapter | `/health` | `/capabilities` | `/hardware/evaluation` | `/infer` | `/infer/stream` | `/metrics` | Notes |
-|---|---|---|---|---|---|---|---|
-| PiperAdapter (TTS) | partial | needs full | new | partial | optional (not real-time) | new | Smallest model, simplest endpoints. **First migration.** |
-| WhisperAdapter (ASR) | partial | needs full | new | yes | new (real-time ASR) | new | Streaming valuable. |
-| YOLOv8Adapter | partial | needs full | new | yes | new (continuous detection) | new | **Most impactful** — shared-memory fast path makes most sense here. |
-| YOLOv11Adapter | partial | needs full | new | yes | new | new | Same as YOLOv8. |
-| BLIPAdapter (caption) | partial | needs full | new | yes | optional | new | One-shot per frame; streaming optional. |
-| InsightFaceAdapter | partial | needs full | new | yes | new | new | Face DB needs to move to pgvector later (D2). |
-| HuggingFaceAdapter (vision) | partial | needs full | needs cloud-aware verdict | yes | new | new | First cloud-proxying adapter; reference for cost/quota fields. |
-| OllamaAdapter (LLM) | partial | needs full | new | yes | yes (LLM streaming is natural) | new | Token streaming over WS. |
+| Adapter | Body shape | Tasks advertised | Notes |
+|---|---|---|---|
+| YOLOv8 | IMAGE | object_detection | ONNX runtime, CPU + GPU. The most-used adapter; Tier 0 install enables it by default. |
+| InsightFace | IMAGE | face_detection, face_recognition | REST-based face DB (no shared-volume coupling). |
+| Whisper | AUDIO | speech_to_text | `faster-whisper` runtime, CPU + GPU. |
+| Piper | AUDIO | text_to_speech | Inline-audio response option for low-latency loops. |
+| fast-plate-ocr | IMAGE | license_plate_recognition | Two-stage chain candidate with YOLOv8. |
+| BLIP | IMAGE | image_captioning | Scene-caption adapter used by the camera-agent. |
+| ByteTrack | GENERIC | multi_object_tracking | First non-detection adapter — post-processor over an upstream detector's results. |
 
-Migration order (one commit per adapter): **Piper → Whisper → YOLOv8 → YOLOv11 → BLIP → InsightFace → HuggingFace → Ollama.** Each lands behind a feature flag (`ENABLE_CONTRACT_V1`) so we can roll back if a migration breaks something.
+Roadmap adapters (YOLOv11, pose estimation, CLIP/SigLIP, audio events) are tracked in [`ROADMAP.md`](ROADMAP.md). The HuggingFace and Ollama monolith integrations from earlier prototypes live under `ai-adapter/app/adapters/` rather than as per-adapter images; the SDK pattern is the supported path for new adapters.
 
-## 14. What is intentionally NOT in v1
+## 14. Adjacent work — outside this contract
 
-Each of these will get its own design doc when its milestone arrives.
+This wire spec is one piece of a larger system. The following are intentionally outside its scope and tracked separately.
 
-- ~~**NATS event bus.**~~ **Shipped.** KAI-C publishes
-  `opennvr.inference.{adapter}.{camera_id}.completed` after every
-  successful HTTP /infer + WS streaming result. Subscribers fan out
-  via NATS wildcards. See `kai-c/kai_c/events.py` for the schema and
-  `examples/inference-listener/` for the canonical subscriber
-  template. JetStream persistence and audit-event streaming are
-  deliberately deferred to follow-up work (the initial release
-  shipped lean to validate the fan-out story before committing to
-  the broader surface).
-- **Redis cache layer.** The capability cache + idempotency cache
-  are KAI-C concerns that ride alongside the contract; planned
-  follow-up.
-- **MCP server.** Tools to expose, auth shape, and rate-limiting —
-  planned follow-up.
-- **pgvector + RAG.** Planned follow-up. The face DB migration off
-  the in-memory dict is the trigger.
-- **Triton-style multi-model inference servers.** Not ruled out —
-  a Triton-fronting adapter is a perfectly valid contract
-  implementation — but not in v1's reference set.
-- **Adapter image signing + SBOM.** Tracked under the security
-  roadmap; lands in parallel.
+- **NATS event bus — shipped.** KAI-C publishes `opennvr.inference.{adapter}.{camera_id}.completed` after every successful `/infer` and WebSocket streaming result; subscribers fan out via NATS wildcards. See `kai-c/kai_c/events.py` for the schema and `examples/inference-listener/` for the canonical subscriber template. JetStream persistence and audit-event streaming are follow-up work (v0.2) — the initial release shipped lean to validate the fan-out story before committing to the broader surface.
+- **Redis capability and idempotency caches.** KAI-C concerns that ride alongside the contract; tracked on the operator-polish track.
+- **MCP server.** The tools, auth shape, and rate-limiting story for exposing OpenNVR to MCP clients is a separate design effort.
+- **pgvector + RAG.** Planned for the v0.3 forensic-search example. The face-DB migration off the in-memory dict is the trigger.
+- **Triton-style multi-model inference servers.** Not ruled out — a Triton-fronting adapter is a perfectly valid contract implementation — but not in the v0.1 reference set.
+- **Adapter image signing + SBOM.** Tracked under the security roadmap; lands in parallel.
 
-## 15. Open questions for reviewer
+## 15. Design decisions worth recording
 
-1. Is the `tasks_advertised` field too weak (free-text strings, no
-   canonical vocabulary)? My take: leave it weak for v1, formalize
-   only if the community converges on names organically.
-2. Does the shared-memory protocol need a per-frame lifecycle owner
-   (who unlinks)? My take: client owns it (the side that wrote it),
-   adapter reads and acks. Document explicitly so adapter authors
-   don't try to clean up.
-3. Should `permissions` be declarative-only, or should KAI-C
-   *enforce* it as a v1 requirement? My take: declarative only in
-   the contract spec, enforcement is a v1.5 KAI-C feature. Otherwise
-   we can't ship the contract without finishing the sandbox plumbing.
+Three design choices that came up during review and how they landed in v0.1.
+
+1. **`tasks_advertised` stays free-text.** No canonical vocabulary in v0.1. The contract is intentionally loose so new task classes can land without a spec update; if community usage converges on canonical names organically, they can be promoted to recommended values in v2.
+2. **Shared-memory lifecycle is client-owned.** The side that writes the frame (KAI-C, an example app) owns the unlink. Adapters read and acknowledge; they do not clean up. Documented here so adapter authors don't add cleanup logic that races with the producer.
+3. **`permissions` is declarative *and* enforced.** KAI-C's sovereignty enforcement at registration treats `permissions.network_egress` as authoritative — adapters declaring egress under `local_only` are refused outright. Sandbox-level enforcement of GPU and filesystem permissions remains on the roadmap (v0.3); the declaration today is the trust contract that grounds the audit log.
 
 ## 16. References
 
 - Zenodo paper, DOI [10.5281/zenodo.17261761](https://doi.org/10.5281/zenodo.17261761) — §3.4 / §4.1 customer-sovereignty principles inform §8 and §11.1.
-- Existing adapter implementations: `/Users/varunpratapsingh/cv/ai-adapter/app/adapters/`.
-- KAI-C registry behaviour today: `/Users/varunpratapsingh/cv/open-nvr/kai-c/main.py`.
+- Reference adapter implementations: [`ai-adapter/adapters/`](https://github.com/open-nvr/ai-adapter/tree/main/adapters) in the sister repo.
+- KAI-C registry behaviour: [`kai-c/main.py`](https://github.com/open-nvr/open-nvr/blob/main/kai-c/main.py).
 - OpenNVR security architecture: [docs/SECURITY_ARCHITECTURE.md](./SECURITY_ARCHITECTURE.md) — sovereignty enforcement and the broader threat model.

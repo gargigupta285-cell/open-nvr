@@ -80,18 +80,9 @@ back to HLS — same content, ~3 second latency penalty.
 
 ### Playback
 
-The playback page lists recorded segments for a date range you pick.
-Filters:
+The playback page lists recorded segments for a date range you pick, with filters by camera (single or all), by event type (all recordings, motion-triggered, AI-triggered), and by time range (calendar picker or quick presets — last hour, today, yesterday, last seven days).
 
-- **By camera** — single camera or all.
-- **By event type** — "all recordings", "motion-triggered",
-  "AI-triggered".
-- **By time range** — calendar picker, or quick presets (last hour,
-  today, yesterday, last 7 days).
-
-Click a segment to play it. The scrubber respects the seek window the
-recording was indexed with; for finer-grained seeking on long recordings,
-zoom the scrubber via the magnifier icon.
+Click a segment to play it. The scrubber respects the seek window the recording was indexed with; for finer-grained seeking on long recordings, zoom the scrubber via the magnifier icon.
 
 Export is via the **⋯** menu on a segment row → **Download MP4**. Exports
 are remuxed (not re-encoded) so they preserve original quality.
@@ -230,8 +221,4 @@ docker system df               # see where the rest of the space is going
 
 ## Support
 
-- **Questions** → [GitHub Discussions](https://github.com/open-nvr/open-nvr/discussions)
-- **Bug reports** → [GitHub Issues](https://github.com/open-nvr/open-nvr/issues)
-- **Security** → [SECURITY.md](SECURITY.md)
-- **Install** → [DOCKER_QUICKSTART.md](DOCKER_QUICKSTART.md)
-- **Contributing** → [CONTRIBUTING.md](CONTRIBUTING.md)
+Operational questions land in [Discussions](https://github.com/open-nvr/open-nvr/discussions), bugs in [Issues](https://github.com/open-nvr/open-nvr/issues), security via [SECURITY.md](SECURITY.md). The install flow is in [DOCKER_QUICKSTART.md](DOCKER_QUICKSTART.md); if you want to send patches back, [CONTRIBUTING.md](CONTRIBUTING.md) covers the flow.

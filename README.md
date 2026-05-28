@@ -2,52 +2,46 @@
 
 # OpenNVR
 
-### The self-hosted NVR you can talk to.
+### Cameras are everywhere. Almost none of them are yours.
 
-Object detection, license-plate OCR, face recognition, scene captioning, multi-object tracking —
-and a voice agent that grounds its answers in live camera feeds. All running on your hardware.
-No cloud calls by default. Pluggable AI adapter contract. AGPL.
+OpenNVR is the self-hosted network video recorder for everyone who'd rather not give their camera footage — or the AI that watches it — to a vendor's cloud.
 
 [![CI](https://github.com/open-nvr/open-nvr/actions/workflows/ci.yml/badge.svg)](https://github.com/open-nvr/open-nvr/actions/workflows/ci.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org)
-[![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
 [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.17261761-blue.svg)](https://doi.org/10.5281/zenodo.17261761)
-[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-> **v0.1 is here.** Nine first-party example apps shipping today — from
-> *"is there a person in this zone?"* to *"ask your cameras out loud."*
-> Skip to the [gallery](#-examples).
-
-[Quick start](#-quick-start-under-5-minutes) · [Why OpenNVR](#-why-opennvr) · [Examples](#-examples) · [Compliance](docs/COMPLIANCE.md) · [Architecture](docs/SECURITY_ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md)
+[Quickstart](#quickstart) · [Talk to your cameras](#talk-to-your-cameras) · [Build on it](#build-on-it) · [Read the paper](https://doi.org/10.5281/zenodo.17261761)
 
 </div>
 
 ---
 
-> **Built on published research.** OpenNVR is the open-source reference implementation of
-> *Eliminating Systemic IP Camera Vulnerabilities via Offline-First Open Security Architecture*
-> ([Singh et al., 2025 — DOI 10.5281/zenodo.17261761](https://doi.org/10.5281/zenodo.17261761)).
-> 34 sources spanning CISA advisories, real CVEs (Hikvision, Dahua, Uniview, Edimax, ThroughTek
-> Kalay), the 2021 Verkada breach, NIST CSF 2.0, NIST AI RMF, ISO/IEC 27001, ETSI EN 303 645,
-> GDPR, and India's DPDP Act. Paper §3 → §4 → code mapping in [docs/COMPLIANCE.md](docs/COMPLIANCE.md).
->
-> **For critical infrastructure, defence, government, and any organisation where IP-camera
-> security is a hard requirement:** the adapter contract lets your tactical AI run on your
-> hardware under your control — models you've fine-tuned, models you can't share with a
-> vendor, analytics whose detection logic itself is operationally sensitive. Camera-layer
-> isolation, middleware you patch on your own cadence, AI you author and run locally,
-> audit chain that proves none of it touched a vendor cloud. See
-> [docs/GOVERNMENT_DEPLOYMENT.md](docs/GOVERNMENT_DEPLOYMENT.md) for the procurement-grade
-> brief.
+## Why this exists
 
----
+In 2016, a botnet called Mirai conscripted hundreds of thousands of IP cameras into the largest DDoS attack the internet had ever seen. In 2021, an attacker compromised cloud credentials at Verkada and took live feeds from around 150,000 cameras across hospitals, schools, prisons, and factories. Federal advisories continue to land against major vendors — Hikvision, Dahua, Uniview, Edimax — whose firmware quietly powers critical infrastructure around the world.
 
-## ⚡ Quick start (under 5 minutes)
+The pattern keeps repeating because the architecture is wrong. Cameras are connected to vendor clouds. The vendor holds the keys. The vendor controls the AI. The vendor's breach is your breach. A decade after Mirai, the industry has not fixed itself.
 
-Pulls pre-built images straight from GHCR — no toolchain, no source build, no
-manual model downloads. NVR core + YOLOv8 object detection running on your
-camera feed in the time it takes to make a coffee.
+OpenNVR is the bet that the alternative is open-source surveillance infrastructure built around four commitments: **cameras you connect, hardware you own, AI you author, audit logs you can show to a regulator.**
+
+The architecture is published — a peer-citable paper this year, 34 references, three-tier offline-first model, six categories of systemic IP-camera weakness it structurally eliminates ([DOI 10.5281/zenodo.17261761](https://doi.org/10.5281/zenodo.17261761)). This repo is the reference implementation.
+
+## What makes it different
+
+**It's secure by design.** Network isolation between the camera plane, the middleware gateway, and the analytics layer is the architecture, not a configuration toggle. Credentials are encrypted at rest with Fernet, RTSP travels over RTSPS to anything outside the host, and two independent default-deny gates — `DEPLOYMENT_MODE=offline` and `AI_SOVEREIGNTY=local_only` — keep cloud routes and AI egress returning HTTP 403 until an operator explicitly opens them. The systemic IP-camera weaknesses the paper documents — default credentials, hard-coded keys, unsigned firmware updates, exposed management interfaces, vendor-controlled cloud aggregation, opaque telemetry — are structurally eliminated rather than mitigated case by case. Threat model and control mapping in [`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md).
+
+**It's auditable.** Every inference threads a correlation ID from the alert that fired, through the middleware that proxied it, to the model that made the call. Model weights are fingerprinted with sha256 and polled for drift. Cloud routes return HTTP 403 by default. The audit log answers *"why did this alert fire?"* without guesswork. Procurement-grade evidence in [`docs/COMPLIANCE.md`](docs/COMPLIANCE.md).
+
+**Its AI layer is open.** Any model behind a REST or WebSocket endpoint becomes a first-class capability through the AI Adapter Contract — a published wire spec. Object detection, license-plate OCR, face recognition, scene captioning, multi-object tracking, ASR, TTS, LLM tool-calling all ship out of the box. The SDK to write your own is Apache-2.0 and runs around thirty lines of Python.
+
+**You can talk to it.** The included camera-agent is a voice loop — you ask out loud *"is there a person at the front door?"* and a local LLM answers grounded in a live frame from your camera, spoken back through Piper TTS. No cloud, no API keys.
+
+**It's built for sovereignty.** For homelab users that means the doorbell that doesn't phone home. For defence, critical infrastructure, healthcare, and government deployments it means tactical AI that runs on your hardware under your control — models you've fine-tuned, models you can't share with a vendor, analytics whose detection logic itself is operationally sensitive. The procurement brief is in [`docs/GOVERNMENT_DEPLOYMENT.md`](docs/GOVERNMENT_DEPLOYMENT.md).
+
+## Quickstart
+
+Five minutes from `git clone` to YOLOv8 object detection running on your camera feed. Pre-built images on GHCR — no source build.
 
 ```bash
 git clone https://github.com/open-nvr/open-nvr.git
@@ -57,11 +51,13 @@ cp .env.example .env
 docker compose -f docker-compose.tier0.yml up -d
 ```
 
-Open <http://localhost:8000>, paste the one-time setup token from the terminal,
-choose an admin password, and add your first camera. YOLOv8 object detection is
-running on every frame from the moment the camera connects — no extra config.
+Open <http://localhost:8000>, grab the one-time setup token from the core container logs, set an admin password, add a camera. Detection overlays appear within thirty seconds of the camera connecting.
 
-Want voice control? Layer the camera-agent on top:
+Full install, retention, production hardening: [`DOCKER_QUICKSTART.md`](DOCKER_QUICKSTART.md).
+
+## Talk to your cameras
+
+Layer the camera-agent on top of Tier 0:
 
 ```bash
 docker compose -f docker-compose.tier0.yml \
@@ -72,271 +68,49 @@ docker compose -f docker-compose.tier0.yml \
                --profile camera-agent up -d
 ```
 
-Open <http://localhost:9100/demo>, click "Start", and ask
-*"is there a person at the front door?"* — the agent grounds its answer in a
-live frame from your camera and speaks the reply.
+Open <http://localhost:9100/demo>, click Start, speak.
 
-Every security feature ships **on by default**. You don't configure security — you configure exceptions.
+Underneath: a Pipecat-based pipeline with Silero VAD for turn detection, Whisper for STT, an Ollama-hosted LLM with OpenAI-style tool calling, Piper TTS for the spoken reply. The LLM has four tools registered — BLIP scene caption, YOLOv8 detection, InsightFace recognition, and the recent-events NATS feed — each reaching into the live camera frame to ground the answer.
 
-> **Building from source instead?** The legacy `./start.sh` (Linux/macOS) and
-> `.\start.ps1` (Windows) launchers still work and live alongside the Tier 0
-> compose for contributors and dev workflows. Pre-built images mean nobody has
-> to wait for a 20-minute build to try the project.
+Ask *"what's at the back gate?"* and the LLM calls BLIP. Ask *"is anyone in the kitchen?"* and it calls YOLOv8. Ask *"did anyone walk past in the last ten minutes?"* and it queries the inference event ring. All on your hardware. No cloud calls. No API keys.
 
----
+This is the first OpenNVR example where the cameras have agency, not just data.
 
-## 🎯 Why OpenNVR
+## Build on it
 
-> Most NVRs treat AI as a bolt-on and security as a checkbox. OpenNVR inverts that.
-
-- **🔌 Pluggable AI adapters.** Any model behind a REST or WebSocket endpoint becomes
-  a first-class detector. YOLOv8, InsightFace, Whisper, Piper, your custom ONNX —
-  same contract, hot-swappable, no fork required.
-- **🛡️ Secure by default.** Strong-secret validators, RTSPS / HLS-TLS / WebRTC-TLS,
-  loopback-only MediaMTX, offline-mode network posture, one-time admin setup token.
-  No shipped default password, ever.
-- **📜 Audit trail end-to-end.** Every inference carries an `X-Correlation-Id` from
-  alert → middleware → adapter. Investigate "why did this alert fire at 22:14?" without
-  guessing.
-- **🧬 Drift detection.** Model weights are fingerprinted with sha256 and polled every
-  minute. Accidental model rotation or tampering surfaces as an audit event,
-  not silence.
-- **📡 Real event bus.** Alerts and inference results publish to NATS with a public
-  subject scheme. Build downstream apps with copy-as-template subscribers — Home
-  Assistant relays, custom dashboards, your SOC pipeline.
-- **🏠 Sovereignty-first.** Offline mode is the default. Cloud routes return 403
-  unless you explicitly opt in. Your footage doesn't leave your hardware unless you
-  wire it up.
-
----
-
-## 🛡️ Security: the defaults other NVRs leave to you
-
-Most open-source NVRs treat security as the operator's homework. OpenNVR
-enforces it at boot — every relaxation is an explicit decision that lands in
-the audit log.
-
-| Concern | Frigate / Shinobi / Viseron | **OpenNVR** |
-|---|---|---|
-| First-boot admin account | Default credentials or unset auth | **One-time setup token, no shipped password** |
-| Secret strength | Operator's responsibility | **Refuses to boot on placeholder or short secrets** |
-| Cloud egress | On by default | **403 unless `DEPLOYMENT_MODE` is switched from `offline`; audit-logged** |
-| AI sovereignty | No concept | **Adapters declaring `network_egress` refused under `local_only`** |
-| Camera TLS | Plaintext OK | **RTSPS + HLS-TLS + WebRTC-TLS on by default; plaintext requires opt-in + audit** |
-| Audit trail | Application logs | **End-to-end correlation ID from alert → adapter; append-only event log** |
-| Model integrity | Trust the file | **sha256 polled every 60s; drift surfaces as `adapter.fingerprint_mismatch`** |
-
-Built to close every systemic IP-camera weakness documented in recent academic
-work on networked surveillance. Full threat model and control mapping in
-[`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md) · academic
-foundation at [Zenodo DOI 10.5281/zenodo.17261761](https://doi.org/10.5281/zenodo.17261761).
-
----
-
-## 🔍 How OpenNVR compares
-
-| Concern | Frigate | Shinobi | Viseron | **OpenNVR** |
-|---|---|---|---|---|
-| Pluggable AI models | Hardware-detector plugins (Coral / OpenVINO / TensorRT / Hailo) | Plugin system | Built-in YOLO + face | **Open contract — any model behind REST/WS** |
-| Audit trail | Event DB | Logs | Logs | **Per-request correlation ID across the stack** |
-| Sovereignty enforcement | — | — | — | **Cloud routes 403 by default; opt-in only** |
-| Model fingerprint drift detection | — | — | — | **sha256 polled every 60s; audit events** |
-| Event bus | Internal MQTT | webhook | webhook | **NATS, public subjects, template subscribers** |
-| Multi-tenant fairness signal | Single-process | Multi-monitor | Single-process | **Adapter contract declares per-camera fair-queuing intent** |
-| TLS defaults | User-managed | User-managed | User-managed | **RTSPS + HLS-TLS + WebRTC-TLS on by default** |
-| First-boot account | First-login password creation, bearer cookies | Default credentials | Default credentials | **One-time setup token, no shipped password** |
-| Frontend | Web UI | Web UI | Web UI | **Web UI + JSON API + reusable React shell** |
-| License | MIT | GPLv3 | MIT | **AGPLv3** |
-
-OpenNVR is built for the question other NVRs don't try to answer: *what did my
-system actually do, when, and on whose authority?* Every alert, every inference,
-every adapter — traceable end to end, by default.
-
----
-
-## 🧩 Features
-
-| | |
-|---|---|
-| 📹 **Multi-camera NVR** | ONVIF / RTSP / RTSPS ingest · HLS playback · event recording · per-camera retention policies |
-| 🤖 **AI pipeline** | YOLOv8 person detection · InsightFace recognition · Whisper ASR · Piper TTS · plug your own |
-| 🔐 **Default-deny posture** | Loopback-only MediaMTX · placeholder-secret refusal · offline mode · sovereignty enforcement |
-| 🌐 **Cross-platform** | Linux (host network) · macOS (bridge) · Windows (PowerShell) |
-| 📡 **NATS event bus** | `opennvr.inference.*` and `opennvr.alerts.*` subjects · copy-as-template subscribers |
-| 🧪 **Adapter SDK** | `pip install opennvr-adapter-sdk` · write a new detector in ~30 lines · ships with conformance tests |
-| 🪪 **Audit log** | Every register / refresh / inference / refusal recorded with correlation ID and reason |
-| 📦 **One-command install** | Interactive wizard generates secrets, certs, and brings up the full stack |
-
----
-
-## 🚀 Install — for users
-
-### Prerequisites
-
-- Git
-- Docker Desktop (macOS / Windows) **or** Docker Engine + Compose v2 (Linux)
-
-### Tier 0 — pre-built images (recommended)
-
-Pulls everything from GHCR. No source build, no toolchain. Target wall time on
-50 Mbps broadband: under 5 minutes.
-
-```bash
-git clone https://github.com/open-nvr/open-nvr.git
-cd open-nvr
-cp .env.example .env
-./scripts/generate-secrets.sh --write     # Windows: .\scripts\generate-secrets.ps1 -Write
-docker compose -f docker-compose.tier0.yml up -d
-```
-
-Open the **first-time setup token** the core container prints to its log
-(`docker compose -f docker-compose.tier0.yml logs opennvr-core | grep TOKEN`),
-visit <http://localhost:8000>, paste the token, set an admin password, and add
-your first camera. YOLOv8 object detection runs on every frame from the moment
-the camera connects.
-
-**What ships in Tier 0:**
-
-| Service | Image | Purpose |
-|---|---|---|
-| `opennvr-core` | `ghcr.io/open-nvr/core` | Backend + frontend + KAI-C connector |
-| `mediamtx` | local (binary copy from `bluenviron/mediamtx`) | RTSP / HLS / WebRTC streaming |
-| `yolov8-adapter` | `ghcr.io/open-nvr/yolov8-adapter` | Object detection |
-| `db` | `postgres:15-alpine` | State persistence |
-| `nats` | `nats:2-alpine` | Inference event bus |
-
-**Endpoints:**
-
-| Service | URL |
-|---|---|
-| Web UI | <http://localhost:8000> |
-| API docs (OpenAPI) | <http://localhost:8000/docs> |
-| MediaMTX HLS | <http://localhost:8888> |
-| MediaMTX WebRTC | <http://localhost:8889> |
-
-### Adding the voice agent
-
-The camera-agent overlay layers Whisper STT + Piper TTS + Ollama LLM on top of
-Tier 0 so you can talk to your cameras:
-
-```bash
-docker compose -f docker-compose.tier0.yml \
-               -f docker-compose.camera-agent.yml \
-               --profile camera-agent run --rm ollama-model-pull     # ~2 GB, one-time
-docker compose -f docker-compose.tier0.yml \
-               -f docker-compose.camera-agent.yml \
-               --profile camera-agent up -d
-```
-
-Open <http://localhost:9100/demo>, click "Start", and speak.
-
-### Stopping / restarting
-
-```bash
-docker compose -f docker-compose.tier0.yml down            # stop everything
-docker compose -f docker-compose.tier0.yml ps              # show container health
-docker compose -f docker-compose.tier0.yml logs -f         # tail logs
-docker compose -f docker-compose.tier0.yml pull            # refresh to latest images
-```
-
-### Building from source (legacy / dev)
-
-The smart launcher (`./start.sh` on Linux/macOS, `.\start.ps1` on Windows) still
-works and builds every image locally instead of pulling from GHCR. Useful when
-you're modifying the core or running an unreleased commit. See
-[CONTRIBUTING.md](CONTRIBUTING.md) for the from-source path.
-
----
-
-## 🛠️ Build & run — for developers
-
-Run all components locally without Docker, in their own venvs, for fast iteration.
-
-### Prerequisites
-
-- Python 3.11+
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) (Python package manager)
-- Node.js 18+
-- PostgreSQL 13+
-- [MediaMTX](https://github.com/bluenviron/mediamtx) (download the binary for your OS)
-
-### Setup
-
-```bash
-git clone https://github.com/open-nvr/open-nvr.git
-git clone https://github.com/open-nvr/ai-adapter.git     # sibling directory
-cd open-nvr
-make secrets-env                                          # writes server/.env
-# Then edit server/.env: set DATABASE_URL to your local PostgreSQL
-make check-secrets                                        # confirms no placeholders
-```
-
-### Run (5 terminals)
-
-Each terminal starts at the parent directory where you cloned both repos side-by-side
-(so `open-nvr/` and `ai-adapter/` are siblings, and the MediaMTX binary is also at
-that level — copy it next to the repos).
-
-| Terminal | Command |
-|---|---|
-| **1. Backend** | `cd open-nvr/server && uv venv && uv sync && alembic upgrade head && python start.py` |
-| **2. KAI-C** (orchestrator) | `cd open-nvr/kai-c && uv venv && uv sync && python start.py` |
-| **3. Frontend** | `cd open-nvr/app && npm install && npm run dev` (→ <http://localhost:5173>) |
-| **4. MediaMTX** | `./mediamtx open-nvr/mediamtx.local.yml` |
-| **5. AI Adapter** *(optional)* | `cd ai-adapter && uv venv && uv sync --extra all --extra cpu && uv run python download_models.py && uv run uvicorn app.main:app --reload --port 9100` |
-
-The AI Adapter step downloads several hundred MB of model weights on first run.
-
-Full bare-metal walkthrough in [`docs/LOCAL_SETUP.md`](docs/LOCAL_SETUP.md). The
-security-architecture details — startup validator, offline-first posture,
-per-camera transport policy — live in
-[`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md).
-
----
-
-## 🧩 Add a new AI adapter (3 steps)
-
-Want to plug a model OpenNVR doesn't ship with? You don't fork — you write a small
-adapter and point KAI-C at it.
-
-```bash
-pip install opennvr-adapter-sdk
-```
+The AI Adapter Contract is what makes OpenNVR a platform, not a product. Any model behind a REST or WebSocket endpoint can become a first-class capability:
 
 ```python
 from opennvr_adapter_sdk import (
-    AdapterApp, AdapterService, BodyShape,
+    AdapterApp, AdapterService, BodyShape, BODY_BYTES_KEY,
     HardwareEvaluationResponse, HardwareVerdict,
     InferResponse, ModelInfo,
 )
 
 class MyDetector(AdapterService):
-    def load(self):                                          # eagerly load weights
+    def load(self):
+        # eagerly load your weights
         ...
 
     def is_ready(self) -> bool:
         return True
 
-    def fingerprint(self) -> str | None:                     # sha256 of the weights
+    def fingerprint(self) -> str | None:
         return "sha256:..."
 
     def model_info(self) -> ModelInfo:
-        return ModelInfo(name="my-model", version="1.0.0",
-                         framework="onnx", fingerprint=self.fingerprint())
+        return ModelInfo(
+            name="my-model", version="1.0.0",
+            framework="onnx", fingerprint=self.fingerprint(),
+        )
 
     def hardware_evaluation(self) -> HardwareEvaluationResponse:
-        return HardwareEvaluationResponse(verdict=HardwareVerdict.OK, details="")
+        return HardwareEvaluationResponse(verdict=HardwareVerdict.OK, ...)
 
     def infer(self, payload) -> InferResponse:
-        # Binary payloads land at payload[BODY_BYTES_KEY] — import the constant
-        # from the SDK rather than hardcoding the literal so a future rename
-        # doesn't silently break your adapter.
-        from opennvr_adapter_sdk import BODY_BYTES_KEY
         frame_bytes = payload[BODY_BYTES_KEY]
-        # ... run your model ...
-        return InferResponse(result={"detections": [
-            {"label": "person", "confidence": 0.93, "bbox": [10, 20, 100, 200]},
-        ]})
+        # ... your model ...
+        return InferResponse(result={"detections": [...]})
 
 app = AdapterApp(
     service=MyDetector(),
@@ -346,123 +120,57 @@ app = AdapterApp(
 ).fastapi_app
 ```
 
-`uvicorn my_module:app --port 9100`, then `POST` your adapter's URL to KAI-C's
-`/api/v1/adapters/register`. It's hot-swappable from the dashboard. Full walkthrough
-in the [ai-adapter docs](https://github.com/open-nvr/ai-adapter#-write-your-own-adapter).
+`uvicorn my_module:app --port 9100`, register the URL with KAI-C, and your adapter is online — hot-swappable, audit-chained, fingerprint-tracked. The SDK is Apache-2.0 so your adapter can ship under any compatible license, including proprietary or classified.
 
----
+Things developers are building today:
 
-## 🎬 Examples
+- **Tracker-stable alert deduplication** for warehouses ("don't fire 'person detected' sixty times for the same forklift driver walking past").
+- **Pose-based fall detection** for memory-care facilities, with rules a HIPAA-bound auditor signed off on.
+- **Semantic search across recorded footage** — "find clips with a red truck at night" — using a CLIP embedding adapter.
+- **Site-specific PPE compliance** for construction with the false-positive threshold tuned to what the insurer will accept.
+- **Drone-detection** on perimeter cameras, with the classifier weights kept off the vendor cloud.
+- **Domain-specific NVRs** — cannabis dispensary compliance, school weapons detection, port cargo logging — built by forking an example and replacing the predicate.
 
-Every example is a copy-as-template starting point — minimal, readable,
-opinionated. **See the [gallery landing page](examples/README.md)** for the
-full catalogue with screenshots, difficulty ratings, and run instructions.
+Seven reference adapters and a one-command scaffold to start your own live in the sibling [ai-adapter](https://github.com/open-nvr/ai-adapter) repo. Full authoring walkthrough in the [SDK README](https://github.com/open-nvr/ai-adapter/blob/main/opennvr_adapter_sdk/README.md).
+
+## What ships out of the box
 
 | Example | What you'll build | Difficulty |
 |---|---|---|
-| [`intrusion-detection`](examples/intrusion-detection) | Detect people in restricted zones during restricted hours | ⭐ beginner |
-| [`loitering-detection`](examples/loitering-detection) | Dwell-time state machine on a NATS inference stream | ⭐⭐ intermediate |
-| [`inference-listener`](examples/inference-listener) | Minimal NATS subscriber template | ⭐ beginner |
-| [`alerts-subscriber`](examples/alerts-subscriber) | Fan-out alerts to webhooks / logs / your tooling | ⭐ beginner |
-| [`license-plate-recognition`](examples/license-plate-recognition) | Watch the driveway, log every plate, route allow/deny lists | ⭐⭐ intermediate |
-| [`smart-doorbell`](examples/smart-doorbell) | Family / known / unknown at the front door with REST enrollment | ⭐⭐ intermediate |
-| [`package-delivery`](examples/package-delivery) | Porch arrival / linger / pickup with porch-pirate severity routing | ⭐⭐ intermediate |
-| [`camera-agent`](examples/camera-agent) | **Ask your cameras out loud.** Voice agent grounded in live feeds via tool calling | ⭐⭐⭐ advanced |
-| [`home-assistant-relay`](examples/home-assistant-relay) | Bridge OpenNVR alerts into Home Assistant via MQTT discovery | ⭐⭐ intermediate |
+| [`intrusion-detection`](examples/intrusion-detection) | People in restricted zones during restricted hours | beginner |
+| [`loitering-detection`](examples/loitering-detection) | Dwell-time state machine on a NATS inference stream | intermediate |
+| [`license-plate-recognition`](examples/license-plate-recognition) | YOLOv8 + fast-plate-ocr chain with allowlists | intermediate |
+| [`smart-doorbell`](examples/smart-doorbell) | InsightFace recognition with REST enrollment | intermediate |
+| [`package-delivery`](examples/package-delivery) | Per-track state machine for arrival, linger, pickup | intermediate |
+| [`camera-agent`](examples/camera-agent) | The voice agent above | advanced |
+| [`home-assistant-relay`](examples/home-assistant-relay) | Bridge alerts into Home Assistant via MQTT discovery | intermediate |
 
-Each example ships with a `config.example.yml`, a `README.md`, and a focused
-test suite you can read in 5 minutes. The full v0.1 gallery — including
-the axis-grid that groups examples by *drives-inference* vs *subscribes-to-events* —
-is at [`examples/README.md`](examples/README.md).
+Each example is a copy-as-template starting point. Replace the predicate — the zone check, the dwell timer, the plate watchlist — with your domain logic and you have a domain-specific NVR. Gallery walkthrough and the "drives inference vs subscribes to events" axis-grid in [`examples/README.md`](examples/README.md).
 
----
+## Community
 
-## 🤝 Contributing
+Bugs go in [Issues](https://github.com/open-nvr/open-nvr/issues), design questions in [Discussions](https://github.com/open-nvr/open-nvr/discussions), security reports via [private GHSA advisory](https://github.com/open-nvr/open-nvr/security/advisories/new). PR flow is in [`CONTRIBUTING.md`](CONTRIBUTING.md); the [roadmap](docs/ROADMAP.md) names where help is wanted next.
 
-We want your help. Whether it's a typo, a new adapter, or a whole example app, the
-flow is the same:
+Commercial deployments — deployment assistance, NDA adapter authoring, compliance evidence packs, SLA-backed support — [contact@cryptovoip.in](mailto:contact@cryptovoip.in).
 
-1. **Fork** the repo on GitHub.
-2. **Branch** off `main` — `feature/<short-name>` or `fix/<short-name>`.
-3. **Write tests.** Every behavior change needs a test. We block PRs without them.
-4. **Run the suite locally** — `pytest` in each of `server/`, `kai-c/`, and the
-   `examples/*/` you touched. Should be green before you push.
-5. **Open the PR** against `main`. Fill out the template; it's short on purpose.
+## Documentation
 
-Full guidelines, coding standards, commit-message format, and the security
-disclosure process: [`CONTRIBUTING.md`](CONTRIBUTING.md) and
-[`SECURITY.md`](SECURITY.md).
+**Getting started** — [Docker quickstart](DOCKER_QUICKSTART.md) · [User manual](USER_MANUAL.md) · [Local dev setup](docs/LOCAL_SETUP.md) · [Use cases by industry](docs/USE_CASES.md) · [Comparisons](docs/COMPARISONS.md)
 
-**First-time contributors:** look for issues tagged `good first issue` on the issue
-tracker, or fork any of the example apps above — copying one and replacing the
-predicate (zone check, dwell-time state machine, plate-watchlist filter, …) is
-the cheapest path to a real PR. The roadmap section in
-[`examples/README.md`](examples/README.md) lists the adapter / example combinations
-the community has asked for next.
+**Architecture & security** — [Security architecture](docs/SECURITY_ARCHITECTURE.md) · [Compliance mapping](docs/COMPLIANCE.md) · [Government deployment brief](docs/GOVERNMENT_DEPLOYMENT.md) · [AI Adapter Contract](docs/AI_ADAPTER_CONTRACT.md)
 
----
+**Project** — [Roadmap](docs/ROADMAP.md) · [Support](docs/SUPPORT.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
 
-## 💬 Community
+## License
 
-- **GitHub Discussions** — questions, show & tell, feature ideas
-- **Issue tracker** — bugs only, please. Use Discussions for questions.
-
-If OpenNVR saves you a weekend, give us a ⭐ on GitHub — it's the cheapest way to help
-other developers find the project.
-
----
-
-## 🔐 Reporting a vulnerability
-
-**Please don't open a public issue for security bugs.** Use GitHub's "Report
-a vulnerability" feature on this repo, or follow the disclosure process in
-[`SECURITY.md`](SECURITY.md). Threat model and control mapping are in
-[`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md).
-
----
-
-## 📚 Documentation
-
-**Getting started**
-
-- [Docker Quickstart](DOCKER_QUICKSTART.md) — the recommended install path
-- [User Manual](USER_MANUAL.md) — using the web interface
-- [Local Setup](docs/LOCAL_SETUP.md) — bare-metal developer setup
-- [Use Cases by Industry](docs/USE_CASES.md) — does OpenNVR fit your environment?
-- [Comparisons](docs/COMPARISONS.md) — honest evaluation vs Frigate / ZoneMinder / Verkada / Viseron / Shinobi
-
-**Architecture & security**
-
-- [Security Architecture](docs/SECURITY_ARCHITECTURE.md) — threat model, V-* control inventory
-- [Compliance Mapping](docs/COMPLIANCE.md) — paper §3 → §4 → code, plus framework alignment
-- [Government Deployment Brief](docs/GOVERNMENT_DEPLOYMENT.md) — procurement one-pager + operational sovereignty
-- [AI Adapter Contract](docs/AI_ADAPTER_CONTRACT.md) — the wire spec for adapter authors
-
-**Project**
-
-- [Roadmap](docs/ROADMAP.md) — what's shipped, what's coming
-- [Support](docs/SUPPORT.md) — community channels and commercial-support paths
-- [Changelog](CHANGELOG.md) — what's new, version by version
-- [Contributing](CONTRIBUTING.md) — PR flow and coding standards
-
----
-
-## ⚖️ License
-
-OpenNVR is licensed under the **GNU Affero General Public License v3.0** (AGPL v3).
-The AGPL is intentional: it ensures the sovereignty story stays intact — any
-service built on OpenNVR, even one offered over a network, must share its
-modifications openly.
-
-See [`LICENSE`](LICENSE) for the full terms.
-
-> For enterprise commercial licensing, custom deployment support, or corporate
-> sponsorships, reach out at **[contact@cryptovoip.in](mailto:contact@cryptovoip.in)**.
+OpenNVR is **AGPLv3**. The [adapter SDK](https://github.com/open-nvr/ai-adapter/tree/main/opennvr_adapter_sdk) is **Apache-2.0**, so adapters you write can ship under any compatible license — including proprietary or classified for the organisations where that matters.
 
 ---
 
 <div align="center">
 
-**Star us ⭐ · [Try the quickstart](#-quick-start-under-5-minutes) · [Read the contract](docs/AI_ADAPTER_CONTRACT.md) · [Join the community](#-community)**
+**OpenNVR — cameras you connect, hardware you own, AI you author, audit you can show.**
+
+[⭐ Star on GitHub](https://github.com/open-nvr/open-nvr) · [📄 Read the paper](https://doi.org/10.5281/zenodo.17261761) · [⚡ Quickstart](#quickstart)
 
 </div>

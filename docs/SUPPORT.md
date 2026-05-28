@@ -39,24 +39,9 @@ go through coordinated disclosure, not public Issues.
 
 ### Documentation
 
-Most operator questions are already answered in the docs:
+Most operator questions are already answered in the docs. For getting it running and using it day-to-day, [DOCKER_QUICKSTART.md](../DOCKER_QUICKSTART.md) covers install and common operations and [USER_MANUAL.md](../USER_MANUAL.md) covers the web UI. For deciding whether OpenNVR is the right fit, [USE_CASES.md](USE_CASES.md) walks through per-industry fit and [COMPARISONS.md](COMPARISONS.md) is the honest head-to-head with alternatives. For regulated and procurement-driven deployments, [COMPLIANCE.md](COMPLIANCE.md) maps the architecture to frameworks and [GOVERNMENT_DEPLOYMENT.md](GOVERNMENT_DEPLOYMENT.md) is the procurement brief. For the deeper engineering questions, [SECURITY_ARCHITECTURE.md](SECURITY_ARCHITECTURE.md) holds the threat model and [LOCAL_SETUP.md](LOCAL_SETUP.md) the bare-metal dev shell, and [ROADMAP.md](ROADMAP.md) covers what's next.
 
-- [DOCKER_QUICKSTART.md](../DOCKER_QUICKSTART.md) — install and common
-  operations.
-- [USER_MANUAL.md](../USER_MANUAL.md) — using the web UI.
-- [USE_CASES.md](USE_CASES.md) — per-industry deployment fit.
-- [COMPARISONS.md](COMPARISONS.md) — picking the right tool.
-- [COMPLIANCE.md](COMPLIANCE.md) — regulatory mapping.
-- [GOVERNMENT_DEPLOYMENT.md](GOVERNMENT_DEPLOYMENT.md) — procurement
-  brief.
-- [SECURITY_ARCHITECTURE.md](SECURITY_ARCHITECTURE.md) — threat model
-  detail.
-- [LOCAL_SETUP.md](LOCAL_SETUP.md) — bare-metal developer setup.
-- [ROADMAP.md](ROADMAP.md) — what's coming.
-
-If you read those and your question isn't answered, that's signal the
-docs have a gap. Open a Discussion and we'll close it — both for you
-and for everyone else who'd have hit the same wall.
+If you read the doc that should answer your question and it doesn't, that's a signal the docs have a gap — open a Discussion and we'll close it, both for you and for everyone else who'd have hit the same wall.
 
 ### Real-time channels
 
@@ -137,18 +122,7 @@ ship.
 
 ### What's *not* available
 
-We're explicit about scope so there's no surprise.
-
-- **No private forks.** All sponsored development lands in main. The
-  AGPL licence makes private forks impractical anyway, but we wouldn't
-  offer one even where the licence permitted.
-- **No capability gates.** Paid support buys time and risk, not features.
-- **No 24/7 emergency hotline for community-tier users.** Community
-  support is best-effort. If you need follow-the-sun coverage, that's a
-  commercial-tier conversation.
-- **No reseller / white-label arrangements at this stage.** We may
-  offer those later, but v0.1 commercial engagement is direct between
-  the customer and the project's commercial entity.
+A few things are explicitly outside the scope of what commercial support buys. There are no private forks — all sponsored development lands in main, and AGPL makes private forks impractical anyway, but we wouldn't offer one even where the licence permitted. There are no capability gates: paid support buys time and risk-transfer, not features. There's no 24/7 emergency hotline for community-tier users — community support is best-effort, and follow-the-sun coverage is a commercial-tier conversation. And there are no reseller or white-label arrangements at this stage; v0.1 commercial engagement is direct between the customer and the project's commercial entity, which may evolve later.
 
 ### How to engage
 

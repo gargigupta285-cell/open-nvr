@@ -1,11 +1,6 @@
 # Docker Quickstart
 
-Get OpenNVR running in under five minutes using pre-built images from
-GHCR. No source build, no toolchain, no manual model downloads.
-
-If you only want to run the project (not modify it), this is the page you
-want. Contributors should also read [CONTRIBUTING.md](CONTRIBUTING.md) and
-[`docs/LOCAL_SETUP.md`](docs/LOCAL_SETUP.md) for the bare-metal dev path.
+Five minutes from `git clone` to YOLOv8 detection running on your camera feed, using pre-built images from GHCR — no source build, no toolchain, no manual model downloads. If you intend to modify the code rather than just run it, see [CONTRIBUTING.md](CONTRIBUTING.md) and [`docs/LOCAL_SETUP.md`](docs/LOCAL_SETUP.md) for the bare-metal dev path.
 
 ## Prerequisites
 
@@ -262,7 +257,4 @@ Full production hardening checklist in
 
 ## Support
 
-- **User questions** → [GitHub Discussions](https://github.com/open-nvr/open-nvr/discussions)
-- **Bug reports** → [GitHub Issues](https://github.com/open-nvr/open-nvr/issues)
-- **Security** → [SECURITY.md](SECURITY.md)
-- **Contributing** → [CONTRIBUTING.md](CONTRIBUTING.md)
+User questions go in [Discussions](https://github.com/open-nvr/open-nvr/discussions); bug reports in [Issues](https://github.com/open-nvr/open-nvr/issues); security via [SECURITY.md](SECURITY.md). If you want to send patches back, [CONTRIBUTING.md](CONTRIBUTING.md) covers the flow.
