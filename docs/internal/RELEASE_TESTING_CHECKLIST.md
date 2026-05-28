@@ -8,6 +8,19 @@ Time budget: a thorough first pass takes ~3 hours on a single host.
 Skip nothing on the BLOCKERS list — the cost of catching a regression
 post-launch is much higher than the cost of running this through twice.
 
+## Pre-flight: make GHCR packages public
+
+**Do this once, before any tester picks up the checklist.** Without
+it, every Tier 0 install in BLOCKERS section fails with `unauthorized`
+from GHCR — packages default to private on first workflow push and
+must be manually flipped public per organisation.
+
+Use the `gh` CLI script in
+[`RELEASE_NOTES_v0.1.0.md`](RELEASE_NOTES_v0.1.0.md#one-time-package-visibility-setup)
+or do it manually via each package's GitHub settings page. Eight
+packages (core + seven adapters). Verify with an unauthenticated
+`docker pull` from a fresh shell.
+
 ## Pre-test environment
 
 Each tester runs against:

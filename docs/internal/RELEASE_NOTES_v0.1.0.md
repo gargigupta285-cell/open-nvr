@@ -312,9 +312,69 @@ runs from the same commit but on a different ref pattern.
 
 ---
 
+## One-time package visibility setup
+
+**Do this before the testing checklist runs**, not after — testers will
+hit `unauthorized` when pulling otherwise.
+
+GitHub creates GHCR packages as **private** by default on the first
+push from a workflow. The default `GITHUB_TOKEN` can push but cannot
+flip visibility, so this is a manual one-time step per package per
+organisation.
+
+### Recommended: GitHub CLI (one command per package)
+
+```bash
+# Make sure your gh auth has admin:packages scope first:
+gh auth refresh -s admin:packages -h github.com
+
+# open-nvr packages:
+for pkg in core; do
+  gh api --method PATCH \
+    "/orgs/open-nvr/packages/container/$pkg/visibility" \
+    -f visibility=public
+done
+
+# ai-adapter packages:
+for pkg in yolov8-adapter piper-adapter whisper-adapter \
+           fast-plate-ocr-adapter insightface-adapter \
+           blip-adapter bytetrack-adapter; do
+  gh api --method PATCH \
+    "/orgs/open-nvr/packages/container/$pkg/visibility" \
+    -f visibility=public
+done
+```
+
+### Manual via web UI (if you don't have gh CLI set up)
+
+For each of the eight packages (core + seven adapters):
+
+1. Go to `https://github.com/orgs/open-nvr/packages/container/<package>/settings`.
+2. Scroll to "Danger Zone" → "Change visibility".
+3. Set to "Public", confirm.
+
+Eight packages total — budget five minutes the first time.
+
+### Verify
+
+```bash
+docker pull ghcr.io/open-nvr/core:latest
+docker pull ghcr.io/open-nvr/yolov8-adapter:latest
+# ...etc
+```
+
+Each should pull without an `unauthorized` error from an unauthenticated
+terminal (run `docker logout ghcr.io` first if you've previously
+auth'd, to confirm the public path).
+
+This is a v0.1.1 candidate for automation via a PAT-authenticated
+workflow step.
+
+---
+
 ## Tagging workflow
 
-Once both release bodies are ready and the
+Once package visibility is set, both release bodies are ready, and the
 [`RELEASE_TESTING_CHECKLIST.md`](RELEASE_TESTING_CHECKLIST.md) sign-off
 is complete:
 
