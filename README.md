@@ -1,6 +1,6 @@
 <div align="center">
 
-# OpenNVR
+<img src=".github/opennvr-logo.svg" alt="OpenNVR" width="300" />
 
 ### Cameras are everywhere. Almost none of them are yours.
 
