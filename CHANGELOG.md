@@ -228,6 +228,21 @@ audit log.
 - Migrated FastAPI lifecycle from the deprecated `@app.on_event("startup")` /
   `("shutdown")` decorators to the lifespan async context manager pattern.
   Same behaviour; no more deprecation warnings in test runs.
+- **Tier 0 YOLOv8 weights provisioning** now derives the ONNX from the
+  upstream `.pt` checkpoint at first boot rather than fetching a pre-built
+  ONNX. Ultralytics retired both prior URLs (HuggingFace gated behind an
+  allowlist; the `v8.3.0` release `yolov8n.onnx` asset returned 404), so the
+  `yolov8-weights-init` container now downloads `yolov8n.pt` from
+  `github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt`,
+  pip-installs `ultralytics==8.3.40`, and exports to ONNX with
+  `opset=12 imgsz=640 simplify=False` (the adapter-conformance-tested
+  shape). First-boot wall time adds ~3 min on x86 and ~10–15 min on a
+  Raspberry Pi 5; cached on the `opennvr_yolov8_weights` volume so
+  subsequent boots are instant. Operators with a fine-tuned model or a
+  private mirror can set `YOLOV8_WEIGHTS_URL` in `.env` to skip the export
+  entirely and curl their own pre-built ONNX. A v0.1.1 follow-up will
+  publish `ghcr.io/open-nvr/yolov8-weights` so the default case becomes
+  instant too.
 
 ### License
 
