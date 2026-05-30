@@ -225,6 +225,27 @@ audit log.
 
 ### Changed
 
+- **V-015 MediaMTX bind enforcement is now trust-zone-aware (ISSUE-4).** The
+  previous loopback-only check refused to boot in Tier 0 docker-compose
+  because `MEDIAMTX_BASE_URL=http://mediamtx:8889` resolves to the Docker
+  bridge's RFC1918 address. The validator now accepts every address that
+  is unreachable from the public internet — loopback (127/8, ::1), RFC1918
+  (10/8, 172.16/12, 192.168/16, covering Docker bridges and camera LANs),
+  IPv6 ULA (fc00::/7), and IPv4/IPv6 link-local — and refuses public IPs,
+  public FQDNs, scheme-less URLs, and the `0.0.0.0` wildcard bind. The
+  two-NIC framing in `docs/SECURITY_ARCHITECTURE.md` §2.2 makes the scope
+  explicit: V-015 polices the *ingress* MediaMTX URLs (camera LAN side,
+  plaintext RTSP/HTTP); the *egress* side (browser-facing HLS/WebRTC over
+  the uplink NIC, behind a TLS reverse proxy) uses `MEDIAMTX_EXTERNAL_*`,
+  which is deliberately scoped out of this validator. **Breaking change
+  for any operator who set `ALLOW_REMOTE_MEDIAMTX=true`:** the flag has
+  been removed. The previous escape hatch silently let unencrypted
+  MediaMTX traffic cross the trust boundary, which voids the paper's
+  Secure-by-Design guarantee. Operators with a real cross-trust-boundary
+  requirement must terminate TLS in a reverse proxy and configure
+  `MEDIAMTX_EXTERNAL_*` for the public URLs instead. Stale
+  `ALLOW_REMOTE_MEDIAMTX` entries in operator `.env` files are now
+  silently ignored (Pydantic `extra="ignore"`).
 - Migrated FastAPI lifecycle from the deprecated `@app.on_event("startup")` /
   `("shutdown")` decorators to the lifespan async context manager pattern.
   Same behaviour; no more deprecation warnings in test runs.
