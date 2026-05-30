@@ -177,7 +177,7 @@ AI, and is the only edge any operator or downstream system touches.
 | Customer-controlled, software-defined gateway | FastAPI server + MediaMTX, both running under `systemd` on Linux LTS. | Implemented. |
 | RBAC | `Role`, `Permission`, `PermissionChecker`. | Implemented. |
 | Certificate-based authentication | **V-018.** Internal mTLS between NVR ↔ kai-c ↔ ai-adapter; optional client certs for high-end cameras; in-house CA bootstrapped at install. | Planned. |
-| Loopback-only by default for MediaMTX | **V-015.** Startup validator rejects non-loopback hosts (including `0.0.0.0`, which is the wildcard bind, not loopback) and scheme-less URLs for `MEDIAMTX_BASE_URL`, `MEDIAMTX_ADMIN_API`, `MEDIAMTX_HLS_URL`, `MEDIAMTX_RTSP_URL`, `MEDIAMTX_PLAYBACK_URL`, unless `ALLOW_REMOTE_MEDIAMTX=true`. Hostname resolution is bounded by a 2-second timeout so broken DNS at boot cannot hang startup. **Scope note:** the `MEDIAMTX_EXTERNAL_*` URLs are intentionally *not* in this check because they are the browser-facing endpoints behind your TLS-terminating reverse proxy; their security comes from that proxy, not from loopback binding. | `server/core/config.py:_enforce_mediamtx_loopback`, `_host_is_loopback`. |
+| Trust-zone-only by default for MediaMTX ingress | **V-015.** Two-NIC model: the *ingress* MediaMTX URLs (camera LAN / Docker bridge / VPN overlay) speak plaintext RTSP and HTTP, so they must stay inside the OpenNVR trust zone — addresses an attacker on the public internet cannot directly route to. Startup validator accepts loopback (127/8, ::1), RFC1918 (10/8, 172.16/12, 192.168/16), IPv6 ULA (fc00::/7), and IPv4/IPv6 link-local (169.254/16, fe80::/10) for `MEDIAMTX_BASE_URL`, `MEDIAMTX_ADMIN_API`, `MEDIAMTX_HLS_URL`, `MEDIAMTX_RTSP_URL`, `MEDIAMTX_RTSPS_URL`, `MEDIAMTX_PLAYBACK_URL`. Rejects public IPs, public FQDNs, scheme-less URLs, and the `0.0.0.0` wildcard bind. Hostname resolution is bounded by a 2-second timeout so broken DNS at boot cannot hang startup. **There is no escape-hatch flag** — the previous `ALLOW_REMOTE_MEDIAMTX` field was retired in ISSUE-4 because letting plaintext MediaMTX cross the trust boundary is a CVE-by-default. **Scope note (egress):** the `MEDIAMTX_EXTERNAL_*` URLs are intentionally *not* in this check because they are the egress/uplink-side endpoints behind your TLS-terminating reverse proxy; their security comes from that proxy (TLS/WebRTC), not from the trust-zone check. | `server/core/config.py:_enforce_mediamtx_internal`, `_host_is_internal`. |
 | Hardened HTTP edge | CORS allowlist (no `*`). **V-006/V-007/V-008** still pending: CSP/HSTS/X-Frame headers; cookie-based JWT; CSRF. | Partial. |
 | Tamper-evident audit logging | `audit_service.py`. **V-012** still pending for hash-chain. | Partial. |
 | MediaMTX webhook authentication | `X-MTX-Secret` HMAC on every hook; `MEDIAMTX_SECRET` is validated at startup as a strong, non-placeholder value. | Implemented. |
@@ -200,7 +200,7 @@ stay under the operator's control.
 | Principle | Where OpenNVR realises it |
 |---|---|
 | **Complete network isolation.** Cameras on a private subnet, no internet. | Network router stores firewall rule intent; `opennvr-netd` enforces (V-010); dual-homed validator (V-016); DNS blackhole template (V-017). |
-| **Secure middleware enforcement.** All traffic goes through a hardened gateway. | FastAPI + MediaMTX; loopback-only validator (V-015 ✓); CORS allowlist (✓); CSP/HSTS/CSRF (V-006–V-008 planned). |
+| **Secure middleware enforcement.** All traffic goes through a hardened gateway. | FastAPI + MediaMTX; trust-zone validator on ingress URLs (V-015 ✓, no escape hatch); CORS allowlist (✓); CSP/HSTS/CSRF (V-006–V-008 planned). |
 | **Customer sovereignty.** Keys, retention, updates under the operator. | Local DB; Fernet-at-rest credentials (✓); `KeyProvider` with TPM tier (V-004 planned); retention service (✓); update path is `apt`/`uv` on Linux LTS. |
 | **Open standards and transparency.** ONVIF, IETF; auditable. | ONVIF Profile S/T discovery; RFC 7826 RTSPS / RFC 3711 SRTP support; AGPLv3; SBOM (V-011 planned). |
 | **Community-driven development.** Open source. | Public repo, AGPLv3, contributor-friendly module boundaries. |
@@ -212,8 +212,9 @@ satisfy or partially satisfy it. The longer-form mapping lives in
 `docs/compliance/` (planned, V-021).
 
 * **CISA Secure-by-Design.** Random initial admin password, strong-secret
-  startup validator, loopback-only MediaMTX, no plaintext defaults in
-  `env.example` — every default the operator inherits is the safe one.
+  startup validator, trust-zone-only MediaMTX ingress with no escape
+  hatch (V-015), no plaintext defaults in `env.example` — every default
+  the operator inherits is the safe one.
 * **NIST CSF 2.0 (Identify–Protect–Detect–Respond–Recover).** Identify:
   ONVIF discovery + firmware_health (V-014 planned). Protect: RBAC, MFA,
   Fernet vault, secure middleware. Detect: Suricata IDS integration
@@ -228,7 +229,8 @@ satisfy or partially satisfy it. The longer-form mapping lives in
   §5.4 secure storage of sensitive parameters — Fernet vault ✓. §5.5
   communicate securely — MediaMTX RTSPS/HLSS/WebRTC-DTLS-SRTP all
   default-on per V-019 ✓.  §5.6 minimise exposed attack surfaces —
-  loopback-only MediaMTX ✓ (V-010/V-016/V-017 for camera-LAN side).
+  trust-zone-only MediaMTX ingress ✓ (V-015 absolute, no flag bypass;
+  V-010/V-016/V-017 for camera-LAN side).
 * **NIST AI RMF 1.0.** Map → V-022 ai_sovereignty setting; the local_only
   default means no AI processing of footage ever leaves the operator's
   trust boundary unless they opt in.
@@ -262,9 +264,11 @@ review in the [Zenodo paper](https://doi.org/10.5281/zenodo.17261761).
   first-time-setup), V-002 (placeholder-secret rejection across runtime
   validator and Makefile linter, ≥6-char fragment matching to avoid
   random-token false positives), V-005 (recording-path traversal guard +
-  absolute-path refusal at the upload sink), V-015 (MediaMTX loopback
-  enforcement covering wildcard `0.0.0.0` and scheme-less URLs, with
-  DNS-resolution timeout), `make secrets`. **Breaking change:** the
+  absolute-path refusal at the upload sink), V-015 (MediaMTX ingress
+  trust-zone enforcement: loopback + RFC1918 + IPv6 ULA + link-local
+  accepted, public addresses + `0.0.0.0` + scheme-less URLs refused,
+  DNS-resolution timeout, no escape-hatch flag), `make secrets`.
+  **Breaking change:** the
   minimum length for symmetric secrets is 32 characters; existing
   operators must re-run `make secrets` or extend their secrets to
   ≥32 chars before upgrading from a pre-release.
@@ -323,7 +327,7 @@ Anyone adding code to OpenNVR should treat the following as load-bearing:
 3. **No new secrets without entries in the startup validator.** If you add
    an env var that holds key material, add it to `validate_strong_secrets`
    in `server/core/config.py`.
-4. **No new MediaMTX URLs without entries in the V-015 loopback check.**
+4. **No new MediaMTX ingress URLs without entries in the V-015 trust-zone check** (and no new operator flag that bypasses it — V-015 is absolute by design; for cross-trust-boundary deployments, add it to `MEDIAMTX_EXTERNAL_*` instead).
 5. **No plaintext credential storage.** Use `CredentialVaultService`.
 6. **Every state-changing route must record an audit-log entry on both
    success and denial.** Mirror the ISO 27001 access-control auditability
