@@ -223,6 +223,27 @@ audit log.
 - **Account lockout** after repeated failed logins, with a clear feedback
   message and a 180-second cool-down.
 
+### Fixed
+
+- **First-time setup token now surfaces reliably on slow first boot
+  (ISSUE-5).** Previously the `start.sh` / `start.ps1` helper polled
+  `docker compose logs opennvr-core` for the setup-token banner for
+  30 seconds after `compose up -d` returned. With the ISSUE-3 fix in
+  place, `yolov8-weights-init` now exports the ONNX model before
+  opennvr-core starts (≈3 min on x86, ≈10–15 min on a Pi 5), so the
+  30-second window almost always missed the banner on slow hardware
+  and printed a misleading "either the admin is already activated or
+  the server is still starting" fallback. The helper now waits for
+  opennvr-core's Docker healthcheck to pass first — with periodic
+  progress messages so the operator isn't staring at a silent
+  terminal — then extracts the banner from the logs. The fallback
+  message is now disambiguated: once the container is healthy and
+  there's no banner, that unambiguously means the admin is already
+  activated, and the message points the operator at the login URL.
+  Timeout extended to 20 minutes (overridable via
+  `OPENNVR_SETUP_TOKEN_MAX_WAIT_S` for testing). All three branches
+  smoke-tested against a stubbed `docker`.
+
 ### Changed
 
 - **V-015 MediaMTX bind enforcement is now trust-zone-aware (ISSUE-4).** The
