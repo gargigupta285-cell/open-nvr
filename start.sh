@@ -186,37 +186,123 @@ print_banner() {
 # can refuse anonymous LAN access). With `docker compose up -d` the
 # operator never sees that stdout — they have to grep the logs.
 #
-# This helper polls the server container's logs for the token banner
-# after startup and echoes it back to the terminal where the operator
-# ran `./start.sh build`, so the value is right there to copy-paste
-# into the UI. No-op if no token is found (server already activated
-# or container not running).
+# ISSUE-5 fix: the previous version polled for 30s after `compose up
+# -d`, but `compose up -d` returns the moment containers are
+# *scheduled*, not when they're *healthy*. Post-ISSUE-3 the
+# yolov8-weights-init container takes ~3 min on x86 / ~10-15 min on a
+# Pi 5 to export the ONNX model before opennvr-core even starts
+# booting. A 30-second poll always lost that race on slow hardware and
+# fell through to a misleading "either the admin is already activated
+# or the server is still starting" message.
+#
+# Strategy now: wait for opennvr-core's Docker healthcheck to pass
+# first (with progress feedback so the operator isn't staring at a
+# silent terminal for 15 min), THEN extract the banner from the logs.
+# Once healthy, the banner is unambiguously present — its absence then
+# means the admin is already activated, which we report as such.
 print_first_time_setup_token() {
     local compose_args="$1"
-    local max_wait_s=30
-    local poll_interval_s=1
+    local container="opennvr_core"   # container_name from docker-compose.*.yml
+    # OPENNVR_SETUP_TOKEN_MAX_WAIT_S exists so a future smoke-test
+    # harness can short-circuit the 20-minute production timeout with
+    # something testable, e.g. OPENNVR_SETUP_TOKEN_MAX_WAIT_S=10.
+    local max_wait_s="${OPENNVR_SETUP_TOKEN_MAX_WAIT_S:-1200}"  # 20 min
+    local poll_interval_s=2
     local elapsed=0
+    local last_health=""
+    local last_message_at=0
     local banner=""
 
-    # Best-effort: don't fail the wizard if grep finds nothing.
+    echo ""
+    echo -e "  ${GRAY}Waiting for opennvr-core to be healthy before showing the${NC}"
+    echo -e "  ${GRAY}first-time setup token. Init containers can take 10-15 min${NC}"
+    echo -e "  ${GRAY}on a Pi 5 the first time (YOLOv8 .pt → ONNX export).${NC}"
+
     while [ "$elapsed" -lt "$max_wait_s" ]; do
-        # --no-log-prefix strips the per-line "opennvr_core | timestamp"
-        # decoration so the banner is clean to copy-paste. --since 5m
-        # narrows to recent logs so a long-running server's previous
-        # boot banner doesn't fall out of the --tail 1000 window.
-        # -A 6 matches the operator-facing guidance in the React form,
-        # README, and the fallback message below — keep aligned so
-        # operators see the same command surface everywhere.
-        banner=$(docker compose $compose_args logs \
-                --no-color --no-log-prefix --since 5m --tail 1000 opennvr-core 2>/dev/null \
-            | grep -A 6 "first-time setup token" \
-            || true)
-        if [ -n "$banner" ]; then
-            break
-        fi
+        # docker inspect returns "" if the container hasn't been
+        # created yet (e.g. yolov8-weights-init is still running and
+        # opennvr-core hasn't been scheduled). Treat that as "waiting".
+        local health
+        health=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+                 "$container" 2>/dev/null || echo "absent")
+
+        case "$health" in
+            healthy)
+                echo -e "  ${GREEN}✓ opennvr-core is healthy${NC}"
+                break
+                ;;
+            unhealthy)
+                echo ""
+                echo -e "  ${YELLOW}opennvr-core reported unhealthy. Inspect:${NC}"
+                echo -e "  ${GRAY}    docker compose $compose_args logs --tail 100 opennvr-core${NC}"
+                echo ""
+                return 1
+                ;;
+            none)
+                # The container is running but defines no healthcheck
+                # (e.g. someone built a custom image that stripped it).
+                # There's no signal to wait on — fall through to the
+                # banner extraction immediately. The token banner is
+                # printed early in lifespan, so if the container has
+                # gotten this far it's almost certainly in the logs.
+                echo -e "  ${GRAY}  opennvr-core has no healthcheck; checking logs now${NC}"
+                break
+                ;;
+            absent|starting|"")
+                # Progress message every ~15 seconds so the operator
+                # knows we're still alive (init containers can run
+                # silently for several minutes).
+                if [ "$health" != "$last_health" ] || \
+                   [ $((elapsed - last_message_at)) -ge 15 ]; then
+                    case "$health" in
+                        absent)
+                            echo -e "  ${GRAY}  [${elapsed}s] opennvr-core not yet created (init containers running)...${NC}"
+                            ;;
+                        starting|"")
+                            echo -e "  ${GRAY}  [${elapsed}s] opennvr-core booting...${NC}"
+                            ;;
+                    esac
+                    last_message_at=$elapsed
+                fi
+                ;;
+        esac
+        last_health="$health"
         sleep "$poll_interval_s"
         elapsed=$((elapsed + poll_interval_s))
     done
+
+    if [ "$elapsed" -ge "$max_wait_s" ]; then
+        echo ""
+        echo -e "  ${YELLOW}Timed out after ${max_wait_s}s waiting for opennvr-core${NC}"
+        echo -e "  ${YELLOW}to become healthy. Check init container progress:${NC}"
+        echo -e "  ${GRAY}    docker compose $compose_args ps${NC}"
+        echo -e "  ${GRAY}    docker compose $compose_args logs --tail 100 opennvr-core${NC}"
+        echo -e "  ${GRAY}Once healthy, retrieve the token manually:${NC}"
+        echo -e "  ${GRAY}    docker compose $compose_args logs opennvr-core | grep -A 6 'first-time setup token'${NC}"
+        echo ""
+        return 1
+    fi
+
+    # Server is healthy — the lifespan hook prints the banner *very*
+    # early in boot (right after admin user creation) so it's
+    # definitely in the logs by now. Use --tail 5000 to scoop the
+    # early-boot region without a brittle --since time window.
+    # -A 6 matches the operator-facing guidance in the React form,
+    # README, and the fallback message below — keep aligned so
+    # operators see the same command surface everywhere.
+    #
+    # ``tail -7`` keeps only the LAST banner. If opennvr-core
+    # crash-looped during boot, ``maybe_arm`` runs once per restart
+    # and prints a fresh banner with a new token each time; the
+    # earlier banners are stale (their in-memory tokens died with the
+    # container) and would mislead the operator into copy-pasting an
+    # invalidated value. Banners are exactly 7 lines (match line + 6
+    # via ``-A 6``).
+    banner=$(docker compose $compose_args logs \
+            --no-color --no-log-prefix --tail 5000 opennvr-core 2>/dev/null \
+        | grep -A 6 "first-time setup token" \
+        | tail -7 \
+        || true)
 
     if [ -n "$banner" ]; then
         echo ""
@@ -225,11 +311,15 @@ print_first_time_setup_token() {
         echo "$banner" | sed 's/^/  /'
         echo ""
     else
+        # Container healthy AND no banner = admin already activated
+        # on a previous boot. Unambiguous now — give the operator the
+        # right next step.
+        local admin_user
+        admin_user=$(get_env_var "DEFAULT_ADMIN_USERNAME" 2>/dev/null || echo "admin")
         echo ""
-        echo -e "  ${GRAY}(No first-time setup token detected — either the admin is${NC}"
-        echo -e "  ${GRAY}already activated or the server is still starting. To check${NC}"
-        echo -e "  ${GRAY}manually:${NC}"
-        echo -e "  ${GRAY}    docker compose logs opennvr-core | grep -A 6 'first-time setup token'${NC}"
+        echo -e "  ${GREEN}First-time setup is already complete.${NC}"
+        echo -e "  ${GRAY}Log in at ${CYAN}http://localhost:8000${GRAY} as ${WHITE}${admin_user}${GRAY}.${NC}"
+        echo -e "  ${GRAY}(To re-arm the setup token, wipe the database volume and restart.)${NC}"
         echo ""
     fi
 }
