@@ -83,15 +83,27 @@ services:
         fi
         apk add --no-cache openssl >/dev/null
         umask 077
+        # ISSUE-6 v9: extend the SAN list with OPENNVR_HOST_IP when
+        # set so direct RTSPS clients (VLC, ffmpeg hitting
+        # rtsps://<host-ip>:8322) get a cert that matches the URL.
+        # Browsers don't see this cert — they go through nginx, which
+        # has its own cert — but the local-tools UX gets the same
+        # one-click-trust experience.
+        SAN="DNS:localhost,DNS:mediamtx,IP:127.0.0.1,IP:::1"
+        if [ -n "$${OPENNVR_HOST_IP}" ]; then
+          SAN="$${SAN},IP:$${OPENNVR_HOST_IP}"
+        fi
         openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
           -keyout /certs/server.key -out /certs/server.crt \
           -subj "/CN=opennvr-mediamtx" \
-          -addext "subjectAltName=DNS:localhost,DNS:mediamtx,IP:127.0.0.1,IP:::1" \
+          -addext "subjectAltName=$${SAN}" \
           -addext "basicConstraints=critical,CA:FALSE" \
           -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
           -addext "extendedKeyUsage=serverAuth"
         chmod 0644 /certs/server.crt
-        echo "Wrote /certs/server.{crt,key}."
+        echo "Wrote /certs/server.{crt,key} with SAN=$${SAN}"
+    environment:
+      - OPENNVR_HOST_IP=${OPENNVR_HOST_IP:-}
     volumes:
       - ./mediamtx-certs:/certs
 
@@ -120,13 +132,27 @@ services:
       mediamtx-certs-init:
         condition: service_completed_successfully
     ports:
-      - "127.0.0.1:8322:8322" # RTSPS (TLS-required RTSP)
-      - "127.0.0.1:8888:8888" # HLS (HTTPS)
-      - "127.0.0.1:8889:8889" # WebRTC signaling (HTTPS)
-      - "127.0.0.1:8189:8189/tcp" # WebRTC ICE
-      - "127.0.0.1:8189:8189/udp" # WebRTC ICE
-      - "127.0.0.1:9997:9997" # API/metrics
-      - "127.0.0.1:9996:9996" # Playback API
+      # ── Host-loopback only (V-015 trust zone, host-side debugging) ──
+      - "127.0.0.1:8322:8322" # RTSPS (for VLC / ffmpeg from the host)
+      - "127.0.0.1:8888:8888" # HLS (browsers reach via nginx /hls/)
+      - "127.0.0.1:8889:8889" # WebRTC signalling (via nginx /webrtc/)
+      - "127.0.0.1:9997:9997" # MediaMTX admin API/metrics
+      - "127.0.0.1:9996:9996" # Recording playback (via nginx /playback/)
+      # ── WebRTC ICE media path (ISSUE-6 v8) ──────────────────────
+      # WebRTC media is DTLS-SRTP over UDP — browser ↔ mediamtx
+      # direct, NOT proxied by nginx. The UDP port must be reachable
+      # on the same NIC nginx publishes the UI on, so a LAN browser
+      # can complete the ICE handshake mediamtx advertised via
+      # webrtcAdditionalHosts. Bound to NGINX_BIND_HOST (uplink in
+      # dual-NIC mode, 0.0.0.0 in single-LAN) so the trust-zone
+      # constraint stays intact — cameras on a separate camera-LAN
+      # NIC cannot reach this port. Media is DTLS-SRTP-encrypted
+      # end-to-end and only usable with a JWT-authenticated SDP
+      # session, so the exposed surface is small.
+      - "${NGINX_BIND_HOST:-0.0.0.0}:8189:8189/udp"
+      # TCP fallback for WebRTC ICE in case UDP is blocked (corporate
+      # firewalls, mobile carriers). Same exposure rationale as UDP.
+      - "${NGINX_BIND_HOST:-0.0.0.0}:8189:8189/tcp"
     volumes:
       - ./mediamtx.docker.yml:/mediamtx.yml:ro
       - ./mediamtx-certs:/etc/mediamtx-certs:ro
@@ -136,6 +162,14 @@ services:
       - BACKEND_HOST=${BACKEND_HOST:-opennvr_core}
       - MTX_AUTHJWTJWKS=http://opennvr_core:8000/.well-known/jwks.json
       - BACKEND_PORT=${BACKEND_PORT:-8000}
+      # ISSUE-6 v8: ICE candidate advertisement. mediamtx puts the
+      # host(s) listed here in the SDP answer; the browser uses them
+      # to find the UDP/8189 media path. Set by start.sh based on
+      # the operator's declared topology (uplink IP in dual-NIC,
+      # detected LAN IP in single-LAN). Empty default means
+      # mediamtx falls back to auto-detection — works on simple
+      # single-NIC hosts but breaks behind NAT / multi-NIC.
+      - MTX_WEBRTCADDITIONALHOSTS=${MEDIAMTX_WEBRTC_HOSTS:-}
     networks:
       - opennvr_internal
     healthcheck:
@@ -321,9 +355,17 @@ services:
       - MEDIAMTX_RTSPS_URL=rtsps://mediamtx:8322
       - MEDIAMTX_EXTERNAL_RTSPS_URL=rtsps://localhost:8322
       - MEDIAMTX_PLAYBACK_URL=http://mediamtx:9996
-      - MEDIAMTX_EXTERNAL_BASE_URL=http://127.0.0.1:8889
-      - MEDIAMTX_EXTERNAL_HLS_URL=http://127.0.0.1:8888
-      - MEDIAMTX_EXTERNAL_PLAYBACK_URL=http://127.0.0.1:9996
+      # ISSUE-6 v8: browser-facing URLs go through nginx so they
+      # work from any LAN device with TLS. MEDIAMTX_PUBLIC_URL is
+      # exported by start.sh as https://<uplink-IP> for dual-NIC or
+      # https://<detected-IP> for single-LAN. Falls back to
+      # https://localhost so the host-itself path keeps working
+      # when the script is bypassed (e.g., direct `docker compose
+      # up -d`). All three URLs are same-origin with the React UI,
+      # so no mixed-content blockers fire.
+      - MEDIAMTX_EXTERNAL_BASE_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/webrtc
+      - MEDIAMTX_EXTERNAL_HLS_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/hls
+      - MEDIAMTX_EXTERNAL_PLAYBACK_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/playback
       - KAI_C_URL=http://127.0.0.1:8100
       - RECORDINGS_HOST_BASE=${RECORDINGS_PATH:-./recordings}
       - RECORDINGS_CONTAINER_BASE=/app/recordings
@@ -362,12 +404,115 @@ services:
       start_period: 60s
       retries: 5
 
+  # ──────────────────────────────────────────────────────────────
+  # ISSUE-6: TLS reverse proxy for LAN access.
+  #
+  # opennvr-core binds its host port to 127.0.0.1:8000 only — by
+  # design, so the plaintext HTTP API is never reachable from the
+  # LAN. To let operators reach the UI from a phone or laptop on
+  # 192.168.x without compromising on cleartext-JWT-on-the-wire, we
+  # ship nginx as the public edge. It terminates TLS with a
+  # self-signed cert (CA: opennvr-local) and proxies everything to
+  # opennvr-core over the Docker internal bridge — which V-015's
+  # trust-zone semantics already classify as inside the boundary
+  # (loopback + RFC1918 + ULA + link-local). No new attack surface
+  # versus today's loopback-only posture; just the TLS edge moves
+  # from "absent" to "self-signed, in the Docker network namespace".
+  #
+  # Operators with their own reverse-proxy / TLS terminator (Caddy,
+  # Cloudflare Tunnel, nginx on bare metal) can disable this service
+  # by removing it from the compose and bind opennvr-core to
+  # 0.0.0.0:8000 themselves. The recommended path is to leave this
+  # in place.
+  # ──────────────────────────────────────────────────────────────
+  nginx-certs-init:
+    image: alpine:3.20
+    container_name: opennvr_nginx_certs_init
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        if [ -f /certs/server.crt ] && [ -f /certs/server.key ]; then
+          echo "nginx certs already present; skipping."
+          exit 0
+        fi
+        apk add --no-cache openssl >/dev/null
+        umask 077
+        # SAN list covers common LAN access patterns. OPENNVR_HOST_IP
+        # (optional) lets the operator add the server's actual LAN IP
+        # so browsers don't even warn about CN mismatch — they still
+        # warn about the self-signed CA, but that's a one-click
+        # "accept the risk" rather than a hard block.
+        SAN="DNS:opennvr,DNS:opennvr.local,DNS:localhost,IP:127.0.0.1,IP:::1"
+        if [ -n "$${OPENNVR_HOST_IP}" ]; then
+          SAN="$${SAN},IP:$${OPENNVR_HOST_IP}"
+        fi
+        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+          -keyout /certs/server.key -out /certs/server.crt \
+          -subj "/CN=opennvr-ui" \
+          -addext "subjectAltName=$${SAN}" \
+          -addext "basicConstraints=critical,CA:FALSE" \
+          -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+          -addext "extendedKeyUsage=serverAuth"
+        chmod 0644 /certs/server.crt
+        echo "Wrote /certs/server.{crt,key} with SAN=$${SAN}"
+    environment:
+      - OPENNVR_HOST_IP=${OPENNVR_HOST_IP:-}
+    volumes:
+      - ./nginx-certs:/certs
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: opennvr_nginx
+    restart: unless-stopped
+    depends_on:
+      nginx-certs-init:
+        condition: service_completed_successfully
+      opennvr-core:
+        condition: service_healthy
+    ports:
+      # NGINX_BIND_HOST lets the operator restrict the public edge to
+      # a specific interface (e.g., the management VLAN's IP).
+      # Default 0.0.0.0 because the whole point of this service is
+      # LAN reachability; restricting it requires a conscious choice.
+      - "${NGINX_BIND_HOST:-0.0.0.0}:443:443"
+      - "${NGINX_BIND_HOST:-0.0.0.0}:80:80"
+    volumes:
+      - ./nginx-certs:/etc/nginx/certs:ro
+      - ./nginx/opennvr.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - opennvr_internal
+    healthcheck:
+      # `wget -q -O - https://localhost/health` would also work but
+      # requires curl in the alpine image; using nginx's own ability
+      # to serve a 200 on /healthz (we add it in the config) keeps
+      # the image lean.
+      test: ["CMD", "wget", "-q", "--no-check-certificate", "-O", "-", "https://localhost/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
 # ==========================================
 # Networks
 # ==========================================
 networks:
   opennvr_internal:
     driver: bridge
+    # ISSUE-6 v7: pin the bridge subnet so the trust-zone claim is
+    # deterministic (V-015 accepts 172.16/12) and operator LANs
+    # don't accidentally collide with Docker's auto-pick. 172.28/16
+    # is well inside the V-015-accepted range and uncommon in
+    # consumer / SMB LANs (most home routers default to
+    # 192.168.0.0/24 or 192.168.1.0/24; corporate VPNs commonly use
+    # 10.x). If your LAN does use 172.28/16, override via the
+    # OPENNVR_DOCKER_SUBNET env var (and pick another RFC1918 range
+    # inside the V-015 trust zone — 172.16/12, 10/8, 192.168/16).
+    ipam:
+      driver: default
+      config:
+        - subnet: ${OPENNVR_DOCKER_SUBNET:-172.28.0.0/16}
 
 # ==========================================
 # Volumes
