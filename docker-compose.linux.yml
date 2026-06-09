@@ -93,7 +93,11 @@ services:
         # binary left curl unable to load its libs at runtime.
         FROM bluenviron/mediamtx:1.15.4 AS mediamtx-base
         FROM curlimages/curl:8.10.1
+        # See docker-compose.tier0.yml for the base-swap checklist
+        # this set of overrides exists to satisfy.
         USER root
+        WORKDIR /
+        CMD []
         COPY --from=mediamtx-base /mediamtx /mediamtx
         ENTRYPOINT ["/mediamtx"]
     container_name: opennvr_mediamtx
