@@ -119,21 +119,27 @@ services:
     build:
       context: .
       dockerfile_inline: |
-        # ISSUE-7: avoid `apk add curl` so the build doesn't depend on
-        # Alpine package mirrors being reachable. Some ISP and corporate
-        # firewalls block dl-cdn.alpinelinux.org and its known mirrors
-        # (reported from IN/IR networks). Instead, we pull a static
-        # curl binary out of the official curl-project image on Docker
-        # Hub via multi-stage COPY — same registry as alpine:3.20 and
-        # bluenviron/mediamtx, so if the operator can build at all,
-        # this step works. No external package repository accessed at
-        # build time. See tests/host-hardening/test_build_resilience.sh
-        # for the regression guard.
+        # ISSUE-7 v4: use curlimages/curl as the FINAL base instead
+        # of alpine:3.20 + multi-stage COPY of just the curl binary.
+        # The v1 approach left curl unable to load libcurl.so.4 (and
+        # libssl, libcrypto, libnghttp2, ...) at runtime, breaking
+        # the mediamtx healthcheck and runOnInit hooks. curlimages/
+        # curl is itself an alpine image with curl + all its
+        # libraries correctly wired, so using it as the base gives
+        # us a working curl for free. We then COPY only the mediamtx
+        # Go binary in — mediamtx is statically linked, no libs
+        # needed. Still no `apk add`, so the build doesn't depend
+        # on Alpine package mirrors being reachable (the original
+        # ISSUE-7 v1 goal).
         FROM bluenviron/mediamtx:1.15.4 AS mediamtx-base
-        FROM curlimages/curl:8.10.1 AS curl-bin
-        FROM alpine:3.20
-        COPY --from=curl-bin      /usr/bin/curl /usr/local/bin/curl
-        COPY --from=mediamtx-base /mediamtx     /mediamtx
+        FROM curlimages/curl:8.10.1
+        # The curlimages/curl base sets USER curl_user (uid 100) +
+        # an ENTRYPOINT of curl itself. We override both because
+        # mediamtx needs to bind privileged-ish ports (8554, 8888,
+        # 8889) at start AND must run as the entrypoint command,
+        # not under curl.
+        USER root
+        COPY --from=mediamtx-base /mediamtx /mediamtx
         ENTRYPOINT ["/mediamtx"]
     container_name: opennvr_mediamtx
     restart: unless-stopped
