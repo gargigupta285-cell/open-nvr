@@ -244,7 +244,7 @@ async def get_cloud_upload_status(
 
 def _check_mediamtx_available() -> bool:
     """Check if MediaMTX playback server is available."""
-    if not settings.mediamtx_playback_url:
+    if not settings.mediamtx_playback_url:  # url-internal-ok: guard check on backend-side config, never returned to browser
         return False
     try:
         # Quick health check - just try to connect
@@ -255,7 +255,7 @@ def _check_mediamtx_available() -> bool:
         # - 404: path not found
         # - 500: server error
         response = http_client.get(
-            f"{settings.mediamtx_playback_url}/list?path=__health__", timeout=2
+            f"{settings.mediamtx_playback_url}/list?path=__health__", timeout=2  # url-internal-ok: server-side health probe to mediamtx admin API
         )
         # Any response means the server is responding (including 401 for JWT auth)
         return response.status_code in (200, 400, 401, 404, 500)
@@ -546,7 +546,7 @@ async def list_recordings(
         raise HTTPException(status_code=400, detail="Invalid path format")
 
     try:
-        url = f"{settings.mediamtx_playback_url}/list?path={path}"
+        url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
         response = http_client.get(url, timeout=10)
 
         if response.status_code != 200:
@@ -557,10 +557,18 @@ async def list_recordings(
 
         recordings = response.json()
 
+        # ISSUE-4 v2: playback_base_url is returned to the browser;
+        # must use the external fallback chain. Same shape as
+        # get_playback_url and get_playback_config.
+        browser_playback_base = (
+            settings.mediamtx_external_playback_url
+            or settings.mediamtx_playback_url
+            or "http://127.0.0.1:9996"
+        )
         return {
             "recordings": recordings,
             "count": len(recordings),
-            "playback_base_url": settings.mediamtx_playback_url,
+            "playback_base_url": browser_playback_base,
             "path": path,
         }
     except Exception as e:
@@ -590,7 +598,7 @@ async def list_recording_cameras(
             settings.mediamtx_stream_prefix, cam.id, cam.ip_address
         )
         try:
-            url = f"{settings.mediamtx_playback_url}/list?path={path}"
+            url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
             response = http_client.get(url, timeout=5)
 
             if response.status_code == 200:
@@ -882,8 +890,20 @@ async def get_playback_config(
     """
     from services.hls_playback_service import HlsPlaybackService
 
+    # ISSUE-4 v2: this URL is returned to the BROWSER, so it must use
+    # the external fallback chain — not the Docker-bridge internal URL
+    # `http://mediamtx:9996/...`. Same shape as get_playback_url above
+    # and streams.py's WHEP/HLS/RTSPS URL generation. AST contract
+    # test in tests/host-hardening/test_url_fallback_chain.py locks
+    # this so a future "simplification" can't revert it.
+    playback_url = (
+        settings.mediamtx_external_playback_url
+        or settings.mediamtx_playback_url
+        or "http://127.0.0.1:9996"
+    )
+
     return {
-        "playback_url": settings.mediamtx_playback_url,
+        "playback_url": playback_url,
         "stream_prefix": settings.mediamtx_stream_prefix,
         "hls_enabled": True,
         "hls_segment_duration": HlsPlaybackService.SEGMENT_DURATION,
@@ -922,8 +942,21 @@ async def get_today_segments(
         settings.mediamtx_stream_prefix, camera.id, camera.ip_address
     )
 
+    # ISSUE-4 v2: the LIST call below stays on the internal URL
+    # because the backend is the caller (inside the Docker bridge).
+    # But every URL we return TO THE BROWSER below must use the
+    # external fallback chain — same rationale as get_playback_url
+    # and get_playback_config. AST contract test in
+    # tests/host-hardening/test_url_fallback_chain.py locks the
+    # browser-facing fields against regression.
+    browser_playback_base = (
+        settings.mediamtx_external_playback_url
+        or settings.mediamtx_playback_url
+        or "http://127.0.0.1:9996"
+    ).rstrip("/")
+
     try:
-        url = f"{settings.mediamtx_playback_url}/list?path={path}"
+        url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
         response = http_client.get(url, timeout=10)
 
         if response.status_code != 200:
@@ -954,10 +987,11 @@ async def get_today_segments(
             try:
                 dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
                 if dt.strftime("%Y-%m-%d") == today:
-                    # Add playback URL for this segment
+                    # Add playback URL for this segment — uses the
+                    # external base so the browser can actually reach it.
                     encoded_start = quote(start_str, safe="")
                     seg["playback_url"] = (
-                        f"{settings.mediamtx_playback_url}/get?path={path}&start={encoded_start}&duration={seg.get('duration', 300)}"
+                        f"{browser_playback_base}/get?path={path}&start={encoded_start}&duration={seg.get('duration', 300)}"
                     )
                     today_segments.append(seg)
             except Exception:
@@ -981,7 +1015,7 @@ async def get_today_segments(
             "total_duration": total_duration,
             "segment_count": len(today_segments),
             "first_start": first_start,
-            "playback_base_url": settings.mediamtx_playback_url,
+            "playback_base_url": browser_playback_base,
         }
     except Exception as e:
         recording_logger.error(
@@ -1034,9 +1068,16 @@ def _group_segments_by_date(segments: list, path: str) -> list:
         first_start = day_segments[0].get("start")
         last_segment = day_segments[-1]
 
-        # Build playback URL for the entire day - URL-encode the start time
+        # Build playback URL for the entire day - URL-encode the start
+        # time. ISSUE-4 v2: this URL is returned to the BROWSER in the
+        # aggregated result, so it must use the external fallback chain.
         encoded_start = quote(first_start, safe="")
-        playback_url = f"{settings.mediamtx_playback_url}/get?path={path}&start={encoded_start}&duration={total_duration}"
+        browser_playback_base = (
+            settings.mediamtx_external_playback_url
+            or settings.mediamtx_playback_url
+            or "http://127.0.0.1:9996"
+        )
+        playback_url = f"{browser_playback_base}/get?path={path}&start={encoded_start}&duration={total_duration}"
 
         result.append(
             {
@@ -1153,7 +1194,7 @@ async def list_recordings_by_date(
                 settings.mediamtx_stream_prefix, cam.id, cam.ip_address
             )
             try:
-                url = f"{settings.mediamtx_playback_url}/list?path={path}"
+                url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
                 response = http_client.get(url, timeout=10)
 
                 if response.status_code == 200:
@@ -1250,7 +1291,7 @@ async def get_recording_stats(
                 settings.mediamtx_stream_prefix, cam.id, cam.ip_address
             )
             try:
-                url = f"{settings.mediamtx_playback_url}/list?path={path}"
+                url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
                 response = http_client.get(url, timeout=5)
 
                 if response.status_code == 200:
@@ -1551,7 +1592,7 @@ async def get_recording_sessions_for_ai(
                 settings.mediamtx_stream_prefix, cam.id, cam.ip_address
             )
             try:
-                url = f"{settings.mediamtx_playback_url}/list?path={path}"
+                url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
                 response = http_client.get(url, timeout=10)
 
                 if response.status_code == 200:
