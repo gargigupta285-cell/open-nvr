@@ -322,6 +322,37 @@ audit log.
   UDP/TCP both published, recordings.py uses external chain, no
   regression on opennvr-core's loopback-only binding).
 
+- **Tier 0 build no longer depends on external package
+  repositories (ISSUE-7).** Operators behind ISP / corporate
+  firewalls that filter `dl-cdn.alpinelinux.org` (reported from
+  IN, also seen on IR/CN networks) previously had
+  `docker compose -f docker-compose.tier0.yml up -d` fail at the
+  mediamtx image build step:
+  `apk add --no-cache curl` → `WARNING: fetching ... Permission denied`.
+  Mirror-swapping (Aliyun, Tsinghua, Yandex, etc.) helped some
+  operators but not all — depending on which hostnames the
+  filter targets. The robust fix is to **never `apk add` during
+  build**: the mediamtx Dockerfile_inline now pulls a static
+  curl binary out of the official `curlimages/curl:8.10.1` image
+  on Docker Hub via multi-stage `COPY`, instead of calling apk.
+  Same registry as `alpine:3.20` and `bluenviron/mediamtx`, so
+  if the operator can pull *any* image they can build mediamtx.
+  Applied to `docker-compose.tier0.yml`,
+  `docker-compose.linux.yml`, and `docker-compose.yml` — all
+  three converge on the same pattern. New regression test
+  `tests/host-hardening/test_build_resilience.sh` walks every
+  compose file and fails CI if any `dockerfile_inline:` block
+  contains `RUN apk add`, `RUN apt-get install`, or
+  `RUN pip install`, plus asserts every `FROM` references either
+  Docker Hub or `ghcr.io/open-nvr/*` — preventing future drift on
+  the "no external repo at build time" principle. **Known
+  follow-up:** `mediamtx-certs-init` and `nginx-certs-init` call
+  `apk add --no-cache openssl` at *runtime* (inside container
+  `command:` blocks, not at build time), which hits the same
+  filter at first start. Tracked separately because the fix
+  pattern is different (swap base image to one that already
+  ships openssl).
+
 - **Docker bridge subnets are now pinned for a deterministic trust
   zone (ISSUE-6 v7).** `docker-compose.tier0.yml`'s
   `opennvr_internal` bridge and `docker-compose.yml`'s

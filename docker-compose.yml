@@ -116,10 +116,13 @@ services:
     build:
       context: .
       dockerfile_inline: |
-        FROM bluenviron/mediamtx:1.15.4 AS base
+        # ISSUE-7: see docker-compose.tier0.yml for rationale.
+        # No `apk add` so the build works behind ISP/CDN filters.
+        FROM bluenviron/mediamtx:1.15.4 AS mediamtx-base
+        FROM curlimages/curl:8.10.1 AS curl-bin
         FROM alpine:3.20
-        RUN apk add --no-cache curl
-        COPY --from=base /mediamtx /mediamtx
+        COPY --from=curl-bin      /usr/bin/curl /usr/local/bin/curl
+        COPY --from=mediamtx-base /mediamtx     /mediamtx
         ENTRYPOINT ["/mediamtx"]
     container_name: opennvr_mediamtx
     restart: unless-stopped
