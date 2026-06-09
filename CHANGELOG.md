@@ -322,6 +322,152 @@ audit log.
   UDP/TCP both published, recordings.py uses external chain, no
   regression on opennvr-core's loopback-only binding).
 
+- **README quickstart now uses `./start.sh up` as the canonical
+  entry point (ISSUE-10).** The previous quickstart instructed
+  operators to run `cp .env.example .env`, then
+  `./scripts/generate-secrets.sh --write`, then
+  `docker compose -f docker-compose.tier0.yml up -d` — and then
+  said "`./start.sh up` prints the URLs you should visit."
+  
+  That sequence is doubly broken. (1) It does manually what
+  `./start.sh up`'s interactive installer (`scripts/install.sh`)
+  does automatically — but worse, because the installer also
+  prompts for deploy mode, recordings path, admin user, and
+  validates the resulting config. (2) After running compose
+  directly, the operator never sees the first-time setup token
+  banner (no health-wait, no log grep), the LAN access URL
+  (start.sh has the NIC IP, compose doesn't), or the security
+  posture banner (the every-boot flag-if-degraded check). The
+  fresh-deploy operator either grep'd the logs by hand for the
+  token (if they read past the "start.sh prints URLs" line) or
+  hit the UI on localhost only and missed the LAN-reachability
+  story entirely.
+  
+  Quickstart is now three lines:
+  
+  ```
+  git clone https://github.com/open-nvr/open-nvr.git
+  cd open-nvr
+  ./start.sh up
+  ```
+  
+  First run launches the interactive installer, second run
+  starts containers + prints LAN URL + token + posture. The old
+  manual flow is preserved under a new "Skip the wizard" section
+  for power users (CI, configuration management, pinning specific
+  secret values) — but it still ends in `./start.sh up`, never
+  bare compose. The README now explicitly warns against using
+  bare compose at the end of the manual flow, with the grep
+  fallback documented for operators who absolutely need it.
+  
+  The camera-agent section ("Talk to your cameras") legitimately
+  uses bare compose because start.sh doesn't support the
+  camera-agent profile yet — that's an unaddressed gap, not a
+  doc bug. Tracked separately.
+
+- **Setup-token banner pipeline locked with a regression harness
+  (ISSUE-5 follow-up).** The ISSUE-5 fix made `start.sh` wait for
+  opennvr-core's Docker healthcheck before grepping the token
+  banner out of container logs. The pipeline has four silent-
+  failure traps — each one would leave a fresh-deploy operator
+  staring at a misleading "first-time setup is already complete"
+  message without any obvious code break:
+  
+  * the literal string `"first-time setup token"` must match
+    between `server/main.py` (banner emitter) and `start.sh`
+    (banner grep);
+  * the banner must be exactly 7 lines (match + `-A 6`) so
+    `tail -7` keeps a clean unit;
+  * `tail -7` must be present to handle crash-loops — each
+    restart of opennvr-core mints a fresh banner with a new
+    in-memory token, and only the LAST one is live;
+  * the health-wait loop must be present (not just a wall-clock
+    timeout) so slow boots like the Pi 5 first-export pass.
+  
+  The new harness `tests/host-hardening/test_setup_token_banner.sh`
+  exercises the actual grep pipeline against synthetic log
+  inputs and AST-walks `first_time_setup_service.py` for the
+  idempotency guard. 8 tests:
+  
+  (1) single-banner happy path extracts the token cleanly,
+  (2) crash-loop with three banners returns only the latest token,
+  (3) absent-banner returns exactly empty (signals "already activated"),
+  (4) banner is exactly 7 lines after the pipeline,
+  (5) main.py contains the literal `"first-time setup token"`,
+  (6) start.sh polls `.State.Health.Status` and breaks on `healthy`,
+  (7) `OPENNVR_SETUP_TOKEN_MAX_WAIT_S` override hook exists (so a
+       future docker-in-docker integration test can short-circuit
+       the 20-min production timeout),
+  (8) `maybe_arm()` has the `if _state is not None: return None`
+       idempotency guard (AST match — survives cosmetic reformatting
+       but catches deletion).
+  
+  Tests run by feeding the exact same `grep -A 6 "first-time setup
+  token" | tail -7` pipeline that start.sh runs, so any drift in
+  either side fails the contract. No docker needed — pure synthetic
+  inputs, runs in milliseconds, CI-friendly.
+
+- **AST contract test for the URL fallback chain caught three
+  more recordings.py bugs (ISSUE-4 v2).** While writing the
+  follow-up AST regression test for ISSUE-6 v8's `get_playback_url`
+  fix, the test found three more functions in
+  `server/routers/recordings.py` returning the Docker-bridge
+  internal MediaMTX URL (`http://mediamtx:9996`) to the browser
+  instead of the external fallback chain:
+  
+  * **`get_playback_config`** (line 886) returned
+    `"playback_url": settings.mediamtx_playback_url` — the
+    frontend uses this as the base for constructing playback
+    URLs. LAN browsers would get an unreachable
+    `http://mediamtx:9996/...`.
+  
+  * **`get_today_segments`** (lines 959, 984) built per-segment
+    `playback_url` strings and a `playback_base_url` field, both
+    using the internal URL. The DVR-style timeline scrubber in
+    live view almost certainly hit this — segment thumbnails
+    would point at the unreachable URL.
+  
+  * **`list_recordings`** (line 563) returned the same
+    `playback_base_url` field with the internal URL.
+  
+  * **`_group_segments_by_date`** (line 1065) built per-day
+    aggregate `playback_url` strings using the internal URL —
+    surfaced through any endpoint that calls this helper.
+  
+  All four shapes are the same bug as the `get_playback_url`
+  ISSUE-6 v8 fix; they just survived because no one had thought
+  to write a regression test that catches the bug class
+  structurally. Each is fixed by extracting the same
+  `external or internal or hardcoded-default` chain that
+  `get_playback_url` already uses, then using that for any
+  field returned to the browser. The five legitimate server-side
+  uses (LIST calls to mediamtx's admin API over the Docker
+  bridge, plus the health probe and the config-guard check) are
+  marked with a per-line `# url-internal-ok: <rationale>` pragma
+  so the test exempts them while keeping the intent reviewable
+  in the diff.
+  
+  The new contract test lives at
+  `tests/host-hardening/test_url_fallback_chain.sh` and runs three
+  checks: (1) every `settings.mediamtx_<x>_url` reference in
+  streams.py/recordings.py either appears in a `BoolOp(or)`
+  fallback chain with its external counterpart or carries the
+  pragma; (2) every `# url-internal-ok` pragma carries a
+  colon-separated rationale (a bare pragma fails — keeps the
+  next reviewer from approving an "ok-because-I-said-so"
+  exemption); (3) every fallback chain includes a hardcoded
+  http(s)/rtsp(s) default so the service can't 500 during
+  startup if both settings are None. Walks both
+  `server/routers/streams.py` (which was already correct — used
+  as the positive reference shape) and
+  `server/routers/recordings.py` (which had the four bugs).
+  Implementation uses Python's `ast` module with parent tracking
+  so it can identify "this Attribute reference is or isn't inside
+  a fallback chain" precisely.
+  
+  Total host-hardening suite now: 96 tests across 8 suites, all
+  green.
+
 - **Host-hardening test suites are now actually in git
   (ISSUE-9).** Discovered while preparing the ISSUE-7 v6 commit:
   `.gitignore` line 34 was an un-anchored `host-hardening/` —

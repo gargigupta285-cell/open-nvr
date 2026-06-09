@@ -46,16 +46,36 @@ Five minutes from `git clone` to YOLOv8 object detection running on your camera 
 ```bash
 git clone https://github.com/open-nvr/open-nvr.git
 cd open-nvr
-cp .env.example .env
-./scripts/generate-secrets.sh --write
-docker compose -f docker-compose.tier0.yml up -d
+./start.sh up
 ```
 
-`./start.sh up` prints the URLs you should visit. Open <https://localhost/> from the host itself, or <https://&lt;server-ip&gt;/> from a phone/laptop on the same LAN — the script auto-detects your LAN IP and generates a self-signed certificate that includes it. Your browser will warn about the self-signed CA once; click **Advanced → Accept the risk and continue**. The cert and key live in `./nginx-certs/` on the host and never leave the machine.
+That's it. `./start.sh up` is the canonical entry point — it wraps `docker compose up -d` with the four things you actually need on a fresh deploy:
+
+1. **First run launches the interactive installer** (`scripts/install.sh`) — picks deploy mode, recording path, admin user, generates all secrets, writes `.env`. No manual `cp .env.example .env` or `./scripts/generate-secrets.sh --write` step.
+2. **Pre-flight validates the env** — catches missing or weak secrets, refuses to start a vulnerable config rather than surfacing it as a Docker healthcheck failure ten minutes in.
+3. **Auto-detects your network topology** — single-LAN or dual-NIC (camera-LAN + uplink), writes `NGINX_BIND_HOST` and generates a self-signed certificate that includes your actual LAN IP so phones / laptops on the same network can reach `https://<server-ip>/` without a CN-mismatch warning.
+4. **After containers come up, it prints what you need to act on** — your LAN access URL, the one-time first-time-setup token (waits for `opennvr-core`'s healthcheck — slow Pi 5 first boot can take 10-15 min, the script tracks progress), and a security posture banner that flags anything weakening the trust boundary (e.g. trust zone wider than RFC1918, single-LAN deploy without VLAN isolation between cameras and uplink).
+
+After install completes, run `./start.sh up` again — it will start containers and print everything above. Open the LAN URL it gives you, accept the self-signed cert warning once (click **Advanced → Accept the risk and continue** — the cert and key live in `./nginx-certs/` on the host and never leave the machine), paste the setup token, set an admin password, add a camera. Detection overlays appear within thirty seconds of the camera connecting.
 
 Live streams (WebRTC, HLS) and recording playback work from any device on your LAN. If your IP changes (DHCP renewal, moved boxes), run `./start.sh refresh-certs` to regenerate the cert with the new IP.
 
-Grab the one-time setup token from the start-script output (or `docker compose logs opennvr-core | grep -A 6 'first-time setup token'`), set an admin password, add a camera. Detection overlays appear within thirty seconds of the camera connecting.
+If you missed the token in the start-script output: `docker compose -f docker-compose.tier0.yml logs opennvr-core | grep -A 6 'first-time setup token' | tail -7`.
+
+### Skip the wizard
+
+If you'd rather drive setup yourself — pin specific secret values, run unattended on a CI box, deploy from configuration management:
+
+```bash
+git clone https://github.com/open-nvr/open-nvr.git
+cd open-nvr
+cp .env.example .env
+./scripts/generate-secrets.sh --write    # or set your own values in .env
+# review / edit .env as needed
+./start.sh up                            # still does pre-flight + posture + token surfacing
+```
+
+Don't replace the `./start.sh up` at the end with bare `docker compose -f docker-compose.tier0.yml up -d` — compose alone won't auto-detect your NIC topology, won't surface the one-time setup token, and won't warn you if your trust zone is wider than you intended. If you absolutely must use compose directly (debugging, custom orchestration), grep the token manually as shown above.
 
 Full install, retention, production hardening: [`DOCKER_QUICKSTART.md`](DOCKER_QUICKSTART.md).
 
