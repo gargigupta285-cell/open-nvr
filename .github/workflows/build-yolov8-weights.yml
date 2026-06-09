@@ -41,14 +41,20 @@ on:
     paths:
       - "examples/yolov8-weights/**"
       - ".github/workflows/build-yolov8-weights.yml"
-  # Manual trigger so we can re-publish after an Ultralytics
-  # security release without bumping OpenNVR's own version.
+  # Manual trigger so we can re-publish after a YOLOv8 weights
+  # release without bumping OpenNVR's own version.
   workflow_dispatch:
     inputs:
-      ultralytics_tag:
-        description: "Ultralytics version to pin (e.g. 8.3.40)"
+      weights_tag:
+        # The tag refers to the ultralytics/assets RELEASE tag the
+        # .pt comes from, NOT the Python `ultralytics` package
+        # version. Same convention as docker-compose.tier0.yml's
+        # YOLOV8_WEIGHTS_IMAGE default (v8.3.0), so the workflow's
+        # published image and the operator-facing compose
+        # reference stay in lockstep automatically.
+        description: "YOLOv8 weights release tag (e.g. 8.3.0)"
         required: false
-        default: "8.3.40"
+        default: "8.3.0"
 
 jobs:
   build:
@@ -58,6 +64,30 @@ jobs:
       packages: write   # required to push to ghcr.io
 
     steps:
+      - name: Free up GHA runner disk space
+        # First build attempt OOM'd at 2m 11s during multi-arch
+        # extract of ultralytics/ultralytics:8.3.40 (~3.2 GB amd64
+        # + ~3.3 GB arm64 = 6.5 GB of base images on a runner with
+        # 14 GB total disk). This action removes preinstalled tools
+        # (Android SDK, .NET, Haskell, large Docker images) that
+        # we don't use, reclaiming ~25-30 GB. Without this, every
+        # multi-arch image build of a large base fails the same
+        # way. Standard pattern across the Docker / GitHub
+        # ecosystem.
+        uses: jlumbroso/free-disk-space@main
+        with:
+          # Tool caches we don't use — safe to nuke.
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          # Keep docker-images: docker buildx needs them.
+          docker-images: false
+          # swap-storage takes a minute to remove and we don't need
+          # it; the build is bandwidth-bound during pull, not
+          # memory-bound.
+          swap-storage: true
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -82,24 +112,27 @@ jobs:
       - name: Compute image tags
         id: tags
         run: |
-          # The Ultralytics tag drives the image tag because that's
-          # the operator-meaningful version (which YOLOv8 release).
-          # OpenNVR's own version doesn't change the bytes inside.
-          ULTRALYTICS_TAG="${{ github.event.inputs.ultralytics_tag || '8.3.40' }}"
+          # The weights tag drives the image tag because that's the
+          # operator-meaningful version (which YOLOv8 weights release
+          # the ONNX was exported from). Default 8.3.0 — keep this
+          # aligned with the YOLOV8_WEIGHTS_IMAGE default in
+          # docker-compose.tier0.yml so operators get the image
+          # their compose file expects.
+          WEIGHTS_TAG="${{ github.event.inputs.weights_tag || '8.3.0' }}"
           # On a tagged OpenNVR release, also publish :latest.
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             EXTRA="ghcr.io/${{ github.repository_owner }}/yolov8-weights:latest"
           else
             EXTRA=""
           fi
-          # Always publish the Ultralytics-tag variant.
-          PRIMARY="ghcr.io/${{ github.repository_owner }}/yolov8-weights:v${ULTRALYTICS_TAG}"
+          # Always publish the weights-tag variant.
+          PRIMARY="ghcr.io/${{ github.repository_owner }}/yolov8-weights:v${WEIGHTS_TAG}"
           SHA="ghcr.io/${{ github.repository_owner }}/yolov8-weights:sha-${GITHUB_SHA::8}"
           {
             echo "primary=${PRIMARY}"
             echo "extra=${EXTRA}"
             echo "sha=${SHA}"
-            echo "ultralytics_tag=${ULTRALYTICS_TAG}"
+            echo "weights_tag=${WEIGHTS_TAG}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Build (and push if not PR)
