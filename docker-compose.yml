@@ -116,13 +116,15 @@ services:
     build:
       context: .
       dockerfile_inline: |
-        # ISSUE-7: see docker-compose.tier0.yml for rationale.
-        # No `apk add` so the build works behind ISP/CDN filters.
+        # ISSUE-7 v4: see docker-compose.tier0.yml for rationale.
+        # curlimages/curl as the final base means curl + its
+        # dynamic libs (libcurl.so.4, libssl, libcrypto, ...) are
+        # all wired correctly — the v1 alpine + COPY of just the
+        # binary left curl unable to load its libs at runtime.
         FROM bluenviron/mediamtx:1.15.4 AS mediamtx-base
-        FROM curlimages/curl:8.10.1 AS curl-bin
-        FROM alpine:3.20
-        COPY --from=curl-bin      /usr/bin/curl /usr/local/bin/curl
-        COPY --from=mediamtx-base /mediamtx     /mediamtx
+        FROM curlimages/curl:8.10.1
+        USER root
+        COPY --from=mediamtx-base /mediamtx /mediamtx
         ENTRYPOINT ["/mediamtx"]
     container_name: opennvr_mediamtx
     restart: unless-stopped
