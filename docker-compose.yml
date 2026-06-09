@@ -81,7 +81,11 @@ services:
   # manually, this is a no-op and prints a single line confirming the
   # certs are present.
   mediamtx-certs-init:
-    image: alpine:3.20
+    # ISSUE-7 v6: see docker-compose.tier0.yml for the dl-cdn.
+    # alpinelinux.org filter rationale. alpine/openssl ships the
+    # openssl CLI pre-baked so no runtime apk fetch is needed.
+    image: alpine/openssl:3.3.2
+    entrypoint: []
     container_name: opennvr_mediamtx_certs_init
     command:
       - sh
@@ -93,7 +97,6 @@ services:
           exit 0
         fi
         echo "Generating self-signed MediaMTX cert pair (V-019)..."
-        apk add --no-cache openssl >/dev/null
         umask 077
         openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
           -keyout /certs/server.key -out /certs/server.crt \

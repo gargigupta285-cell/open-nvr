@@ -31,7 +31,16 @@ nginx-certs/
 # directories are operator-local — they reference the operator's
 # specific interface names and contain `nft list ruleset` snapshots
 # that may include details of their other firewall rules.
-host-hardening/
+#
+# ISSUE-9 fix: the pattern is anchored with a leading slash so it
+# matches ONLY ``./host-hardening/`` (the operator artifact dir
+# created by ``scripts/apply-camera-vlan-hardening.sh``), not
+# ``./tests/host-hardening/`` (our regression test suites — which
+# the un-anchored pattern accidentally excluded for the entire
+# life of the ISSUE-6 → ISSUE-8 series, leaving every "X tests
+# green" claim in CHANGELOG referencing files that lived only in
+# local working trees).
+/host-hardening/
 
 # Secrets and credentials
 secrets/

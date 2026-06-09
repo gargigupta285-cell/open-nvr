@@ -70,7 +70,20 @@ services:
   # here so behaviour is identical across install paths.
   # ──────────────────────────────────────────────────────────────
   mediamtx-certs-init:
-    image: alpine:3.20
+    # ISSUE-7 v6: was alpine:3.20 + runtime ``apk add openssl``. That
+    # apk fetch hits dl-cdn.alpinelinux.org, which several operator
+    # ISPs (IN/CN/IR reports) filter — the container exits with
+    # "Permission denied" and mediamtx never starts. alpine/openssl
+    # ships the openssl CLI pre-baked at the registry layer, so the
+    # image pull (registry-1.docker.io — reachable) is the only
+    # network operation the container needs. Pinned tag, multi-arch
+    # (amd64/arm64/armv7), ~6 MB.
+    #
+    # ``entrypoint: []`` clears the image's default ENTRYPOINT
+    # (``["openssl"]``) so the existing ``command: [sh, -c, ...]``
+    # runs as the container's argv.
+    image: alpine/openssl:3.3.2
+    entrypoint: []
     container_name: opennvr_mediamtx_certs_init
     command:
       - sh
@@ -81,7 +94,6 @@ services:
           echo "MediaMTX certs already present; skipping."
           exit 0
         fi
-        apk add --no-cache openssl >/dev/null
         umask 077
         # ISSUE-6 v9: extend the SAN list with OPENNVR_HOST_IP when
         # set so direct RTSPS clients (VLC, ffmpeg hitting
@@ -442,7 +454,10 @@ services:
   # in place.
   # ──────────────────────────────────────────────────────────────
   nginx-certs-init:
-    image: alpine:3.20
+    # ISSUE-7 v6: same fix as mediamtx-certs-init above. See its
+    # comment block for the dl-cdn.alpinelinux.org filter rationale.
+    image: alpine/openssl:3.3.2
+    entrypoint: []
     container_name: opennvr_nginx_certs_init
     command:
       - sh
@@ -453,7 +468,6 @@ services:
           echo "nginx certs already present; skipping."
           exit 0
         fi
-        apk add --no-cache openssl >/dev/null
         umask 077
         # SAN list covers common LAN access patterns. OPENNVR_HOST_IP
         # (optional) lets the operator add the server's actual LAN IP

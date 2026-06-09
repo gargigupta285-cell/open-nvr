@@ -322,6 +322,121 @@ audit log.
   UDP/TCP both published, recordings.py uses external chain, no
   regression on opennvr-core's loopback-only binding).
 
+- **Host-hardening test suites are now actually in git
+  (ISSUE-9).** Discovered while preparing the ISSUE-7 v6 commit:
+  `.gitignore` line 34 was an un-anchored `host-hardening/` —
+  intended to exclude the operator-local nft snapshot directory
+  at repo root, but the un-anchored pattern matches any directory
+  named `host-hardening` at any depth, including
+  `./tests/host-hardening/`. Consequence: every test file under
+  `tests/host-hardening/test_*.sh` (built up across ISSUE-6 → ISSUE-8
+  to ~95 tests across 7 suites) was excluded from commits. The
+  "X tests green" claims in those CHANGELOG entries pointed at
+  files that lived only in local working trees — they never
+  reviewed, never ran in CI, and a new contributor cloning the
+  repo would not get them.
+  
+  How it slipped through `test_script_permissions.sh` (which was
+  supposed to be the regression net for this class of bug): tests
+  2 and 3 took globbed file lists as input
+  (`git ls-files --stage 'tests/host-hardening/*.sh'`). When the
+  glob matched zero tracked files (because they were all
+  gitignored), the awk filter that catches mode mismatches produced
+  empty output — and an empty output passed the "no violations"
+  check vacuously. The test couldn't detect its own absence.
+  
+  Fix:
+  
+  (1) **`.gitignore` line 34 changed from `host-hardening/` to
+      `/host-hardening/`** — leading-slash anchors the pattern to
+      the repo root, so it matches only the operator-artifact dir
+      `./host-hardening/` (created by
+      `scripts/apply-camera-vlan-hardening.sh`), not `./tests/`'s
+      subdirectory.
+  
+  (2) **New test 3 in `test_script_permissions.sh`** explicitly
+      enumerates the seven host-hardening test suite files and
+      asserts each one is (a) on disk, (b) not gitignored, (c)
+      tracked in `git ls-files`. The enumeration is explicit (not
+      globbed), so an empty list now fails loudly rather than
+      passing vacuously. The error message tells the next operator
+      exactly which file is missing and what command will fix it.
+  
+  (3) **`git add tests/host-hardening/`** is required as part of
+      this commit to actually land the suites in source control
+      for the first time. After that the regression test prevents
+      this exact class of bug from recurring.
+  
+  Test count after the fix: `test_script_permissions.sh` grew from
+  3 to 4 tests (the new tracking check). Net host-hardening suite
+  total: ~95 tests across 7 suites, all green, all in git.
+
+- **Cert-init + config-init containers no longer depend on
+  `dl-cdn.alpinelinux.org` at runtime (ISSUE-7 v6).** Closes the
+  "Known follow-up" called out under ISSUE-7 below. Operators on
+  the same filtered networks (IN reports, same class as CN/IR)
+  who got past the build step still hit:
+  
+      Container opennvr_nginx_certs_init  Error
+      WARNING: fetching https://dl-cdn.alpinelinux.org/.../main: Permission denied
+      ERROR: unable to select packages:
+        openssl (no such package):
+          required by: world[openssl]
+  
+  Root cause was the same as ISSUE-7's build-time bug, just at a
+  different lifecycle stage: `mediamtx-certs-init` and
+  `nginx-certs-init` ran `apk add --no-cache openssl` in their
+  `command:` block at container *start*, and that apk fetch
+  reaches the Alpine package mirror. `camera-agent-config-init`
+  had the same shape (`apk add --no-cache gettext` for `envsubst`).
+  Three containers, one failure mode, three deploys broken on
+  filtered networks.
+  
+  Fix is to never run `apk add` in a `command:` block either —
+  pre-bake the tool at the registry layer instead, the same
+  principle that ISSUE-7 applied to image build:
+  
+  * Cert-init: base swapped from `alpine:3.20` to
+    `alpine/openssl:3.3.2` (a 4–6 MB Alpine image that ships the
+    `openssl` CLI). Pulled from Docker Hub at the same registry
+    operators already reach for `alpine:*`. Multi-arch
+    (amd64/arm64/armv7), tag-pinned, last published 2025-02-08.
+    Image's default `ENTRYPOINT ["openssl"]` is cleared with
+    `entrypoint: []` so our existing `command: [sh, -c, ...]`
+    runs as the container's argv. Applied to all three cert-init
+    occurrences (`docker-compose.tier0.yml`, `docker-compose.linux.yml`,
+    `docker-compose.yml`) — they converge on the identical shape.
+  
+  * Config-init: kept `alpine:3.20` base (`envsubst` is the only
+    thing it needed) and replaced `envsubst`-from-gettext with
+    a busybox-`sed` substitution that does the same job. Sed is
+    in busybox by default, so no `apk add` is needed. The
+    substitution preserves envsubst's "only the listed variables"
+    semantics — other `$` sigils in YAML multi-line blocks (e.g.
+    `system_prompt`) are left untouched. Values are escape-shielded
+    against sed's replacement-string specials (`\`, `&`, `/`) so
+    secrets containing those characters round-trip cleanly;
+    verified end-to-end with `INTERNAL_API_KEY` set to a value
+    containing all three.
+  
+  Regression test surface in `tests/host-hardening/test_build_resilience.sh`
+  grew from 17 to 22 tests. The new ones lock the class of bug
+  structurally: (1) no `apk add` / `apt-get install` / `pip install`
+  on any non-comment line of any `command:` block in any compose
+  file; (2) every `mediamtx-certs-init` uses `alpine/openssl:*`;
+  (3) `nginx-certs-init` uses `alpine/openssl:*`; (4) all cert-init
+  services declare `entrypoint: []` (without it, our command would
+  be passed as args to `openssl` and the container would silently
+  do nothing); (5) `camera-agent-config-init` uses sed not envsubst.
+  All 92 host-hardening tests green across the 7 suites.
+  
+  Net: the documented single command
+  `docker compose -f docker-compose.tier0.yml up -d` now works
+  end-to-end on ISP-filtered networks. There is no remaining
+  external-package-repo dependency anywhere in the Tier 0
+  lifecycle: not at image pull, not at image build, not at
+  container start.
+
 - **Single-command Tier 0 deploy works for every network
   (ISSUE-7 v3).** Folded the ISSUE-7 v2 offline overlay into the
   default `docker-compose.tier0.yml` so the documented command
@@ -416,13 +531,15 @@ audit log.
   contains `RUN apk add`, `RUN apt-get install`, or
   `RUN pip install`, plus asserts every `FROM` references either
   Docker Hub or `ghcr.io/open-nvr/*` — preventing future drift on
-  the "no external repo at build time" principle. **Known
-  follow-up:** `mediamtx-certs-init` and `nginx-certs-init` call
-  `apk add --no-cache openssl` at *runtime* (inside container
-  `command:` blocks, not at build time), which hits the same
-  filter at first start. Tracked separately because the fix
-  pattern is different (swap base image to one that already
-  ships openssl).
+  the "no external repo at build time" principle.
+  
+  **Follow-up resolved in ISSUE-7 v6 above:** `mediamtx-certs-init`,
+  `nginx-certs-init`, and `camera-agent-config-init` all called
+  package-manager installs at *runtime* (inside container
+  `command:` blocks, not at build time) which hit the same
+  `dl-cdn.alpinelinux.org` filter at first start. v6 swaps cert-init
+  to `alpine/openssl:3.3.2` (openssl pre-baked) and replaces
+  envsubst with busybox sed in the config-init container.
 
 - **Docker bridge subnets are now pinned for a deterministic trust
   zone (ISSUE-6 v7).** `docker-compose.tier0.yml`'s
