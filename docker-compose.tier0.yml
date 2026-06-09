@@ -215,94 +215,72 @@ services:
       retries: 3
 
   # ──────────────────────────────────────────────────────────────
-  # YOLOv8 weights init — one-shot downloader for the ONNX
-  # weights the YOLOv8 adapter expects at /weights/yolov8n.onnx.
+  # YOLOv8 weights init — one-shot copier for the ONNX weights
+  # that the YOLOv8 adapter expects at /weights/yolov8n.onnx.
   #
-  # We can't bake the weights into the adapter image because the
-  # build pipeline ships a generic, vendor-neutral adapter; the
+  # ISSUE-7 v3 architecture: instead of downloading and exporting
+  # at first boot (which used apt-get + pip install + ultralytics
+  # CLI — three external-repo dependencies that broke for operators
+  # behind ISP filters), this container is just a thin copier. It
+  # pulls a pre-baked image whose only contents are the ONNX file,
+  # then `cp`s that file into the weights volume. Total time on
+  # first boot: ~5 seconds when the image is pullable from GHCR,
+  # ~10 minutes when Compose has to fall back to building locally.
+  #
+  # We can't bake the weights into the adapter image itself
+  # because that image is a generic, vendor-neutral adapter — the
   # specific model weight choice (yolov8n vs yolov8s vs a
-  # fine-tuned in-house model) lives with the operator. The init
-  # container makes the "no manual download" promise true for the
-  # default (yolov8n) case while leaving the override path open
-  # via the YOLOV8_WEIGHTS_URL env var.
+  # fine-tuned model) lives with the operator. Operators with a
+  # custom model build their own weights image; see
+  # examples/yolov8-weights/README.md for the recipe.
   # ──────────────────────────────────────────────────────────────
   yolov8-weights-init:
-    # Python image because Ultralytics no longer publishes a pre-built
-    # yolov8n.onnx anywhere reachable (HF Ultralytics/YOLOv8 is gated
-    # behind an allowlist; github.com/ultralytics/assets/releases/.../
-    # yolov8n.onnx returns 404). The PyTorch checkpoint (.pt) on the
-    # same release tag is stable, so we download that and export to
-    # ONNX with the ultralytics CLI at first boot. Cached on the
-    # opennvr_yolov8_weights volume, so this runs once per host.
-    image: python:3.11-slim
+    # ISSUE-7 v3: use a pre-baked weights image instead of the old
+    # python:3.11-slim + apt+pip+export path. The old path failed for
+    # operators behind ISP filters that block deb.debian.org or
+    # pypi.org (reported from IN/CN/IR). The new pattern works for
+    # every operator who can pull Docker images at all:
+    #
+    #   * `image:` points at ghcr.io/open-nvr/yolov8-weights:v8.3.0
+    #     — published by .github/workflows/build-yolov8-weights.yml
+    #     on each release tag. A 20-MB alpine image containing just
+    #     /yolov8n.onnx. Pull is <5 sec.
+    #   * `build:` points at examples/yolov8-weights/Dockerfile —
+    #     compose falls back to building locally if the published
+    #     image isn't pullable (offline registry, fresh repo before
+    #     first release, etc.). First build is ~10 min (ultralytics
+    #     base ~3 GB pull + .pt export), subsequent up -d uses
+    #     Docker's layer cache.
+    #
+    # Custom / fine-tuned models: build the image yourself with your
+    # .pt as a build context, push to your private registry, set
+    # YOLOV8_WEIGHTS_IMAGE in .env. See examples/yolov8-weights/
+    # README.md for the recipe.
+    image: ${YOLOV8_WEIGHTS_IMAGE:-ghcr.io/open-nvr/yolov8-weights:v8.3.0}
+    build:
+      context: ./examples/yolov8-weights
+      dockerfile: Dockerfile
+    # Self-review M-1: be explicit about pull-then-build semantics
+    # rather than relying on what Compose Spec "probably" defaults to
+    # with image+build defined. `missing` = pull if not in local
+    # cache; if pull fails (image not yet published to GHCR, network
+    # blocks the registry, etc.) Compose falls back to the `build:`
+    # directive. This is the behavior we documented in the README,
+    # made explicit in YAML for any future code reader.
+    pull_policy: missing
     container_name: opennvr_yolov8_weights_init
     restart: "no"
-    command:
-      - sh
-      - -c
-      - |
-        set -e
-        WEIGHTS=/weights/yolov8n.onnx
-        if [ -s "$$WEIGHTS" ]; then
-          echo "yolov8n.onnx already present at $$WEIGHTS (size: $$(wc -c < $$WEIGHTS) bytes); skipping."
-          exit 0
-        fi
-
-        # curl + ca-certificates are needed by both branches below, so
-        # install once. The cached-skip path above already exited, so
-        # this only runs on a genuinely fresh /weights volume.
-        apt-get update -qq >/dev/null
-        apt-get install -y -qq --no-install-recommends curl ca-certificates >/dev/null
-
-        # Override path — an operator supplies a pre-built ONNX via
-        # YOLOV8_WEIGHTS_URL (fine-tuned model, private mirror, etc.).
-        # If set, we curl it directly and skip the .pt → ONNX export.
-        if [ -n "$${YOLOV8_WEIGHTS_URL}" ]; then
-          echo "YOLOV8_WEIGHTS_URL set; fetching pre-built ONNX from $${YOLOV8_WEIGHTS_URL}..."
-          curl --fail --location --retry 5 --retry-all-errors --retry-delay 3 \
-            --output "$$WEIGHTS" \
-            "$${YOLOV8_WEIGHTS_URL}"
-          echo "Downloaded $$(wc -c < $$WEIGHTS) bytes to $$WEIGHTS."
-          exit 0
-        fi
-
-        # Default path: download yolov8n.pt and export to ONNX.
-        # ultralytics pulls torch + torchvision (~700 MB transient
-        # install in the init container's filesystem — not cached on
-        # the host). After the export, the ONNX itself lives on the
-        # /weights volume, so subsequent boots short-circuit at the
-        # top and don't run any of this. The pip install only repeats
-        # if an operator deletes the weights volume.
-        # Export takes 1–3 min on x86, 10–15 min on a Pi 5.
-        echo "Fetching yolov8n.pt from $${YOLOV8_PT_URL}..."
-        TMPDIR=$$(mktemp -d)
-        curl --fail --location --retry 5 --retry-all-errors --retry-delay 3 \
-          --output "$$TMPDIR/yolov8n.pt" \
-          "$${YOLOV8_PT_URL}"
-        echo "Installing ultralytics (one-time, ~700 MB)..."
-        pip install --quiet --no-cache-dir "ultralytics==8.3.40" "onnx>=1.16,<2"
-        # simplify=False is deliberate: matches the byte layout the
-        # adapter image was conformance-tested against. Do not flip
-        # without re-running the adapter conformance kit
-        # (docs/AI_ADAPTER_CONTRACT.md §11.4) — the simplifier folds
-        # constants and changes node naming, which can shift the
-        # adapter's model fingerprint and the audit-chain sha256.
-        echo "Exporting to ONNX (opset=12, imgsz=640) — this may take a few minutes on edge hardware..."
-        cd "$$TMPDIR"
-        yolo export model=yolov8n.pt format=onnx opset=12 imgsz=640 simplify=False
-        mv yolov8n.onnx "$$WEIGHTS"
-        rm -rf "$$TMPDIR"
-        echo "Exported $$(wc -c < $$WEIGHTS) bytes to $$WEIGHTS."
-    environment:
-      # Override to supply a pre-built ONNX (fine-tuned model or a
-      # private mirror); when set, we skip the .pt → ONNX export and
-      # curl this URL directly. Unset by default because the upstream
-      # Ultralytics ONNX URLs (HF + github assets) were both retired,
-      # so the safe default is to derive the ONNX from the .pt.
-      - YOLOV8_WEIGHTS_URL=${YOLOV8_WEIGHTS_URL:-}
-      # Stable upstream .pt URL. Pinned to v8.3.0 so the boot is
-      # reproducible across hosts and the ONNX export is deterministic.
-      - YOLOV8_PT_URL=${YOLOV8_PT_URL:-https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt}
+    entrypoint: ["sh", "-c"]
+    command: |
+      set -e
+      WEIGHTS=/weights/yolov8n.onnx
+      if [ -s "$$WEIGHTS" ]; then
+        echo "yolov8n.onnx already present at $$WEIGHTS (size: $$(wc -c < $$WEIGHTS) bytes); skipping."
+        exit 0
+      fi
+      echo "Copying pre-baked yolov8n.onnx into volume..."
+      cp /yolov8n.onnx "$$WEIGHTS"
+      echo "Wrote $$(wc -c < $$WEIGHTS) bytes to $$WEIGHTS."
     volumes:
       - opennvr_yolov8_weights:/weights
 

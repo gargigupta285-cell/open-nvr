@@ -322,6 +322,77 @@ audit log.
   UDP/TCP both published, recordings.py uses external chain, no
   regression on opennvr-core's loopback-only binding).
 
+- **Single-command Tier 0 deploy works for every network
+  (ISSUE-7 v3).** Folded the ISSUE-7 v2 offline overlay into the
+  default `docker-compose.tier0.yml` so the documented command
+  
+      docker compose -f docker-compose.tier0.yml up -d
+  
+  works on every operator's network — ISP-filtered or not — with
+  no extra `-f` flag. Pattern: `yolov8-weights-init` now declares
+  both `image: ${YOLOV8_WEIGHTS_IMAGE:-ghcr.io/open-nvr/yolov8-weights:v8.3.0}`
+  AND `build:` pointing at `./examples/yolov8-weights/`. Compose
+  tries to pull the image first; if it can't (registry blocked,
+  fresh repo before first release, no internet at all for the
+  registry), it falls back to building locally — first build ~10
+  min (dominated by `ultralytics/ultralytics:8.3.40` base pull,
+  ~3 GB), subsequent runs use the cached image. The container's
+  `command:` is now a single `cp /yolov8n.onnx /weights/`; the
+  old apt-get + pip install + ultralytics export path is gone
+  entirely. The weights image's own Dockerfile dropped its
+  `apt-get install curl` step too — replaced with Python
+  `urllib.request.urlretrieve` (urllib is stdlib in the
+  ultralytics base, no install needed). `docker-compose.tier0.offline.yml`
+  is kept as a no-op stub so operators who pasted the old
+  dual-flag command don't break, with a header pointing at
+  `git rm` for cleanup. 2 new tests in
+  `tests/host-hardening/test_build_resilience.sh` lock the
+  contract: tier0's yolov8-weights-init has both `image:` and
+  `build:` with a `cp` command (no apt/pip/yolo), and the
+  Dockerfile doesn't `RUN apt-get install curl`. Total
+  build-resilience tests: 10/10 green.
+
+- **Tier 0 offline overlay for ISP-filtered networks
+  (ISSUE-7 v2).** The yolov8-weights-init container at *runtime*
+  does `apt-get install curl` (deb.debian.org), `pip install
+  ultralytics` (pypi.org), and downloads `yolov8n.pt` from
+  github.com — three external dependencies that any of which can
+  be filtered by an operator's ISP/firewall. Reported from IN
+  networks; same pattern hits CN/IR. Fix: ship a
+  `docker-compose.tier0.offline.yml` overlay that redefines
+  `yolov8-weights-init` to pull `ghcr.io/open-nvr/yolov8-weights:v8.3.0`
+  (a ~20 MB alpine-based image with `yolov8n.onnx` pre-baked) and
+  `cp` it into the weights volume. Zero apt, zero pip, zero
+  external network beyond Docker registries. Operators add one
+  `-f` flag:
+  
+      docker compose -f docker-compose.tier0.yml \
+                     -f docker-compose.tier0.offline.yml \
+                     up -d
+  
+  The image is built and published by
+  `.github/workflows/build-yolov8-weights.yml` on every release
+  tag — multi-arch (amd64+arm64), uses GHA cache so subsequent
+  builds are ~30 sec. Operators on networks where ghcr.io itself
+  is blocked can build the image locally with
+  `examples/yolov8-weights/Dockerfile` (multi-stage: builds via
+  `ultralytics/ultralytics:8.3.40`, ships only the .onnx in the
+  final stage) and either `docker save | scp | docker load` it
+  or push to a private registry, then point the
+  `YOLOV8_WEIGHTS_IMAGE` env var at it. Custom fine-tuned models
+  can be baked in by overriding the `YOLOV8_PT_URL` build arg.
+  Adapter conformance posture unchanged — the ONNX produced is
+  byte-identical to what the default first-boot export path
+  produces, since both pin the same Ultralytics tag and export
+  flags (opset=12, imgsz=640, simplify=False). 4 new tests in
+  `tests/host-hardening/test_build_resilience.sh` lock the
+  contract: the offline overlay has no apt/pip, its
+  yolov8-weights-init is a simple image+cp (not apt+pip+yolo
+  export), the image reference is `YOLOV8_WEIGHTS_IMAGE`-
+  overridable, and the weights-image Dockerfile's final stage is
+  `COPY`-only. Documented end-to-end in
+  `examples/yolov8-weights/README.md`.
+
 - **Tier 0 build no longer depends on external package
   repositories (ISSUE-7).** Operators behind ISP / corporate
   firewalls that filter `dl-cdn.alpinelinux.org` (reported from
