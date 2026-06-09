@@ -131,14 +131,35 @@ services:
         # needed. Still no `apk add`, so the build doesn't depend
         # on Alpine package mirrors being reachable (the original
         # ISSUE-7 v1 goal).
+        #
+        # ⚠ Base-swap checklist. When changing the FROM line below,
+        # audit every inheritable setting and override or accept it
+        # consciously. The v1 / v4 / v5 incomplete-fix series in this
+        # repo's history was caused by forgetting one of these each
+        # time. The full list:
+        #   * USER         — inherited image's user (often non-root)
+        #   * WORKDIR      — inherited CWD; affects where the
+        #                    ENTRYPOINT looks for relative-path
+        #                    files like config YAMLs
+        #   * ENTRYPOINT   — inherited entrypoint
+        #   * CMD          — inherited default args; passed to OUR
+        #                    ENTRYPOINT if we don't clear it
+        #   * ENV          — inherited env vars (PATH, HOME, etc.)
+        #   * HEALTHCHECK  — inherited; usually replaced in compose
+        #   * EXPOSE       — inherited; usually replaced in compose
+        #   * STOPSIGNAL   — usually fine to inherit
+        # If you change the base and don't review every line below
+        # against this list, expect a silent runtime break.
         FROM bluenviron/mediamtx:1.15.4 AS mediamtx-base
         FROM curlimages/curl:8.10.1
-        # The curlimages/curl base sets USER curl_user (uid 100) +
-        # an ENTRYPOINT of curl itself. We override both because
-        # mediamtx needs to bind privileged-ish ports (8554, 8888,
-        # 8889) at start AND must run as the entrypoint command,
-        # not under curl.
         USER root
+        WORKDIR /
+        # CMD [] explicitly clears any default args from the base
+        # image. curlimages/curl:8.10.1 has no CMD set today, but
+        # if a future tag adds one (e.g. ["--help"]) it would be
+        # passed to mediamtx as its config-file argument and break
+        # the boot silently. Defensive — costs nothing.
+        CMD []
         COPY --from=mediamtx-base /mediamtx /mediamtx
         ENTRYPOINT ["/mediamtx"]
     container_name: opennvr_mediamtx
