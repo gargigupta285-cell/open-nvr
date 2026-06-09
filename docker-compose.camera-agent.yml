@@ -143,15 +143,29 @@ services:
       - -c
       - |
         set -e
-        apk add --no-cache gettext >/dev/null
-        # ``envsubst`` will only replace the variables we list,
-        # leaving other ``$`` sigils (e.g. system_prompt YAML
-        # multiline syntax) untouched. This is essential because
-        # YAML's pipe-block syntax doesn't need escaping but
-        # envsubst would otherwise be too eager.
-        envsubst '$$INTERNAL_API_KEY $$CAMERA_AGENT_LISTEN_HOST $$OLLAMA_MODEL' \
-          < /template/config.docker.yml \
-          > /generated/config.yml
+        # ISSUE-7 v6: was ``apk add --no-cache gettext`` + envsubst.
+        # The apk fetch hits dl-cdn.alpinelinux.org which several
+        # operator ISPs (IN/CN/IR) filter, so the container exits
+        # with "Permission denied" and the camera-agent never starts.
+        # Replaced with busybox sed — same semantics as envsubst (only
+        # replaces the three named variables, leaves other ``$`` sigils
+        # in YAML multiline strings untouched). sed is in busybox so no
+        # external package dependency.
+        #
+        # ``sed_esc`` escapes ``\``, ``&``, and ``/`` in the values
+        # because sed's replacement string treats them as special:
+        # ``\`` for escape sequences, ``&`` for the whole match, ``/``
+        # because we use it as the s/// delimiter. The match pattern
+        # uses character classes ([$][{]...[}]) so it doesn't depend
+        # on BRE/ERE differences for ``$``, ``{``, ``}``.
+        sed_esc() { printf '%s' "$$1" | sed -e 's/\\/\\\\/g; s/&/\\&/g; s/\//\\\//g'; }
+        ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
+        lhost=$$(sed_esc "$${CAMERA_AGENT_LISTEN_HOST}")
+        omodel=$$(sed_esc "$${OLLAMA_MODEL}")
+        sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
+            -e "s/[$$][{]CAMERA_AGENT_LISTEN_HOST[}]/$$lhost/g" \
+            -e "s/[$$][{]OLLAMA_MODEL[}]/$$omodel/g" \
+            < /template/config.docker.yml > /generated/config.yml
         echo "Wrote /generated/config.yml from template."
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
