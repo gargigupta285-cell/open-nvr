@@ -75,13 +75,17 @@ fi
 # *.sh files exist where we expect them), it fails loudly.
 start_test "host-hardening test suite files are tracked in git (not gitignored)"
 expected_suites="
+_lib.sh
 test_build_resilience.sh
 test_cert_san.sh
+test_compose_file_selection.sh
 test_docker_subnets.sh
 test_media_proxy.sh
 test_nftables_template.sh
 test_script_permissions.sh
 test_security_posture.sh
+test_setup_token_banner.sh
+test_url_fallback_chain.sh
 "
 problems=""
 for f in $expected_suites; do

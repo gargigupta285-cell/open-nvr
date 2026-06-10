@@ -28,6 +28,12 @@
 
 set -u
 
+# ISSUE-19: bail early with a clear install command if pyyaml is
+# missing on the python3 these tests run against. Otherwise the
+# python heredocs below fail with an opaque ModuleNotFoundError.
+. "$(dirname "$0")/_lib.sh"
+require_python_yaml
+
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 TESTS_RUN=0
@@ -90,13 +96,37 @@ else
     fail "found forbidden RUN in build:"$'\n'"${violations}"
 fi
 
-# ── 3. production compose: same check ───────────────────────
-start_test "docker-compose.yml has no RUN apk/apt/pip in dockerfile_inline"
-violations=$(find_violations "${REPO_ROOT}/docker-compose.yml")
-if [ -z "$violations" ]; then
+# ── 3. canonical compose is an include shim pointing at tier0 ──
+# ISSUE-17: docker-compose.yml is now a thin ``include:`` pointer
+# to docker-compose.tier0.yml. The point of this contract is that
+# bare ``docker compose up -d`` (no -f flag) Just Works and gives
+# operators the canonical hardened stack — same as
+# ``docker compose -f docker-compose.tier0.yml up -d``. Any drift
+# from the include shape would mean the bare-invocation operators
+# get a different stack from the tier0-invocation operators.
+start_test "docker-compose.yml is an include shim pointing at docker-compose.tier0.yml"
+shim_shape=$(python3 - "${REPO_ROOT}" <<'PY'
+import sys, yaml
+from pathlib import Path
+c = yaml.safe_load((Path(sys.argv[1]) / "docker-compose.yml").read_text())
+has_include = "include" in c and "docker-compose.tier0.yml" in c["include"]
+has_services = bool(c.get("services"))
+print(f"has_include={has_include} has_services={has_services}")
+PY
+)
+# Want: include present pointing at tier0.yml, AND no services block
+# (services would shadow the include and cause silent drift).
+if echo "$shim_shape" | grep -q "has_include=True" \
+   && echo "$shim_shape" | grep -q "has_services=False"; then
     pass
 else
-    fail "found forbidden RUN in build:"$'\n'"${violations}"
+    fail "docker-compose.yml must be a thin include shim:
+    include:
+      - docker-compose.tier0.yml
+Got: $shim_shape
+Adding a services: block to docker-compose.yml shadows the include
+and creates a second copy of the canonical stack that will drift
+out of sync with tier0.yml."
 fi
 
 # ── 4. camera-agent compose: same check ─────────────────────
@@ -340,7 +370,9 @@ disallowed=$(python3 - <<PY
 import yaml, re
 bad = []
 for fn in ("docker-compose.tier0.yml", "docker-compose.linux.yml",
-           "docker-compose.yml", "docker-compose.camera-agent.yml"):
+           "docker-compose.camera-agent.yml"):
+    # ISSUE-17: docker-compose.yml is an include shim — no services
+    # to scan there; tier0.yml is the implementation.
     c = yaml.safe_load(open("${REPO_ROOT}/" + fn))
     for name, svc in (c.get("services") or {}).items():
         build = svc.get("build")
@@ -444,8 +476,8 @@ cert_init_bases=$(python3 - "$REPO_ROOT" <<'PY'
 import sys, os, yaml
 root = sys.argv[1]
 out = []
-for fn in ("docker-compose.tier0.yml", "docker-compose.linux.yml",
-           "docker-compose.yml"):
+for fn in ("docker-compose.tier0.yml", "docker-compose.linux.yml"):
+    # ISSUE-17: docker-compose.yml is now an include shim → tier0.yml.
     c = yaml.safe_load(open(os.path.join(root, fn)))
     svc = c["services"]["mediamtx-certs-init"]
     out.append(f"{fn}:{svc.get('image','(unset)')}")
@@ -481,11 +513,12 @@ ep_check=$(python3 - "$REPO_ROOT" <<'PY'
 import sys, os, yaml
 root = sys.argv[1]
 bad = []
+# ISSUE-17: docker-compose.yml is now an include shim → tier0.yml,
+# so it doesn't have its own mediamtx-certs-init to inspect.
 specs = [
     ("docker-compose.tier0.yml", "mediamtx-certs-init"),
     ("docker-compose.tier0.yml", "nginx-certs-init"),
     ("docker-compose.linux.yml", "mediamtx-certs-init"),
-    ("docker-compose.yml",       "mediamtx-certs-init"),
 ]
 for fn, name in specs:
     c = yaml.safe_load(open(os.path.join(root, fn)))
@@ -520,6 +553,163 @@ if [ "$has_sed" -gt 0 ] && [ "$has_envsubst" -eq 0 ]; then
     pass
 else
     fail "camera-agent-config-init must use sed (busybox), not envsubst. has_sed=$has_sed has_envsubst=$has_envsubst"
+fi
+
+# ════════════════════════════════════════════════════════════
+# ISSUE-11: external-Dockerfile pull-or-build contract
+# ════════════════════════════════════════════════════════════
+# The ISSUE-7 → v6 work only audited ``dockerfile_inline:`` blocks
+# in compose files. It missed an entire category: external
+# Dockerfiles referenced via ``build: dockerfile: <path>`` — most
+# notably the root ``./Dockerfile`` used by opennvr-core. That
+# Dockerfile does ``RUN apt-get install`` at both the python-builder
+# stage AND the runtime stage (supervisor, gosu, libpq5, libgl1,
+# libglib2.0-0, ...) for legitimate reasons — the GHA publish-images
+# workflow runs it on an unfiltered ubuntu-latest runner and pushes
+# the result to ghcr.io/open-nvr/core. The Dockerfile itself is
+# fine; what's NOT fine is forcing operators on filtered networks
+# to BUILD it locally. They can't reach deb.debian.org.
+#
+# The contract this section locks: if a compose service references
+# an external Dockerfile that does runtime package installs, the
+# service MUST also declare ``image:`` + ``pull_policy: missing``
+# so Compose pulls the pre-built image first and only falls back
+# to local build when the registry is unreachable.
+start_test "services with apt/apk/pip in external Dockerfiles declare image+pull_policy fallback"
+external_violations=$(python3 - "$REPO_ROOT" <<'PY'
+import sys, os, yaml, re
+from pathlib import Path
+
+REPO = Path(sys.argv[1])
+COMPOSES = ("docker-compose.tier0.yml", "docker-compose.linux.yml",
+            "docker-compose.camera-agent.yml")
+# ISSUE-17: docker-compose.yml is an include shim → tier0.yml.
+
+# Lines that pin the bug class.
+RUNTIME_INSTALL_RE = re.compile(
+    r"^\s*RUN\s+.*(apt-get\s+install|apt\s+install|apk\s+add|apk\s+update|pip\s+install|pip3\s+install)"
+)
+
+def dockerfile_does_runtime_install(df_path):
+    """True if the file at df_path has any RUN <pkg-manager> install line."""
+    if not df_path.exists():
+        return False
+    for line in df_path.read_text().splitlines():
+        if RUNTIME_INSTALL_RE.search(line):
+            return True
+    return False
+
+violations = []
+for compose_fn in COMPOSES:
+    fn = REPO / compose_fn
+    if not fn.exists():
+        continue
+    c = yaml.safe_load(fn.read_text())
+    for name, svc in (c.get("services") or {}).items():
+        build = svc.get("build")
+        if not isinstance(build, dict):
+            continue
+        # External Dockerfile = build.dockerfile is a path string,
+        # NOT a heredoc'd dockerfile_inline.
+        df_ref = build.get("dockerfile")
+        if not df_ref or build.get("dockerfile_inline"):
+            continue
+        # Skip profile-gated services. The contract this test
+        # enforces is "default operator deploys must not require
+        # access to filtered package mirrors". Services hidden
+        # behind ``profiles: [...]`` are explicitly opt-in — the
+        # operator who runs ``--profile ai`` or
+        # ``--profile camera-agent`` is making a deliberate choice
+        # and accepts the build-side burden. Tracked as
+        # known-gap follow-ups (ai-adapter and camera-agent both
+        # need published images before they can be folded into
+        # the default-active path).
+        if svc.get("profiles"):
+            continue
+        # Resolve the path relative to the build context.
+        ctx = build.get("context", ".")
+        df_path = (REPO / ctx / df_ref).resolve()
+        if not dockerfile_does_runtime_install(df_path):
+            continue
+        # Service's Dockerfile installs packages at build time. The
+        # service MUST provide a pull fallback: ``image:`` set AND
+        # ``pull_policy: missing`` (so Compose pulls first, falls
+        # back to local build only if pull fails).
+        has_image = bool(svc.get("image"))
+        pp = svc.get("pull_policy")
+        if not has_image:
+            violations.append(
+                f"{compose_fn}::{name}: external Dockerfile {df_ref} does runtime "
+                f"package install, but service has no `image:` — operators on "
+                f"filtered networks (deb.debian.org / pypi.org / dl-cdn.alpinelinux.org) "
+                f"can't build it locally and have no fallback to pull from."
+            )
+        elif pp != "missing":
+            violations.append(
+                f"{compose_fn}::{name}: has image+build but pull_policy is "
+                f"{pp!r} (expected 'missing'). Without 'missing', Compose's "
+                f"pull-then-build semantics aren't deterministic — some "
+                f"operators will still hit the local-build apt-get path."
+            )
+
+for v in violations:
+    print(v)
+sys.exit(len(violations))
+PY
+)
+ev_exit=$?
+if [ "$ev_exit" -eq 0 ]; then
+    pass
+else
+    fail "external Dockerfile pull-or-build contract violations:
+${external_violations}
+
+Fix: add to the affected service in the compose file:
+    image: ghcr.io/open-nvr/<name>:\${TAG:-latest}
+    pull_policy: missing
+    build: ...          # keep the existing build block
+The pre-built image is published by .github/workflows/publish-images.yml
+(or equivalent). Compose pulls from GHCR first; if the pull fails
+(registry blocked, fresh repo before first publish) it falls back
+to building locally."
+fi
+
+# ── 11a. positive contract: opennvr-core uses pull-then-build across all composes ──
+# Lock the specific service that hit the user. If a future refactor
+# strips image+pull_policy from any compose file, this fails.
+start_test "opennvr-core has image+build+pull_policy:missing in every compose where it builds"
+core_shape=$(python3 - "$REPO_ROOT" <<'PY'
+import sys, yaml
+from pathlib import Path
+REPO = Path(sys.argv[1])
+bad = []
+for fn in ("docker-compose.tier0.yml", "docker-compose.linux.yml"):
+    # ISSUE-17: docker-compose.yml is now an include shim → tier0.yml.
+    c = yaml.safe_load((REPO / fn).read_text())
+    svc = c["services"].get("opennvr-core")
+    if not svc:
+        continue
+    has_image = bool(svc.get("image"))
+    has_build = bool(svc.get("build"))
+    pp = svc.get("pull_policy")
+    img = svc.get("image", "")
+    # tier0 ships image-only (no build at all). That's fine — it's the
+    # ultra-thin install-from-GHCR path. We only enforce the contract
+    # when the service ALSO has a build block.
+    if has_build:
+        if not (has_image and pp == "missing"):
+            bad.append(f"{fn}: image={has_image} pull_policy={pp!r}")
+    # Whenever image: is set, it should reference our GHCR namespace.
+    if has_image and not img.startswith("ghcr.io/open-nvr/core"):
+        bad.append(f"{fn}: image={img!r} not under ghcr.io/open-nvr/core")
+print("\n".join(bad))
+PY
+)
+if [ -z "$core_shape" ]; then
+    pass
+else
+    fail "opennvr-core compose shape violations:
+${core_shape}"
 fi
 
 # ── Summary ────────────────────────────────────────────────

@@ -13,6 +13,9 @@
 
 set -u
 
+. "$(dirname "$0")/_lib.sh"
+require_python_yaml
+
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 TESTS_RUN=0
@@ -42,17 +45,30 @@ done
 # Scheme-agnostic port check (the scheme-aware checks live below
 # in tests 13-16 — they verify proxy_pass scheme matches mediamtx's
 # own TLS posture per V-019).
-declare -A PORTS=([webrtc]=8889 [hls]=8888 [playback]=9996)
+#
+# ISSUE-19: previously used `declare -A` (bash 4+ associative array)
+# which doesn't exist on macOS's bundled /bin/bash 3.2 (Apple won't
+# ship the GPLv3 bash 4+). Replaced with a case statement so this
+# test runs on every operator's machine.
+port_for() {
+    case "$1" in
+        webrtc)   echo 8889 ;;
+        hls)      echo 8888 ;;
+        playback) echo 9996 ;;
+        *)        echo "" ;;
+    esac
+}
 for kind in webrtc hls playback; do
-    start_test "nginx /${kind}/ proxies to mediamtx:${PORTS[$kind]}"
+    port=$(port_for "$kind")
+    start_test "nginx /${kind}/ proxies to mediamtx:${port}"
     block=$(awk -v k="/${kind}/" '
         $0 ~ "location[[:space:]]+"k {flag=1}
         flag {print; if ($0 ~ /^[[:space:]]*\}/) {flag=0}}
     ' "$NGINX_CONF")
-    if echo "$block" | grep -qE "proxy_pass[[:space:]]+https?://mediamtx:${PORTS[$kind]}/"; then
+    if echo "$block" | grep -qE "proxy_pass[[:space:]]+https?://mediamtx:${port}/"; then
         pass
     else
-        fail "expected proxy_pass http(s)://mediamtx:${PORTS[$kind]}/ in /${kind}/ block"
+        fail "expected proxy_pass http(s)://mediamtx:${port}/ in /${kind}/ block"
     fi
 done
 
