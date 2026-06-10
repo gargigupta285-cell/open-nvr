@@ -113,6 +113,69 @@ else
     pass   # no installer in this checkout
 fi
 
+# ── 4. init_db.py rejects historical .env.example defaults at runtime ──
+# Defense in depth (ISSUE-27): even if a stray .env file ends up with
+# DEFAULT_ADMIN_PASSWORD=SecurePass123! (from old tutorials, AI-
+# generated examples, half-migrated installs), init_db.py must
+# refuse to honor it and fall through to the setup-token flow.
+# Parse init_db.py with ast and assert the KNOWN_BAD_PASSWORDS set
+# contains at minimum the historical value plus common weak ones.
+start_test "init_db.py rejects historical .env.example default (SecurePass123!) at runtime"
+result=$(python3 - "${REPO_ROOT}" <<'PY'
+import ast, sys
+from pathlib import Path
+src = (Path(sys.argv[1]) / "server/scripts/init_db.py").read_text()
+tree = ast.parse(src)
+
+# Find KNOWN_BAD_PASSWORDS = frozenset({...}) — recurse the whole tree
+# because the assignment lives inside a function body, not at module
+# top-level.
+bad_set = None
+for node in ast.walk(tree):
+    if not isinstance(node, ast.Assign):
+        continue
+    for target in node.targets:
+        if not (isinstance(target, ast.Name) and
+                target.id == "KNOWN_BAD_PASSWORDS"):
+            continue
+        # Match frozenset({...}) — value is a Call with func.id frozenset
+        v = node.value
+        if (isinstance(v, ast.Call)
+            and isinstance(v.func, ast.Name)
+            and v.func.id == "frozenset"
+            and v.args
+            and isinstance(v.args[0], ast.Set)):
+            bad_set = {
+                e.value for e in v.args[0].elts
+                if isinstance(e, ast.Constant)
+            }
+            break
+
+if bad_set is None:
+    print("KNOWN_BAD_PASSWORDS not found in init_db.py")
+    sys.exit(1)
+
+# Required entries — the historical .env.example default plus the
+# weak passwords every threat-modeller's checklist mentions.
+REQUIRED = {"securepass123!", "admin", "password", "changeme"}
+missing = REQUIRED - bad_set
+if missing:
+    print(f"KNOWN_BAD_PASSWORDS missing required entries: {sorted(missing)}")
+    print(f"Actual set: {sorted(bad_set)}")
+    sys.exit(1)
+print("ok")
+PY
+)
+if echo "$result" | grep -q "^ok"; then
+    pass
+else
+    fail "${result}
+init_db.py's KNOWN_BAD_PASSWORDS reject list must include the
+historical .env.example default ('securepass123!') plus common
+weak values, so a stray DEFAULT_ADMIN_PASSWORD reaching the
+runtime is refused and falls through to the setup-token flow."
+fi
+
 # ── Summary ────────────────────────────────────────────────
 echo ""
 echo "────────────────────────────────────────────"
