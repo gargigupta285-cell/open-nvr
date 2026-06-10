@@ -80,6 +80,8 @@ test_build_resilience.sh
 test_cert_san.sh
 test_compose_file_selection.sh
 test_docker_subnets.sh
+test_env_example_no_default_creds.sh
+test_kai_c_runtime_deps.sh
 test_media_proxy.sh
 test_nftables_template.sh
 test_script_permissions.sh
