@@ -322,6 +322,49 @@ audit log.
   UDP/TCP both published, recordings.py uses external chain, no
   regression on opennvr-core's loopback-only binding).
 
+- **nginx no longer crash-loops on "host not found in upstream
+  mediamtx" (ISSUE-21).** Operator switching from
+  `docker-compose.linux.yml` (host mode) to
+  `docker-compose.tier0.yml` (bridge mode) reported nginx
+  endlessly restarting with:
+  
+  ```
+  [emerg] host not found in upstream "mediamtx" in
+  /etc/nginx/conf.d/default.conf:89
+  ```
+  
+  Root cause: nginx's `opennvr.conf` uses
+  `proxy_pass https://mediamtx:8889/` (and `:8888`, `:9996`) —
+  literal hostnames that nginx resolves at CONFIG LOAD time, not
+  at request time. The tier0 compose listed nginx's
+  `depends_on:` as `nginx-certs-init` + `opennvr-core` but not
+  mediamtx itself. opennvr-core's healthcheck happens to wait
+  on mediamtx (via its own `depends_on`), so on a clean boot
+  the chain wins the race by accident. On recovery boots —
+  post-compose-file switch with stale Docker networks confusing
+  bridge DNS — nginx loses the race and every restart attempt
+  hits the same config-parse error.
+  
+  Fix: add `mediamtx: service_healthy` to nginx's `depends_on`
+  in `docker-compose.tier0.yml`. New regression test #18 in
+  `tests/host-hardening/test_media_proxy.sh` parses the compose
+  and asserts the dependency + condition shape, so a future
+  refactor can't accidentally remove it.
+  
+  Operator recovery (one-time, for boxes already wedged in the
+  crash-loop state):
+  
+  ```bash
+  ./start.sh down
+  docker compose -f docker-compose.tier0.yml down --remove-orphans
+  docker network prune -f
+  docker container prune -f
+  ./start.sh up
+  ```
+  
+  Plus the new `depends_on` makes future starts deterministic so
+  the recovery dance won't be needed again.
+
 - **CI pytest test_m1b_mediamtx_hardening.py fixed for the
   ISSUE-17 include shim (ISSUE-20).** The pytest
   `test_compose_has_mediamtx_certs_init_service` walked
