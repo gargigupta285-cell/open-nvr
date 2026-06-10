@@ -322,6 +322,115 @@ audit log.
   UDP/TCP both published, recordings.py uses external chain, no
   regression on opennvr-core's loopback-only binding).
 
+- **V-022 sovereignty validator accepts Docker bridge URLs
+  (ISSUE-28).** Operator on a tier0 deploy hit:
+  
+  ```
+  RuntimeError: V-022: AI_SOVEREIGNTY=local_only requires every
+  adapter URL to be loopback. The following adapters violate
+  that policy:
+    - default='http://yolov8-adapter:9002' (host=yolov8-adapter)
+  ```
+  
+  kai-c refused to start. Root cause: the validator was written
+  in the host-networking era when all adapter URLs were
+  `127.0.0.1:<port>`. Tier 0 ships with bridge networking + Docker
+  service-DNS URLs (`http://yolov8-adapter:9002`), and the
+  loopback-only check rejected them. But Docker bridge networks
+  are confined to a single physical host — packets between
+  containers stay inside the kernel networking stack and never
+  reach the NIC. Bridge URLs are **equally "on this machine"**
+  for sovereignty purposes; the validator was just narrowed too
+  aggressively.
+  
+  Fix in `kai-c/main.py`:
+  
+  * `_host_is_loopback` → renamed to `_host_is_on_this_machine`
+    with the old name preserved as a back-compat alias.
+  * The check now accepts: loopback IPs + hostnames AND any
+    address that resolves into `OPENNVR_DOCKER_SUBNET` (default
+    `172.28.0.0/16`, operator-overridable). Continues to reject:
+    non-bridge RFC1918 (peer hosts on the LAN), public IPs,
+    `0.0.0.0` wildcard.
+  * Error message updated to name the bridge subnet explicitly
+    so operators who DO hit a legitimate violation (e.g. an
+    `ADAPTER_URL` pointing at a peer VM) know what URLs are
+    accepted.
+  
+  Acceptance matrix:
+  
+  | URL | Old | New | Why |
+  |---|---|---|---|
+  | `http://localhost:9100` | ✓ | ✓ | loopback |
+  | `http://127.0.0.1:9100` | ✓ | ✓ | loopback IPv4 |
+  | `http://[::1]:9100` | ✓ | ✓ | loopback IPv6 |
+  | `http://yolov8-adapter:9002` | ✗ | ✓ | Docker bridge (NEW — tier0) |
+  | `http://172.28.0.7:9002` | ✗ | ✓ | direct bridge IP (NEW) |
+  | `http://192.168.1.50:9100` | ✗ | ✗ | peer host on LAN |
+  | `http://api.openai.com` | ✗ | ✗ | public |
+  
+  New regression test
+  `tests/host-hardening/test_v022_sovereignty_docker_bridge.sh`
+  (4 tests) locks the new contract — the renamed function
+  exists, its logic handles the 7-case acceptance matrix above,
+  the error message references the bridge subnet, and tier0.yml
+  ships an `ADAPTER_URL` value that passes the validator.
+  
+  V-022's stronger claim is unchanged: AI inference still must
+  not leave this physical box. The fix just acknowledges that
+  Docker bridge networking is "this box."
+
+- **`init_db.py` refuses known-bad DEFAULT_ADMIN_PASSWORD at
+  runtime (ISSUE-27 — defense in depth for ISSUE-26).** The
+  ISSUE-26 fix blanked `.env.example`'s hardcoded password line,
+  but operators with existing `.env` files (created before the
+  fix, copied from a tutorial, or from an AI-generated template)
+  still arrive at boot with `DEFAULT_ADMIN_PASSWORD=SecurePass123!`.
+  init_db.py would honor it as a "provisioned bootstrap" — same
+  V-001 violation, just at a different layer.
+  
+  Defense-in-depth: init_db.py now has a `KNOWN_BAD_PASSWORDS`
+  reject list. If `settings.default_admin_password` matches one
+  of these (case-insensitive), init_db.py:
+  
+  1. Prints a loud framed warning to stderr explaining the
+     refusal and pointing the operator at the fix (blank the
+     value in `.env`).
+  2. Sets `initial_password = ""` and falls through to the
+     existing setup-token flow.
+  3. The admin is seeded with `password_set=False` and the
+     setup-token banner prints normally.
+  
+  The reject list ships with the historical .env.example default
+  plus the common weak-password checklist (admin, password,
+  changeme, letmein, opennvr, default, 12345, 123456, qwerty).
+  Extending the list is a one-line edit.
+  
+  Test 4 in
+  `tests/host-hardening/test_env_example_no_default_creds.sh`
+  AST-parses init_db.py, locates the `KNOWN_BAD_PASSWORDS`
+  frozenset, and asserts it contains at minimum `securepass123!`,
+  `admin`, `password`, `changeme`. So a future PR can't
+  accidentally remove these entries without the test failing.
+  
+  Operator recovery on existing deploys (independent of the
+  source fix):
+  
+  ```bash
+  # Blank the value in YOUR .env, not just the template
+  sed -i 's/^DEFAULT_ADMIN_PASSWORD=.*/DEFAULT_ADMIN_PASSWORD=/' .env
+  
+  # Wipe the DB volume (admin row currently has password_set=True)
+  ./start.sh down
+  docker volume rm $(docker volume ls -q | grep opennvr_db_data)
+  
+  # Restart — token banner will print
+  ./start.sh up
+  ```
+  
+  After this commit lands, even operators who don't blank their
+  `.env` will get the warning + setup-token flow at next boot.
+
 - **`.env.example` no longer ships a hardcoded admin password
   (ISSUE-26 — V-001 violation).** The `.env.example` template
   shipped with `DEFAULT_ADMIN_PASSWORD=SecurePass123!` as a literal

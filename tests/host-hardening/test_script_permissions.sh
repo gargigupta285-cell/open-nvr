@@ -88,6 +88,7 @@ test_script_permissions.sh
 test_security_posture.sh
 test_setup_token_banner.sh
 test_url_fallback_chain.sh
+test_v022_sovereignty_docker_bridge.sh
 "
 problems=""
 for f in $expected_suites; do
