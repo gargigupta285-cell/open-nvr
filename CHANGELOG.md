@@ -322,6 +322,127 @@ audit log.
   UDP/TCP both published, recordings.py uses external chain, no
   regression on opennvr-core's loopback-only binding).
 
+- **`.env.example` no longer ships a hardcoded admin password
+  (ISSUE-26 — V-001 violation).** The `.env.example` template
+  shipped with `DEFAULT_ADMIN_PASSWORD=SecurePass123!` as a literal
+  value. Every operator who ran `cp .env.example .env` (or whose
+  install wizard inherited template defaults) silently ended up
+  with that exact known credential as their admin password.
+  `init_db.py`'s "provisioned bootstrap" code path then seeded the
+  admin user with `password_set=True` and that password, bypassing
+  the one-time setup-token flow entirely.
+  
+  Concrete impact path:
+  
+  1. Operator does `cp .env.example .env` (or the install wizard
+     does it equivalent under the hood).
+  2. `.env` now contains `DEFAULT_ADMIN_PASSWORD=SecurePass123!`.
+  3. opennvr-core boots, `init_db.py` reads
+     `settings.default_admin_password`, sees it's truthy, seeds
+     `admin` with `password_set=True` and that exact password.
+  4. `maybe_arm()` correctly skips minting a token (admin is
+     already activated).
+  5. `start.sh up`'s banner-grep finds no token in the logs and
+     prints *"First-time setup is already complete"* — the
+     operator has no idea what credential they got.
+  6. The operator hits the UI and either gets the setup screen
+     (cached frontend from before init_db ran) or the login
+     screen, and is stuck because they were never told the
+     password is the literal `.env.example` default.
+  
+  This is the V-001 / ETSI EN 303 645 "unique credential" anti-
+  pattern OpenNVR's threat model positions itself against.
+  Shipping it in the source template is the worst possible form
+  of it.
+  
+  Fix:
+  
+  * `.env.example` now ships `DEFAULT_ADMIN_PASSWORD=` (empty).
+    The accompanying comment explains the two paths clearly:
+    *empty → secure-by-default setup-token flow* (the recommended
+    path); *set to a value → provisioned bootstrap from a secrets
+    manager* (the unattended-deploy path).
+  * New regression test
+    `tests/host-hardening/test_env_example_no_default_creds.sh`
+    (3 tests) locks the class of bug:
+    
+    1. `.env.example`'s `DEFAULT_ADMIN_PASSWORD` line must be
+       blank — anything after the `=` triggers a failure.
+    2. No `docker-compose*.yml` may pin
+       `DEFAULT_ADMIN_PASSWORD` to a literal value (catches the
+       bug re-introduced at the compose layer).
+    3. `scripts/install.sh` may not write a literal
+       `DEFAULT_ADMIN_PASSWORD` value into the `.env` it
+       generates (catches the bug re-introduced at the
+       installer layer).
+  
+  Operators on existing deploys: if you find yourself stuck on
+  the setup screen with `password_set=True` for admin in your DB,
+  your password is whatever `.env`'s `DEFAULT_ADMIN_PASSWORD`
+  was set to during install — most likely `SecurePass123!` from
+  the old template. Log in with that, then immediately change
+  it in the UI (Settings → Account → Change Password).
+  
+  Net: 116 host-hardening tests across 12 suites, all green
+  (after `git add` of the two new test files).
+
+- **kai-c no longer crashes on import (ISSUE-24).** Operator
+  reported the kai-c middleware crash-looping inside the
+  opennvr-core container with:
+  
+  ```
+  File "/app/kai-c/kai_c/registry.py", line 46, in <module>
+      import httpx
+  ModuleNotFoundError: No module named 'httpx'
+  ```
+  
+  Root cause: `kai-c/pyproject.toml` declared httpx in
+  `[dependency-groups].dev` with a stale comment claiming
+  *"Runtime KAI-C uses `requests` (sync) + `websockets` (async) —
+  no httpx in the live path"*. That comment was aspirational,
+  not accurate. Production code in `kai_c/registry.py` imports
+  httpx at module top-level (line 46) AND constructs
+  `httpx.AsyncClient(trust_env=False)` at runtime (line 198)
+  for adapter capabilities probing + health checks (lines 143,
+  150). The Dockerfile correctly runs `uv sync --no-dev` which
+  skipped the misplaced dep, leading to the production crash.
+  
+  Fix:
+  
+  * Move `httpx>=0.27,<1.0` from `[dependency-groups].dev` to
+    `[project].dependencies` in `kai-c/pyproject.toml`. Replace
+    the misleading comment with a correct one tied to ISSUE-24.
+  * New regression test
+    `tests/host-hardening/test_kai_c_runtime_deps.sh` that walks
+    every `.py` file under `kai-c/kai_c/` (production code, not
+    tests), parses the AST, and asserts every top-level `import X`
+    and `from X import Y` has a corresponding entry in
+    `[project].dependencies`. Stdlib modules and known
+    bundled-via transitive deps (e.g. starlette via fastapi) are
+    whitelisted. The line-scanner parser handles the edge case
+    where a comment inside the dependencies list contains a
+    literal `]` character (e.g. our own `[dependency-groups]`
+    reference) — a naive non-greedy regex would stop there and
+    silently drop later entries.
+  * Plus a positive contract test that pins httpx specifically
+    so a future "remove the httpx import line" PR can't satisfy
+    test 1 vacuously while leaving the runtime paths broken.
+  
+  Operator recovery (immediate, while waiting for the GHA
+  rebuild of `:latest`):
+  
+  ```bash
+  # Install httpx into the running opennvr-core's kai-c venv
+  docker compose exec opennvr-core /app/kai-c-venv/bin/pip install httpx
+  docker compose restart opennvr-core
+  ```
+  
+  After this commit lands + the GHA publish-images workflow
+  rebuilds `ghcr.io/open-nvr/core:latest`, `docker compose pull
+  opennvr-core` picks up the proper fix.
+  
+  Total: 113 host-hardening tests across 11 suites, all green.
+
 - **nginx no longer crash-loops on "host not found in upstream
   mediamtx" (ISSUE-21).** Operator switching from
   `docker-compose.linux.yml` (host mode) to
