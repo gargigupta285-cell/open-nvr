@@ -322,6 +322,44 @@ audit log.
   UDP/TCP both published, recordings.py uses external chain, no
   regression on opennvr-core's loopback-only binding).
 
+- **CI pytest test_m1b_mediamtx_hardening.py fixed for the
+  ISSUE-17 include shim (ISSUE-20).** The pytest
+  `test_compose_has_mediamtx_certs_init_service` walked
+  `docker-compose.yml` directly and asserted
+  `mediamtx-certs-init` was in the `services:` block. After
+  ISSUE-17 made `docker-compose.yml` a thin `include:` shim
+  pointing at `docker-compose.tier0.yml`, the pytest saw an
+  empty services dict and CI failed:
+  
+  ```
+  AssertionError: docker-compose.yml is missing the
+  mediamtx-certs-init service
+  assert 'mediamtx-certs-init' in {}
+  ```
+  
+  Same class of bug as the shell tests fixed in ISSUE-17 — a
+  pytest that hard-referenced the canonical filename without
+  following the include indirection. Fix is symmetric:
+  
+  * `test_compose_has_mediamtx_certs_init_service` now walks
+    `docker-compose.tier0.yml` (the implementation file where
+    the services actually live). Test intent is preserved —
+    the canonical compose lifecycle must include cert-init
+    before mediamtx — it just follows the post-ISSUE-17 file
+    layout.
+  * **New pytest** `test_canonical_docker_compose_yml_is_include_shim`
+    locks the include shape: `docker-compose.yml` must contain
+    an `include` directive that references
+    `docker-compose.tier0.yml` AND must NOT have its own
+    `services:` block. A stray services block would shadow
+    the include and silently give bare-invocation operators a
+    different stack from the `-f tier0.yml` operators.
+  
+  This mirrors the contract test in
+  `tests/host-hardening/test_build_resilience.sh` so both the
+  pytest layer and the shell-test layer enforce the same
+  property structurally.
+
 - **Host-hardening tests run on macOS (ISSUE-19).** First Mac
   contributor ran the test suite, hit two compatibility bugs the
   Linux-only CI never caught:
