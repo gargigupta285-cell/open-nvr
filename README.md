@@ -41,7 +41,7 @@ The architecture is published — a peer-citable paper this year, 34 references,
 
 ## Quickstart
 
-Five minutes from `git clone` to YOLOv8 object detection running on your camera feed. Pre-built images on GHCR — no source build.
+**Three commands, five minutes** — `git clone` to YOLOv8 detection on your camera feed. Pre-built images on GHCR, no source build.
 
 ```bash
 git clone https://github.com/open-nvr/open-nvr.git
@@ -49,54 +49,85 @@ cd open-nvr
 ./start.sh up
 ```
 
-That's it. `./start.sh up` is the canonical entry point — it wraps `docker compose up -d` with the four things you actually need on a fresh deploy:
+That's it. First run launches a brief interactive setup (deploy mode, recording path, secrets generated for you). Run `./start.sh up` again to start containers.
 
-1. **First run launches the interactive installer** (`scripts/install.sh`) — picks deploy mode, recording path, admin user, generates all secrets, writes `.env`. No manual `cp .env.example .env` or `./scripts/generate-secrets.sh --write` step.
-2. **Pre-flight validates the env** — catches missing or weak secrets, refuses to start a vulnerable config rather than surfacing it as a Docker healthcheck failure ten minutes in.
-3. **Auto-detects your network topology** — single-LAN or dual-NIC (camera-LAN + uplink), writes `NGINX_BIND_HOST` and generates a self-signed certificate that includes your actual LAN IP so phones / laptops on the same network can reach `https://<server-ip>/` without a CN-mismatch warning.
-4. **After containers come up, it prints what you need to act on** — your LAN access URL, the one-time first-time-setup token (waits for `opennvr-core`'s healthcheck — slow Pi 5 first boot can take 10-15 min, the script tracks progress), and a security posture banner that flags anything weakening the trust boundary (e.g. trust zone wider than RFC1918, single-LAN deploy without VLAN isolation between cameras and uplink).
+### What you'll see when it boots
 
-After install completes, run `./start.sh up` again — it will start containers and print everything above. Open the LAN URL it gives you, accept the self-signed cert warning once (click **Advanced → Accept the risk and continue** — the cert and key live in `./nginx-certs/` on the host and never leave the machine), paste the setup token, set an admin password, add a camera. Detection overlays appear within thirty seconds of the camera connecting.
+```
+NIC topology: dual-NIC (cameras isolated from operator network)
+  operator uplink: 192.168.1.50  ← UI bound here
+  Web UI: https://192.168.1.50/
 
-Live streams (WebRTC, HLS) and recording playback work from any device on your LAN. If your IP changes (DHCP renewal, moved boxes), run `./start.sh refresh-certs` to regenerate the cert with the new IP.
+🔑 First-time setup token (one-time use — copy into the UI):
+  ================================================================
+   OpenNVR first-time setup token (one-time use)
+  ----------------------------------------------------------------
+    aXyZ_pasteThisIntoTheBrowser_4cFiRsT-tImE-sEtUp
+  ----------------------------------------------------------------
+  ================================================================
+```
 
-If you missed the token in the start-script output: `docker compose -f docker-compose.tier0.yml logs opennvr-core | grep -A 6 'first-time setup token' | tail -7`.
+Then:
 
-### Skip the wizard
+1. **Open the printed URL** on any device on your LAN.
+2. **Accept the self-signed cert warning once** — *Advanced → Accept the risk and continue*. The cert lives in `./nginx-certs/` on the host and never leaves the machine.
+3. **Paste the token, set an admin password, add a camera.** Detection overlays appear within ~30 seconds.
 
-If you'd rather drive setup yourself — pin specific secret values, run unattended on a CI box, deploy from configuration management:
+Live streams (WebRTC, HLS) and recording playback work from any LAN device.
+
+### Common follow-ups
+
+| Situation | Command |
+|---|---|
+| Lost the setup token | `docker compose logs opennvr-core \| grep -A 6 'first-time setup token' \| tail -7` |
+| Your LAN IP changed (DHCP, moved boxes) | `./start.sh refresh-certs` |
+| Stop everything | `./start.sh down` |
+| Tail live logs | `./start.sh logs` |
+| Check container status | `./start.sh status` |
+| Pick up new GHCR images after an upgrade | `docker compose pull && ./start.sh up` |
+
+### Advanced setup
+
+Want to skip the interactive wizard — pin specific secret values, run unattended on a CI box, deploy from configuration management?
 
 ```bash
 git clone https://github.com/open-nvr/open-nvr.git
 cd open-nvr
 cp .env.example .env
-./scripts/generate-secrets.sh --write    # or set your own values in .env
-# review / edit .env as needed
-./start.sh up                            # still does pre-flight + posture + token surfacing
+./scripts/generate-secrets.sh --write    # or write your own values
+./start.sh up                            # still gets pre-flight + posture + token
 ```
 
-Don't replace the `./start.sh up` at the end with bare `docker compose -f docker-compose.tier0.yml up -d` — compose alone won't auto-detect your NIC topology, won't surface the one-time setup token, and won't warn you if your trust zone is wider than you intended. If you absolutely must use compose directly (debugging, custom orchestration), grep the token manually as shown above.
+Skipping `./start.sh up` and using bare `docker compose up -d` works too (Docker Compose v2.20+ — `docker-compose.yml` is an `include:` shim → `tier0.yml`), but you'll lose: NIC topology auto-detect, the security posture banner, the one-time setup token surfacing. Grep the logs manually if you go that route.
 
-Full install, retention, production hardening: [`DOCKER_QUICKSTART.md`](DOCKER_QUICKSTART.md).
+**Need more detail?** [`DOCKER_QUICKSTART.md`](DOCKER_QUICKSTART.md) covers retention, production hardening, profile options. [`docs/DOCKER_SETUP.md`](docs/DOCKER_SETUP.md#compose-file-reference) explains every compose file in the repo and when each one applies.
 
 ## Talk to your cameras
 
-Layer the camera-agent on top of Tier 0:
+The camera-agent layers a voice loop on top of the core stack — ask out loud, hear the answer back, all on your hardware. Two commands once Tier 0 is running:
 
 ```bash
-docker compose -f docker-compose.tier0.yml \
-               -f docker-compose.camera-agent.yml \
-               --profile camera-agent run --rm ollama-model-pull
-docker compose -f docker-compose.tier0.yml \
-               -f docker-compose.camera-agent.yml \
-               --profile camera-agent up -d
+# 1. Pull the local LLM (~2 GB, one-time)
+docker compose -f docker-compose.yml -f docker-compose.camera-agent.yml \
+  --profile camera-agent run --rm ollama-model-pull
+
+# 2. Bring up the agent
+docker compose -f docker-compose.yml -f docker-compose.camera-agent.yml \
+  --profile camera-agent up -d
 ```
 
-Open <http://localhost:9100/demo>, click Start, speak.
+Then open <http://localhost:9100/demo>, click Start, and speak.
 
-Underneath: a Pipecat-based pipeline with Silero VAD for turn detection, Whisper for STT, an Ollama-hosted LLM with OpenAI-style tool calling, Piper TTS for the spoken reply. The LLM has four tools registered — BLIP scene caption, YOLOv8 detection, InsightFace recognition, and the recent-events NATS feed — each reaching into the live camera frame to ground the answer.
+**What you can ask:**
 
-Ask *"what's at the back gate?"* and the LLM calls BLIP. Ask *"is anyone in the kitchen?"* and it calls YOLOv8. Ask *"did anyone walk past in the last ten minutes?"* and it queries the inference event ring. All on your hardware. No cloud calls. No API keys.
+| You say | What happens |
+|---|---|
+| *"What's at the back gate?"* | LLM calls BLIP for a scene caption of the live frame |
+| *"Is anyone in the kitchen?"* | LLM calls YOLOv8 on the current frame |
+| *"Did anyone walk past in the last ten minutes?"* | LLM queries the inference event ring on NATS |
+| *"Who was at the door this morning?"* | LLM calls InsightFace against your enrolled face DB |
+
+Under the hood: Pipecat pipeline · Silero VAD · Whisper STT · Ollama LLM with OpenAI-style tool-calling · Piper TTS. No cloud, no API keys.
 
 This is the first OpenNVR example where the cameras have agency, not just data.
 

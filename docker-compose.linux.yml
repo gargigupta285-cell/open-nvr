@@ -1,18 +1,41 @@
-# ==========================================
-# OpenNVR - Docker Compose (LINUX / UBUNTU)
-# ==========================================
+# ============================================================
+# ⚠️  DEPRECATED — not the canonical Linux compose path anymore.
+# ============================================================
 #
-# SETUP INSTRUCTIONS:
-# 1. Copy .env.docker to .env:   cp .env.docker .env
-# 2. Start all services:         docker compose -f docker-compose.linux.yml up -d
-# 3. Check status:               docker compose -f docker-compose.linux.yml ps
+# As of ISSUE-12 + ISSUE-13, the canonical Linux install path is
+# ``docker-compose.tier0.yml`` (or bare ``docker-compose.yml``
+# which is an include shim → tier0). This file (``linux.yml``)
+# remains available ONLY for operators who specifically need host
+# networking for ONVIF WS-Discovery multicast camera auto-discovery
+# on a single-LAN topology. In that mode it:
 #
+#   * is a STRICT FUNCTIONAL SUBSET of tier0.yml — no nginx TLS
+#     edge, no YOLOv8 detection out of the box, no NATS events bus;
+#   * builds opennvr-core locally from ./Dockerfile (with a pull
+#     fallback after ISSUE-11) — heavier first run than tier0.yml
+#     which pulls the pre-built GHCR image directly;
+#   * uses host networking, so MediaMTX ports bind directly to
+#     your host's network stack with no Docker-bridge isolation.
+#
+# To opt in:
+#   OPENNVR_COMPOSE_FILE=docker-compose.linux.yml ./start.sh up
+#
+# Or directly:
+#   docker compose -f docker-compose.linux.yml up -d
+#
+# Planned removal: v0.2. Track ISSUE-13 follow-up for the
+# replacement (a host-mode profile/overlay on tier0.yml that gives
+# you ONVIF multicast WITHOUT giving up nginx + detection + nats).
+#
+# Read more:
+#   * Compose file reference: docs/DOCKER_SETUP.md
+#   * Why tier0 is canonical: CHANGELOG.md (ISSUE-12 + ISSUE-13)
+# ============================================================
+#
+# Original notes (preserved for context):
 # Uses host network mode - required for ONVIF camera discovery on Linux.
 # All services share the host network stack (no port mappings needed).
-#
-# 💡 TIP: Use the smart launcher instead:
-#    ./start.sh build   ← auto-detects Linux and uses this file
-# ==========================================
+# ============================================================
 
 services:
   # ==========================================
@@ -140,7 +163,29 @@ services:
   # 3. CORE APPLICATION (Backend + Frontend + Kai-C)
   # ==========================================
   opennvr-core:
-    # Build locally
+    # ISSUE-11: pull-or-build pattern. Same shape as tier0.yml and
+    # ISSUE-7 v3's yolov8-weights-init. The local Dockerfile build
+    # (./Dockerfile) does `RUN apt-get install` for runtime libs
+    # (supervisor, gosu, libpq5, libgl1, libglib2.0-0, ...) at both
+    # the python-builder stage and the runtime stage. That apt fetch
+    # hits deb.debian.org which several operator ISPs (IN, also CN/IR
+    # in prior reports) filter — build fails with "Could not connect
+    # to debian.map.fastlydns.net" or "Unable to locate package".
+    #
+    # Fix: declare both `image:` (so Compose pulls the pre-built GHCR
+    # image published by .github/workflows/publish-images.yml) AND
+    # `build:` (so operators with network access still get the local
+    # build path). `pull_policy: missing` makes Compose pull from
+    # GHCR first; if the pull succeeds, the local build is skipped
+    # entirely and no apt-get runs. If the pull fails (registry
+    # unreachable, fresh repo before first publish), Compose falls
+    # back to building locally.
+    #
+    # CORE_TAG defaults to `latest`. Operators on networks that can
+    # reach ghcr.io but want to pin a specific release should set
+    # CORE_TAG=v0.1.0 (or whatever) in .env.
+    image: ghcr.io/open-nvr/core:${CORE_TAG:-latest}
+    pull_policy: missing
     build:
       context: .
       dockerfile: Dockerfile

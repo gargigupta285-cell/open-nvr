@@ -27,11 +27,33 @@ WHITE='\033[1;37m'
 NC='\033[0m'
 
 # ── Detect OS ──────────────────────────────────────────────
+# ISSUE-12 + ISSUE-13: Linux defaults to docker-compose.tier0.yml
+# (the canonical hardened path) instead of the historical
+# docker-compose.linux.yml. Reasons:
+#   * tier0.yml ships nginx + nginx-certs-init for the TLS edge
+#     this script's print_access_urls promises (``https://<lan-ip>/``).
+#     linux.yml had no TLS terminator, so operators following the
+#     printed URL hit "connection refused" on :443.
+#   * tier0.yml ships yolov8-weights-init + yolov8-adapter so the
+#     README's "YOLOv8 detection out of the box" actually works.
+#     linux.yml had detection only behind the opt-in --profile ai.
+#   * tier0.yml ships nats so the audit/events bus that downstream
+#     services subscribe to is actually present.
+#
+# Trade-off: tier0.yml uses Docker bridge networking (with the
+# subnet pinned to 172.28.0.0/16 — ISSUE-6 v7) instead of host
+# networking. ONVIF WS-Discovery (multicast 239.255.255.250:3702)
+# doesn't cross Docker bridges by default — operators relying on
+# multicast camera auto-discovery should add cameras by IP manually,
+# or set OPENNVR_COMPOSE_FILE=docker-compose.linux.yml to revert to
+# the host-networking variant for that specific use case. The vast
+# majority of installs use a known camera IP list (dual-NIC camera-
+# LAN topology) where multicast discovery isn't the path anyway.
 OS="$(uname -s)"
 case "$OS" in
   Linux*)
-    COMPOSE_FILE="docker-compose.linux.yml"
-    OS_LABEL="Linux (host network mode)"
+    COMPOSE_FILE="docker-compose.tier0.yml"
+    OS_LABEL="Linux (Tier 0 — bridge networking + TLS edge)"
     ;;
   Darwin*)
     COMPOSE_FILE="docker-compose.yml"
@@ -43,6 +65,19 @@ case "$OS" in
     exit 1
     ;;
 esac
+
+# Operator escape hatch — pin a specific compose file regardless of
+# OS detection. Useful for: testing the legacy linux.yml host-mode
+# path, dev workflows on docker-compose.yml, custom overlay files.
+if [ -n "${OPENNVR_COMPOSE_FILE:-}" ]; then
+    if [ -f "${OPENNVR_COMPOSE_FILE}" ]; then
+        COMPOSE_FILE="${OPENNVR_COMPOSE_FILE}"
+        OS_LABEL="${OS_LABEL} (overridden via OPENNVR_COMPOSE_FILE)"
+    else
+        echo -e "${RED}OPENNVR_COMPOSE_FILE=${OPENNVR_COMPOSE_FILE} not found${NC}"
+        exit 1
+    fi
+fi
 
 COMMAND="${1:-up}"
 

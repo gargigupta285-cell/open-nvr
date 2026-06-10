@@ -15,6 +15,9 @@
 
 set -u
 
+. "$(dirname "$0")/_lib.sh"
+require_python_yaml
+
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 COMPOSE_TIER0="${REPO_ROOT}/docker-compose.tier0.yml"
 START_SH="${REPO_ROOT}/start.sh"

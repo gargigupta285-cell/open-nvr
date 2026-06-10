@@ -5,6 +5,91 @@ Complete guide for deploying OpenNVR using Docker containers.
 
 ---
 
+## Compose file reference
+
+OpenNVR ships five compose files. They look similar but have very different purposes — pick the wrong one and you get a degraded experience (broken TLS URL, no object detection, builds that fail on filtered ISPs). This section is the authoritative reference for which file does what and when each applies.
+
+The short answer: **don't think about this — run `./start.sh up`**. The launcher auto-picks `docker-compose.tier0.yml` on Linux and `docker-compose.yml` on macOS, which is the right default for 95% of operators. Read on only if you need to override the default or you're curious about the architecture.
+
+### The compose files
+
+Updated as of ISSUE-17. The compose-file sprawl is being consolidated — `docker-compose.yml` is now the canonical filename (matching Docker's standard convention) and acts as a thin `include:` pointer to `tier0.yml`. Operators can run `docker compose up -d` (no `-f` flag) and get the right stack.
+
+| File | Status | Purpose |
+|---|---|---|
+| `docker-compose.yml` | ✅ **Canonical entry point** | Thin include shim — `include: [docker-compose.tier0.yml]`. Operators get the hardened stack with bare `docker compose up -d`. Requires Docker Compose v2.20+ (released Aug 2023). |
+| `docker-compose.tier0.yml` | ✅ **Implementation** | The actual canonical hardened stack. Everything pulls from GHCR / Docker Hub — no source builds. nginx TLS edge, YOLOv8 detection out of the box, NATS event bus, bridge networking with a pinned subnet (V-015 trust zone). Reviewers and contributors edit THIS file; `docker-compose.yml` automatically picks up changes via the include. |
+| `docker-compose.linux.yml` | ⚠️ Deprecated, opt-in | Linux host-networking variant. Strictly less functional than tier0 — no nginx, no NATS, no YOLOv8, `opennvr-core` builds locally. Available ONLY for operators who specifically need ONVIF WS-Discovery multicast camera auto-discovery on a single-LAN topology. Opt in via `OPENNVR_COMPOSE_FILE=docker-compose.linux.yml ./start.sh up`. Planned removal in v0.2 once a host-mode profile/overlay lands on tier0. |
+| `docker-compose.camera-agent.yml` | 🎤 Overlay | Adds the voice-loop demo (Pipecat + Whisper STT + Ollama LLM + Piper TTS) on top of tier0. Never used alone — always layered: `docker compose -f docker-compose.yml -f docker-compose.camera-agent.yml --profile camera-agent up -d`. Lets you ask cameras "is there a person at the front door?" out loud and hear the answer back. |
+| `docker-compose.tier0.offline.yml` | 🪦 Obsolete (slated for removal) | Used to be an offline overlay for ISP-filtered networks (pre-baked YOLOv8 weights), but ISSUE-7 v3 folded its content into `tier0.yml` itself. Currently a no-op `services: {}` stub kept so operators who pasted the old dual-flag command don't break. Will be `git rm`'d in v0.1.1. |
+
+### Persona → command mapping
+
+```
+Home user / broadband / x86 Linux              ┐
+Operator behind ISP filter (IN / CN / IR)      │  → ./start.sh up
+Pi 5 / arm64 / homelab                         │     (or: docker compose up -d — same thing)
+macOS development                              ┘
+
+ONVIF multicast camera discovery (rare —       → OPENNVR_COMPOSE_FILE=docker-compose.linux.yml ./start.sh up
+needs camera & UI on same L2 segment)
+
+Voice loop demo (camera-agent)                 → docker compose -f docker-compose.yml \
+                                                                -f docker-compose.camera-agent.yml \
+                                                                --profile camera-agent up -d
+```
+
+The first case covers >95% of installs. The remaining personas are explicit opt-ins.
+
+### Service comparison matrix
+
+This is the matrix that surfaced the "linux.yml is a strict subset of tier0.yml" finding during the v0.1 hardening review. If you wonder why `./start.sh up`'s printed `https://<lan-ip>/` URL didn't work on linux.yml, look at the `nginx` row.
+
+| Service | tier0 | linux | yml | Purpose |
+|---|---|---|---|---|
+| `db` (postgres) | ✓ | ✓ | ✓ | Application database |
+| `mediamtx` | ✓ | ✓ | ✓ | RTSP / HLS / WebRTC streaming engine |
+| `mediamtx-certs-init` | ✓ | ✓ | ✓ | Self-signed cert generation for mediamtx TLS |
+| `opennvr-core` | ✓ | ✓ | ✓ | Backend + frontend + KAI-C middleware |
+| `nats` | ✓ | ✗ | ✓ | Inference events + audit bus |
+| `nginx` | ✓ | ✗ | ✗ | TLS reverse-proxy edge for LAN HTTPS access |
+| `nginx-certs-init` | ✓ | ✗ | ✗ | Self-signed cert generation for nginx |
+| `yolov8-weights-init` | ✓ | ✗ | ✗ | Pre-baked YOLOv8n ONNX weights from GHCR |
+| `yolov8-adapter` | ✓ | ✗ | ✗ | Default object-detection adapter (always on) |
+| `ai-adapters` (opt-in) | ✗ | ✓ | ✓ | Unified ai-adapter container (`--profile ai`) |
+
+linux.yml and yml use `ai-adapters` (a single combined container behind `--profile ai`) whereas tier0 uses dedicated `yolov8-adapter` (always on). That's the architectural split — tier0 separates adapters into per-model containers for clean isolation; linux/yml kept the monolithic adapter from earlier development.
+
+### Why five files instead of one
+
+Historical accident. The compose-file sprawl reflects the project's evolution:
+
+1. `docker-compose.yml` came first — original "dev compose" with mode toggles in comments. Works but requires manual editing.
+2. `docker-compose.linux.yml` was carved out as a Linux-specific simpler variant for host networking.
+3. `docker-compose.tier0.yml` was added as the "5-minute install" v0.1 productized path with everything pulled from GHCR.
+4. `docker-compose.camera-agent.yml` is an overlay — by design separate so the voice agent stays opt-in.
+5. `docker-compose.tier0.offline.yml` is a tombstone for back-compat with a dual-flag pattern that's no longer needed.
+
+The clean post-v0.1 future state will likely be: `docker-compose.yml` deleted or refactored to an overlay, `docker-compose.linux.yml` either folded into tier0 with `network_mode: host` as an override profile or deleted, `docker-compose.tier0.yml` renamed to `docker-compose.yml` as THE compose file, `docker-compose.camera-agent.yml` kept as an overlay, `docker-compose.tier0.offline.yml` removed. Tracked as a roadmap item — until then, `./start.sh up` masks the sprawl from operators.
+
+### Overriding the auto-pick
+
+If you want a specific compose file regardless of OS detection:
+
+```bash
+OPENNVR_COMPOSE_FILE=docker-compose.linux.yml ./start.sh up
+```
+
+The override is validated — if the file doesn't exist, `start.sh` aborts with a clear error rather than silently falling back. Common reasons to override:
+
+- **You need ONVIF WS-Discovery multicast for camera auto-discovery** → use `linux.yml`. Trade-off: no nginx TLS edge, no YOLOv8 detection out of the box, no NATS events bus (you'd need `--profile ai` and accept that the rest is missing).
+- **You're testing a custom compose overlay** → point at it via the env var.
+- **You're on Linux but want bridge-mode dev experience** → use `docker-compose.yml`.
+
+For the vast majority of installs — including dual-NIC topologies with cameras on an isolated camera-LAN — `tier0.yml` is the right answer and you should not override.
+
+---
+
 ## 🌐 Network Strategy: Windows/Mac vs Linux
 
 OpenNVR requires specific network configurations depending on your operating system, specifically related to **ONVIF Camera Auto-discovery**. ONVIF relies on UDP Multicast packets which do not route through default Docker Bridges.

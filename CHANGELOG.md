@@ -322,6 +322,335 @@ audit log.
   UDP/TCP both published, recordings.py uses external chain, no
   regression on opennvr-core's loopback-only binding).
 
+- **CI pytest test_m1b_mediamtx_hardening.py fixed for the
+  ISSUE-17 include shim (ISSUE-20).** The pytest
+  `test_compose_has_mediamtx_certs_init_service` walked
+  `docker-compose.yml` directly and asserted
+  `mediamtx-certs-init` was in the `services:` block. After
+  ISSUE-17 made `docker-compose.yml` a thin `include:` shim
+  pointing at `docker-compose.tier0.yml`, the pytest saw an
+  empty services dict and CI failed:
+  
+  ```
+  AssertionError: docker-compose.yml is missing the
+  mediamtx-certs-init service
+  assert 'mediamtx-certs-init' in {}
+  ```
+  
+  Same class of bug as the shell tests fixed in ISSUE-17 — a
+  pytest that hard-referenced the canonical filename without
+  following the include indirection. Fix is symmetric:
+  
+  * `test_compose_has_mediamtx_certs_init_service` now walks
+    `docker-compose.tier0.yml` (the implementation file where
+    the services actually live). Test intent is preserved —
+    the canonical compose lifecycle must include cert-init
+    before mediamtx — it just follows the post-ISSUE-17 file
+    layout.
+  * **New pytest** `test_canonical_docker_compose_yml_is_include_shim`
+    locks the include shape: `docker-compose.yml` must contain
+    an `include` directive that references
+    `docker-compose.tier0.yml` AND must NOT have its own
+    `services:` block. A stray services block would shadow
+    the include and silently give bare-invocation operators a
+    different stack from the `-f tier0.yml` operators.
+  
+  This mirrors the contract test in
+  `tests/host-hardening/test_build_resilience.sh` so both the
+  pytest layer and the shell-test layer enforce the same
+  property structurally.
+
+- **Host-hardening tests run on macOS (ISSUE-19).** First Mac
+  contributor ran the test suite, hit two compatibility bugs the
+  Linux-only CI never caught:
+  
+  * **`test_media_proxy.sh` used `declare -A`** for an associative
+    array — bash 4+ syntax that macOS's bundled `/bin/bash` 3.2
+    doesn't understand. Apple stopped updating bash after the
+    GPLv3 switch in 2007, so every Mac without Homebrew bash
+    failed with `webrtc: unbound variable`. Rewritten as a
+    `port_for()` case statement that's bash 3.2 compatible.
+  
+  * **Five tests crashed with `ModuleNotFoundError: yaml`** when
+    PyYAML wasn't installed on the system python3 — Apple's
+    bundled Python doesn't ship it, and most Mac contributors
+    don't think to install it because nothing tells them.
+  
+  Fix: new shared library `tests/host-hardening/_lib.sh` with
+  two helpers, sourced by every test that needs them:
+  
+  * `require_python_yaml` — bails early with the exact install
+    command (covers `pip3`, Homebrew Python, system Python,
+    Debian/Ubuntu `apt`). Operators see a clear actionable
+    message instead of an opaque Python traceback.
+  * `require_bash_4` — same shape, for tests that genuinely
+    need bash 4+ features. Currently unused — every test should
+    be 3.2 compatible — but available if a future test has no
+    way around it.
+  
+  Wired into all five yaml-using tests:
+  test_build_resilience.sh, test_cert_san.sh,
+  test_compose_file_selection.sh, test_docker_subnets.sh,
+  test_media_proxy.sh. The other four suites need neither
+  helper. Net: 110 tests across 10 suites, all green on Linux
+  and macOS (with PyYAML installed).
+  
+  Also extended `test_script_permissions.sh`'s expected-suites
+  list to include the new `_lib.sh` shared helper plus the
+  three new test files this session added — so the ISSUE-9
+  tracking-regression check catches any of them being
+  un-staged before commit.
+
+- **README quickstart tightened for first-time developers
+  (ISSUE-18).** The previous quickstart had a dense 4-bullet
+  paragraph explaining what `./start.sh up` does, the
+  "Skip the wizard" section still referenced the obsolete
+  `docker compose -f docker-compose.tier0.yml up -d` pattern,
+  and the camera-agent section had verbose dual-`-f` commands
+  that were hard to scan. The new structure (still ~one screen
+  of content):
+  
+  * Three commands, headline-form.
+  * **"What you'll see when it boots"** code block — visual
+    mock-up of the printed NIC topology, URL, and token banner
+    so operators know what to expect before they run it.
+  * **Three numbered next steps** — open URL, accept cert, paste
+    token. One line each.
+  * **Common follow-ups table** — lost token, IP changed, stop,
+    logs, status, upgrade. Six rows, one command per row.
+  * **Advanced setup** subsection — bare `docker compose up -d`
+    now mentioned (ISSUE-17 made it work) with the trade-offs
+    listed.
+  * **Talk to your cameras** rewritten with a "what you can ask"
+    table showing the four reference questions and which adapter
+    each one calls — concrete + scannable. Commands shortened to
+    use `docker-compose.yml` instead of `docker-compose.tier0.yml`
+    now that the include shim makes them equivalent.
+  
+  No content removed from the project positioning sections ("Why
+  this exists", "What makes it different") — those carry the
+  project's voice and aren't part of the friction the user was
+  flagging.
+
+- **`docker-compose.yml` is now the canonical entry point —
+  bare `docker compose up -d` works (ISSUE-17).** Five compose
+  files is confusing for new developers and for operators who
+  expect the standard Docker convention (`docker compose up -d`
+  in the repo root just works). Cleanup pass:
+  
+  * **`docker-compose.yml` is now a thin `include:` shim**
+    pointing at `docker-compose.tier0.yml`. Operators get the
+    canonical hardened stack with bare `docker compose up -d` —
+    no `-f` flag needed. Editing tier0.yml automatically updates
+    both forms, so there is no copy of service definitions to
+    fall out of sync. Requires Docker Compose v2.20+ (Aug 2023+).
+  * **`docker-compose.tier0.yml` remains as the implementation
+    file** — all reviews and PR diffs land here where reviewers
+    expect them. Existing scripts with
+    `docker compose -f docker-compose.tier0.yml up -d` keep
+    working unchanged because the file is still present.
+  * **`docker-compose.linux.yml` got a prominent deprecation
+    banner** at the top explaining its limited scope (host
+    networking for ONVIF multicast camera discovery only — strict
+    subset of tier0 otherwise) and the opt-in path
+    (`OPENNVR_COMPOSE_FILE=docker-compose.linux.yml ./start.sh up`).
+    Slated for removal in v0.2 once a host-mode profile/overlay
+    lands on tier0.
+  * **`docker-compose.tier0.offline.yml` is being prepared for
+    removal** — was a no-op stub since ISSUE-7 v3. The land
+    sequence below includes `git rm` for it.
+  
+  The old `docker-compose.yml` had a different network
+  architecture (`sentinel_internal` + `public_uplink` networks
+  with separate `OPENNVR_PUBLIC_SUBNET` override) that predated
+  the tier0 simplification to a single `opennvr_internal`
+  network. After consolidation, operators running bare
+  `docker compose up -d` get the same architecture as tier0 —
+  no surprise drift.
+  
+  Test surface adjusted to match:
+  
+  * `test_build_resilience.sh` has a new contract test
+    (now 25 tests total) that asserts `docker-compose.yml` is
+    a thin include shim with no `services:` block — a stray
+    services block would shadow the include and create silent
+    drift from tier0.yml.
+  * `test_docker_subnets.sh` was rewritten (8 → 6 tests) to
+    reflect the single-network architecture: the old
+    `sentinel_internal`/`public_uplink` two-network tests are
+    gone because that architecture is gone.
+  * The compose-file scan lists in `test_build_resilience.sh`
+    no longer include `docker-compose.yml` (since it's an
+    include shim — same content gets tested via tier0.yml).
+  
+  Net: 110 tests across 10 suites, all green.
+
+- **Compose file reference added to `docs/DOCKER_SETUP.md`
+  (ISSUE-16).** The repo ships five compose files with subtly
+  different purposes (`tier0.yml`, `linux.yml`, `docker-compose.yml`,
+  `camera-agent.yml`, `tier0.offline.yml`) and there was no
+  central reference explaining which to use when. Operators
+  who looked for guidance found `DOCKER_SETUP.md`'s "Network
+  Strategy" section telling them to manually edit
+  `docker-compose.yml` to toggle bridge/host mode — advice that
+  predates the `tier0.yml` + `./start.sh` productized path by
+  several iterations.
+  
+  Added an authoritative "Compose file reference" section at
+  the top of `DOCKER_SETUP.md` covering: file-by-file purpose
+  table, persona-to-file mapping, full service-comparison matrix
+  (the one that surfaced the "linux.yml is a strict subset"
+  finding during the ISSUE-12/13 review), historical context
+  on why there are five files, the planned post-v0.1 consolidation
+  path, and how to override the auto-pick via
+  `OPENNVR_COMPOSE_FILE`. README's quickstart now cross-links
+  to it.
+  
+  The older "Network Strategy" section below is now visibly
+  stale; flagging in the cross-link but leaving the prose
+  in place until a fuller DOCKER_SETUP.md refresh in v0.1.1.
+
+- **`./start.sh up` on Linux now picks `docker-compose.tier0.yml`
+  by default (ISSUE-12 + ISSUE-13).** The historical default
+  was `docker-compose.linux.yml`, a strict functional subset of
+  tier0.yml: no `nginx` / `nginx-certs-init` (so no TLS edge),
+  no `yolov8-weights-init` / `yolov8-adapter` (so no detection
+  out of the box), no `nats` (so the audit/events bus was
+  silent). Surface of broken promises:
+  
+  * **start.sh's `print_access_urls` always printed
+    `Web UI: https://<lan-ip>/`** — but linux.yml had no listener
+    on :443. Operators following the printed URL hit "connection
+    refused". This was the user-visible bug that surfaced the
+    issue.
+  * **The README quickstart promised "YOLOv8 detection running
+    on your camera feed"** — linux.yml shipped detection only
+    behind the opt-in `--profile ai`, which the README never
+    mentions.
+  * **Downstream services subscribing to `opennvr.inference.*`
+    / `opennvr.alerts.*` NATS subjects** got nothing because the
+    nats broker wasn't present.
+  
+  Root cause: linux.yml predates the v0.1 hardening + Tier 0
+  productization work. It was originally a "host networking
+  variant for ONVIF multicast camera discovery", but tier0.yml
+  has since become the canonical full-featured path. Defaulting
+  to linux.yml meant operators on Linux silently got a degraded
+  experience versus the documented one.
+  
+  Fix in `start.sh`:
+  
+  ```bash
+  case "$OS" in
+    Linux*)
+  -    COMPOSE_FILE="docker-compose.linux.yml"
+  -    OS_LABEL="Linux (host network mode)"
+  +    COMPOSE_FILE="docker-compose.tier0.yml"
+  +    OS_LABEL="Linux (Tier 0 — bridge networking + TLS edge)"
+  ```
+  
+  Plus a new `OPENNVR_COMPOSE_FILE` env-var override so operators
+  who specifically need host networking (single-LAN topology with
+  ONVIF multicast discovery — niche) can opt back into linux.yml
+  with `OPENNVR_COMPOSE_FILE=docker-compose.linux.yml ./start.sh up`.
+  
+  Trade-off: tier0.yml uses bridge networking (Docker subnet
+  pinned to 172.28.0.0/16 — ISSUE-6 v7). ONVIF WS-Discovery
+  (multicast 239.255.255.250:3702) doesn't cross Docker bridges
+  without extra config — operators relying on multicast must
+  add cameras by IP manually or use the OPENNVR_COMPOSE_FILE
+  escape hatch. In a dual-NIC camera-LAN topology (the
+  recommended hardened layout per `docs/SECURITY_ARCHITECTURE.md`),
+  multicast discovery isn't the path anyway — the camera-LAN NIC
+  is firewalled off from the operator UI by intent.
+  
+  New regression test
+  `tests/host-hardening/test_compose_file_selection.sh` (6
+  tests) locks the new default and catches the class of bug
+  where start.sh's printed scheme drifts from what the
+  selected compose actually serves:
+  
+  (1) start.sh's Linux case-arm points at tier0.yml;
+  (2) the `OPENNVR_COMPOSE_FILE` override hook exists;
+  (3) the default Linux compose ships nginx + nginx-certs-init;
+  (4) it ships yolov8-weights-init + yolov8-adapter and they
+      aren't profile-gated (operators don't discover --profile
+      flags from the quickstart);
+  (5) it ships nats;
+  (6) start.sh's `https://` URL matches a real :443 listener
+      in the compose — drift one and the test fails.
+
+- **`./start.sh up` on Linux no longer hits `deb.debian.org`
+  during `opennvr-core` build (ISSUE-11).** When start.sh
+  detects a Linux host it picks `docker-compose.linux.yml`
+  (host networking — needed for ONVIF camera discovery via
+  multicast). That file declared `opennvr-core` with a `build:`
+  block but no `image:` directive, forcing Compose to build
+  the root `Dockerfile` locally. That Dockerfile does
+  `RUN apt-get install` at both the python-builder stage
+  (build-essential, libpq-dev, libgl1, libglib2.0-0) and the
+  runtime stage (supervisor, gosu, libpq5, libgl1, libglib2.0-0,
+  libgomp1, libsm6, libxext6, libxrender1) — same
+  `deb.debian.org` block several operator ISPs filter. Reported
+  from IN on first `./start.sh up` after the ISSUE-10 doc fix
+  pointed operators at start.sh as the canonical entry.
+  
+  This was the same bug class as ISSUE-7, but at a layer the
+  ISSUE-7 v6 regression test couldn't see: the test walked
+  `dockerfile_inline:` blocks in compose files, not external
+  Dockerfiles referenced via `build: dockerfile: <path>`. The
+  root `Dockerfile` and `kai-c/Dockerfile` and every
+  `examples/*/Dockerfile` were entirely unaudited.
+  
+  Fix in both `docker-compose.linux.yml` and `docker-compose.yml`
+  uses the same pull-or-build pattern as `tier0.yml`'s
+  opennvr-core and ISSUE-7 v3's yolov8-weights-init:
+  
+  ```yaml
+  opennvr-core:
+    image: ghcr.io/open-nvr/core:${CORE_TAG:-latest}
+    pull_policy: missing
+    build:
+      context: .
+      dockerfile: Dockerfile
+  ```
+  
+  Compose tries to pull `ghcr.io/open-nvr/core:latest` first
+  (published by `.github/workflows/publish-images.yml`). If the
+  pull succeeds the local Dockerfile build is skipped entirely
+  and no apt-get runs. If the pull fails (fresh repo before
+  first publish, registry blocked) Compose falls back to
+  building locally so unfiltered-network operators still get a
+  working build. `CORE_TAG` defaults to `latest` and is
+  operator-overridable to pin a specific release.
+  
+  Regression test surface in `test_build_resilience.sh` grew
+  from 22 to 24 tests. Two new ones:
+  
+  (1) Walks every external Dockerfile (not just inline) and
+      asserts that any service whose Dockerfile does `RUN
+      apt-get install` / `RUN apk add` / `RUN pip install` ALSO
+      declares `image:` + `pull_policy: missing` so operators
+      on filtered networks have a fallback. Profile-gated
+      services (`profiles: [ai]`, `profiles: [camera-agent]`)
+      are exempted because they're explicitly opt-in — the
+      operator who runs `--profile ai` accepts the build-side
+      burden. Tracked as follow-ups for when those images get
+      published.
+  
+  (2) Positive contract on opennvr-core specifically: every
+      compose where opennvr-core has a `build:` block must
+      also have `image:` set to `ghcr.io/open-nvr/core:*` AND
+      `pull_policy: missing`. Locks the fix shape so a future
+      "let's just build locally" refactor regresses immediately.
+  
+  Known follow-ups: ai-adapter and camera-agent services still
+  require local build because their pre-built images aren't
+  published yet. Both are profile-gated so they don't block the
+  default Tier 0 install path, but `--profile ai` and
+  `--profile camera-agent` operators on filtered networks will
+  still hit the same trap. Tracked as ISSUE-11 follow-ups.
+
 - **README quickstart now uses `./start.sh up` as the canonical
   entry point (ISSUE-10).** The previous quickstart instructed
   operators to run `cp .env.example .env`, then
