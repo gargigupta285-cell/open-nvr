@@ -9,6 +9,36 @@ if [ -d "/app/AI-adapters/AIAdapters/frames" ]; then
     chown -R opennvr:opennvr /app/AI-adapters/AIAdapters/frames 2>/dev/null || true
 fi
 
+# ──────────────────────────────────────────────────────────────────────
+# ISSUE-29: Surface the first-time setup token banner to docker logs.
+# ──────────────────────────────────────────────────────────────────────
+# Supervisord redirects the backend's stdout to a log file
+# (/app/logs/opennvr-backend.log) — see supervisord.conf
+# [program:opennvr-backend] stdout_logfile. As a result, print()
+# output from server/services/first_time_setup_service.py:maybe_arm()
+# never reaches the container's stdout (PID 1), which is what
+# `docker compose logs opennvr-core` reads.
+#
+# start.sh's print_first_time_setup_token() greps docker logs for
+# the banner. Without this forwarder the banner IS minted correctly
+# in the DB-pending-admin case but is invisible to the operator —
+# start.sh prints "First-time setup is already complete" even when
+# the token is sitting unread in the backend log file.
+#
+# The background tail follows the backend log from EOF and, on every
+# line matching the banner header, prints it plus the next 6 lines to
+# stdout. This matches start.sh's grep contract:
+#     grep -A 6 "first-time setup token" | tail -7
+# so what surfaces here is exactly the 7-line block start.sh expects
+# to read and forward to the operator's terminal.
+(
+    mkdir -p /app/logs
+    touch /app/logs/opennvr-backend.log
+    chown opennvr:opennvr /app/logs/opennvr-backend.log
+    tail -n 0 -F /app/logs/opennvr-backend.log \
+      | grep --line-buffered -A 6 "first-time setup token"
+) &
+
 # Switch to opennvr user and run supervisord
 exec gosu opennvr /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
 
