@@ -275,6 +275,57 @@ Removing the guard would mint a fresh token on every server boot
 and mid-copy-paste operators would copy stale tokens."
 fi
 
+# ── 9. docker-entrypoint.sh forwards the banner to container stdout (ISSUE-29) ──
+# Supervisord redirects the backend's stdout to /app/logs/opennvr-backend.log,
+# so print() in maybe_arm() never reaches PID 1's stdout. Without this
+# forwarder the banner IS minted but invisible to ``docker compose logs``
+# and therefore to start.sh's grep — operator gets "First-time setup is
+# already complete" even when the token sits unread in a log file.
+#
+# The forwarder must: tail -F the backend log, grep -A 6 the banner (to
+# match start.sh's ``grep -A 6 "first-time setup token" | tail -7``
+# contract), and run in the background so it doesn't block supervisord.
+start_test "docker-entrypoint.sh forwards setup-token banner to stdout"
+ep_file="${REPO_ROOT}/docker-entrypoint.sh"
+if grep -qE 'tail.+-F.+opennvr-backend\.log' "$ep_file" \
+   && grep -qE 'grep.+-A[[:space:]]+6.+"first-time setup token"' "$ep_file" \
+   && grep -qE '\)[[:space:]]*&[[:space:]]*$' "$ep_file"; then
+    pass
+else
+    fail "docker-entrypoint.sh must include a background forwarder of the form:
+    (
+        mkdir -p /app/logs
+        touch /app/logs/opennvr-backend.log
+        chown opennvr:opennvr /app/logs/opennvr-backend.log
+        tail -n 0 -F /app/logs/opennvr-backend.log \\
+          | grep --line-buffered -A 6 \"first-time setup token\"
+    ) &
+Without this, the setup token banner is minted by the backend but
+trapped in /app/logs/opennvr-backend.log and never reaches the
+container stdout that ``docker compose logs`` reads.
+The ``-A 6`` must match start.sh's grep range so the banner that
+surfaces here is exactly the 7-line block start.sh expects."
+fi
+
+# ── 10. forwarder's grep range matches start.sh's (no drift) ──
+# If start.sh ever changes from -A 6 / tail -7 to a different range,
+# this side must change too or banners get clipped. Compare the
+# integers directly.
+start_test "docker-entrypoint.sh grep -A range matches start.sh's"
+ep_A=$(grep -oE 'grep[^|]*-A[[:space:]]+[0-9]+[^|]*"first-time setup token"' "$ep_file" \
+       | grep -oE '\-A[[:space:]]+[0-9]+' | grep -oE '[0-9]+' | head -1)
+sh_A=$(grep -oE 'grep[^|]*-A[[:space:]]+[0-9]+[^|]*"first-time setup token"' \
+       "${REPO_ROOT}/start.sh" | grep -oE '\-A[[:space:]]+[0-9]+' \
+       | grep -oE '[0-9]+' | head -1)
+if [ -n "$ep_A" ] && [ -n "$sh_A" ] && [ "$ep_A" = "$sh_A" ]; then
+    pass
+else
+    fail "grep -A range mismatch: docker-entrypoint.sh has -A ${ep_A:-?}, start.sh has -A ${sh_A:-?}.
+The two sides MUST use the same number of after-context lines or
+the banner clipping diverges between the entrypoint's forward and
+start.sh's display."
+fi
+
 # ── Summary ────────────────────────────────────────────────
 echo ""
 echo "────────────────────────────────────────────"
