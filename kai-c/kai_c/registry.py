@@ -185,6 +185,7 @@ class AdapterRegistry:
         audit: AuditStore,
         poll_interval_seconds: int = DEFAULT_POLL_INTERVAL_SECONDS,
         http_client: httpx.AsyncClient | None = None,
+        auth_token: str | None = None,
     ) -> None:
         self._sovereignty_mode = sovereignty_mode.lower()
         self._audit = audit
@@ -194,8 +195,20 @@ class AdapterRegistry:
         # ``trust_env=False`` so HTTP_PROXY etc. don't redirect our
         # adapter probes through some operator-side proxy (same logic
         # as the conformance kit).
+        #
+        # ``auth_token`` is attached as ``Authorization: Bearer`` on every
+        # probe. Without it, /capabilities + /hardware/evaluation polls
+        # succeed only during the adapter's 5-minute registration grace
+        # window and then 401 forever (the SDK enforces the token once the
+        # window closes). The /infer path already sends this same token.
         self._owns_client = http_client is None
-        self._client: httpx.AsyncClient = http_client or httpx.AsyncClient(trust_env=False)
+        if http_client is not None:
+            self._client: httpx.AsyncClient = http_client
+        else:
+            headers = (
+                {"Authorization": f"Bearer {auth_token}"} if auth_token else None
+            )
+            self._client = httpx.AsyncClient(trust_env=False, headers=headers)
         self._poll_task: asyncio.Task | None = None
         self._stop_flag = asyncio.Event()
 
