@@ -322,6 +322,56 @@ audit log.
   UDP/TCP both published, recordings.py uses external chain, no
   regression on opennvr-core's loopback-only binding).
 
+- **Setup token banner now actually reaches docker logs
+  (ISSUE-29 — operator-discovered root cause).** After all the
+  previous ISSUE-5 / 26 / 27 work, an operator on a fresh deploy
+  still saw `start.sh` print "First-time setup is already complete"
+  with no token in the terminal. The diagnosis was theirs:
+  supervisord redirects the backend's stdout to a log FILE
+  (`/app/logs/opennvr-backend.log`, configured via
+  `[program:opennvr-backend] stdout_logfile=` in supervisord.conf).
+  When `maybe_arm()` calls `print(banner)`, the banner goes into
+  that file — it never reaches container PID 1's stdout, which is
+  what `docker compose logs opennvr-core` reads. start.sh's grep
+  finds nothing and reports the misleading "already complete"
+  message even when the token was minted correctly.
+  
+  Every prior fix in this thread was correct but addressed
+  different links in the chain (ISSUE-5 widened the wait window;
+  ISSUE-26 removed the shipped default password; ISSUE-27 added
+  a runtime reject list). The actual delivery layer was the
+  silent breakage.
+  
+  Fix in `docker-entrypoint.sh`: spawn a background `tail -F` on
+  the backend log file at container start. The tail pipes through
+  `grep --line-buffered -A 6 "first-time setup token"` and writes
+  the matched 7-line block to the container's stdout. The `-A 6`
+  range matches `start.sh`'s `grep -A 6 ... | tail -7` contract
+  exactly, so what shows up in docker logs is precisely the block
+  start.sh expects to read and forward to the operator's terminal.
+  The forwarder runs as a backgrounded subshell so supervisord
+  startup isn't blocked, and is best-effort — if it crashes, the
+  container still works; the operator just falls back to retrieving
+  the banner manually from the log file.
+  
+  Two regression tests added in
+  `tests/host-hardening/test_setup_token_banner.sh`:
+  
+  * Test 9: `docker-entrypoint.sh` must include the
+    `tail -F ... | grep -A 6 "first-time setup token"` forwarder
+    pattern, running as a backgrounded subshell.
+  * Test 10: the entrypoint's `grep -A` range must equal
+    `start.sh`'s `grep -A` range. If one side ever changes
+    without the other, the test fails so the next reviewer sees
+    the drift before it ships.
+  
+  Net: 123 host-hardening tests across 12 suites, all green.
+  Setup token banner now flows reliably from `maybe_arm()` →
+  backend log file → `tail -F` forwarder → container stdout →
+  `docker compose logs` → start.sh's grep → operator's terminal.
+  Every link in the chain is now covered by a structural
+  regression test.
+
 - **V-022 sovereignty validator accepts Docker bridge URLs
   (ISSUE-28).** Operator on a tier0 deploy hit:
   
