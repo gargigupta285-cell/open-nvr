@@ -16,7 +16,7 @@
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
 
@@ -66,8 +66,34 @@ type CameraStats = {
   latest_detection?: string
 }
 
+// Wire-shape of an inference_result event coming off the backend event bus.
+// Mirror of the backend's inference_result payload — kept as a structural
+// type (not a class) so a shape drift between frontend and backend surfaces
+// as a TypeScript error rather than a silent runtime miss.
+//
+// model_id, task, and camera_id are optional on the wire (the backend could
+// emit a malformed event), but the row-construction path treats missing
+// model_id / task as "drop this event" rather than papering over with non-
+// null assertions that would lie about the runtime type.
+type WSInferenceEvent = {
+  event_type: 'inference_result'
+  camera_id?: number
+  model_id?: number
+  task?: string
+  timestamp?: number
+  payload?: {
+    label?: string
+    confidence?: number
+    count?: number
+    bbox?: number[]
+    caption?: string
+    description?: string
+    latency_ms?: number
+  }
+}
+
 export function AIDetectionResults() {
-  const { user } = useAuth()
+  const { user, token } = useAuth()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -85,6 +111,20 @@ export function AIDetectionResults() {
     limit: 100,
   })
 
+  // Buffer for events that arrive over WebSocket BEFORE the initial GET
+  // history finishes loading. Without this, the GET response's setResults
+  // would clobber any rows the WS handler appended during the race window.
+  // Drained (newest-first) into results when loadResults() completes.
+  const wsBufferRef = useRef<DetectionResult[]>([])
+  const historyLoadedRef = useRef(false)
+
+  // Monotonically-decreasing synthetic IDs for pushed-but-not-yet-persisted
+  // rows. Real DB IDs are positive auto-increments; using negatives here
+  // guarantees no collision with anything the server will hand back on a
+  // manual Refresh, and a counter (vs. a timestamp) means two events in the
+  // same millisecond can't collide either.
+  const wsSeqRef = useRef(0)
+
   // Load models for filter
   useEffect(() => {
     loadModels()
@@ -96,14 +136,126 @@ export function AIDetectionResults() {
     loadResults()
   }, [filters, selectedCameraId])
 
-  // Auto-refresh results every 5 seconds for real-time updates
+  // Live push: subscribe to the backend event bus over WebSocket so detections
+  // appear the instant the backend produces them, with zero polling. The
+  // socket reconnects automatically if it drops, with exponential backoff so
+  // a long backend outage doesn't drown the network in retries. Initial
+  // history still comes from the one-time GET above; events that arrive
+  // during the GET window are buffered and drained when the GET resolves
+  // (see loadResults + wsBufferRef) so the GET's setResults can't clobber
+  // them.
   useEffect(() => {
-    const interval = setInterval(() => {
-      loadResults()
-    }, 5000); // Refresh every 5 seconds
+    if (!token) return
 
-    return () => clearInterval(interval);
-  }, [filters, selectedCameraId])
+    let ws: WebSocket | null = null
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+    let closedByUnmount = false
+    // Backoff state for reconnect: 1s, 2s, 4s, ..., capped at 60s. Reset to
+    // 0 on successful onopen so the next disconnect starts fresh. Without
+    // the cap, a 24h backend outage would mean ~28,800 wasted attempts.
+    let reconnectAttempt = 0
+    const reconnectDelayMs = () =>
+      Math.min(60000, 1000 * Math.pow(2, reconnectAttempt))
+
+    const connect = () => {
+      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+      const url = `${proto}://${window.location.host}/api/v1/events/ws?token=${encodeURIComponent(token)}`
+      ws = new WebSocket(url)
+
+      ws.onopen = () => {
+        // Successful handshake — reset backoff for the next disconnect.
+        reconnectAttempt = 0
+      }
+
+      ws.onmessage = (msg) => {
+        let evt: WSInferenceEvent
+        try { evt = JSON.parse(msg.data) as WSInferenceEvent } catch { return }
+        if (evt.event_type !== 'inference_result') return
+
+        // Drop events that lack the fields the table is keyed on. Without
+        // this, the row construction below would non-null-assert undefined
+        // into number/string and downstream rendering would crash on
+        // ``.toString()`` etc. Matches the contract: a real detection
+        // always names its model and task.
+        if (evt.model_id == null || !evt.task) return
+
+        const p = evt.payload ?? {}
+        // Mirror the backend DB gate: skip zero-confidence "nothing detected"
+        // heartbeats so only real detections land in the table.
+        const hasDetection =
+          (p.count != null && p.count > 0) ||
+          (p.confidence != null && p.confidence > 0) ||
+          !!p.label
+        if (!hasDetection) return
+
+        // Client-side filter to match the current view.
+        if (selectedCameraId && evt.camera_id !== selectedCameraId) return
+        if (filters.model_id && evt.model_id !== parseInt(filters.model_id)) return
+        if (filters.task && evt.task !== filters.task) return
+
+        const bbox = Array.isArray(p.bbox) ? p.bbox : []
+        const ts = evt.timestamp || Date.now()
+        // Synthetic id for a pushed row: a strictly-decreasing counter so
+        // it can never collide with positive DB IDs, or with another pushed
+        // row in the same millisecond. Replaced by the real DB id whenever
+        // the operator hits Refresh and the GET returns this row.
+        const syntheticId = -(++wsSeqRef.current)
+        const row: DetectionResult = {
+          id: syntheticId,
+          model_id: evt.model_id,
+          camera_id: evt.camera_id,
+          task: evt.task,
+          label: p.label,
+          confidence: p.confidence,
+          bbox_x: bbox[0],
+          bbox_y: bbox[1],
+          bbox_width: bbox[2],
+          bbox_height: bbox[3],
+          count: p.count,
+          caption: p.caption || p.description,
+          latency_ms: p.latency_ms,
+          created_at: new Date(ts).toISOString(),
+        }
+
+        if (!historyLoadedRef.current) {
+          // Initial GET hasn't resolved yet — buffer rather than setting
+          // state so we don't get clobbered when loadResults() runs
+          // setResults(res.data). The buffer drains in loadResults' finally.
+          wsBufferRef.current.unshift(row)
+          // Cap the buffer at filters.limit so a very long initial-GET
+          // window can't grow it unboundedly.
+          if (wsBufferRef.current.length > filters.limit) {
+            wsBufferRef.current.length = filters.limit
+          }
+          return
+        }
+        setResults(prev => [row, ...prev].slice(0, filters.limit))
+      }
+
+      ws.onerror = () => {
+        // Browsers emit onerror BEFORE onclose for handshake failures, but
+        // some flaky network paths (proxy reset, captive portal interception)
+        // can leave the socket in CLOSING without ever firing onclose. Force
+        // a close so the reconnect path runs deterministically.
+        try { ws?.close() } catch { /* already closing */ }
+      }
+
+      ws.onclose = () => {
+        if (closedByUnmount) return
+        const delay = reconnectDelayMs()
+        reconnectAttempt += 1
+        reconnectTimer = setTimeout(connect, delay)
+      }
+    }
+
+    connect()
+
+    return () => {
+      closedByUnmount = true
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      if (ws) ws.close()
+    }
+  }, [token, filters, selectedCameraId])
 
   async function loadModels() {
     try {
@@ -124,6 +276,13 @@ export function AIDetectionResults() {
   }
 
   async function loadResults() {
+    // Suspend the WS handler's setState while we're refetching history —
+    // any events that arrive between now and the GET resolving land in
+    // wsBufferRef and get drained back into results at the end so the GET
+    // response can't clobber them.
+    historyLoadedRef.current = false
+    wsBufferRef.current = []
+    let fetchedData: DetectionResult[] | null = null
     try {
       setLoading(true)
       setError(null)
@@ -131,13 +290,35 @@ export function AIDetectionResults() {
       if (filters.model_id) params.model_id = parseInt(filters.model_id)
       if (filters.task) params.task = filters.task
       if (selectedCameraId) params.camera_id = selectedCameraId
-      
+
       const res = await apiService.getDetectionResults(params)
-      setResults(res.data)
+      fetchedData = res.data
     } catch (e: any) {
       setError(e?.data?.detail || e?.message || 'Failed to load detection results')
     } finally {
       setLoading(false)
+      // Drain any events that arrived during the fetch — done in finally so
+      // a failed GET doesn't silently lose pushed events. Three cases:
+      //   * GET succeeded: merge buffer (newest-first) into freshly-loaded
+      //     history and replace results.
+      //   * GET failed but events arrived: prepend the buffer to whatever
+      //     was already in results so the operator at least sees the live
+      //     activity, while the error banner explains why history is stale.
+      //   * GET failed AND no events: leave results untouched; the catch
+      //     block already surfaced the error.
+      const buffered = wsBufferRef.current
+      wsBufferRef.current = []
+      if (fetchedData !== null) {
+        setResults(buffered.length
+          ? [...buffered, ...fetchedData].slice(0, filters.limit)
+          : fetchedData
+        )
+      } else if (buffered.length > 0) {
+        setResults(prev => [...buffered, ...prev].slice(0, filters.limit))
+      }
+      // Re-arm the WS handler's setState path. Any further events skip the
+      // buffer and go straight into results via setResults.
+      historyLoadedRef.current = true
     }
   }
 
