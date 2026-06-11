@@ -528,7 +528,23 @@ class CloudRecordingService:
             self._upload_queue.task_done()
     
     def is_cloud_configured(self, db: Session) -> bool:
-        """Whether a cloud recording server target is configured."""
+        """Whether a cloud recording server target is configured.
+
+        A target is considered configured iff the
+        ``media_source.cloud_recording_server_ip`` setting holds a
+        truthy value. An empty string (``""``) is treated as
+        unconfigured — the operator may have cleared the field in
+        the UI, and we don't want to keep polling a target that was
+        explicitly removed. Likewise a missing ``media_source`` row
+        or unparseable JSON returns False via
+        :meth:`_get_media_source_settings`.
+
+        Used by the ``/cloud-upload/status`` endpoint to tell the
+        frontend whether it's worth continuing to poll — see the
+        ``configured`` field in the response. The 3-second poll
+        loop in ``app/src/views/PlaybackView.tsx`` shuts itself
+        down when this returns False.
+        """
         media_cfg = self._get_media_source_settings(db)
         return bool(media_cfg.get("cloud_recording_server_ip"))
 

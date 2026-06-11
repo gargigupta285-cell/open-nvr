@@ -187,6 +187,40 @@ export function PlaybackView() {
     }
   }, [user?.is_superuser, cloudUploadConfigured, showPlayer])
 
+  // Self-healing recovery from the "we gave up polling" state.
+  //
+  // The polling effect above flips cloudUploadConfigured → false when the
+  // backend reports no cloud server is configured. Without this, the
+  // frontend would stay in that state until the operator hard-refreshed
+  // the page, even if they configured the cloud server in another route.
+  //
+  // Two cheap recovery triggers:
+  //   * Tab visibility change. When the operator navigates away to
+  //     configure the cloud server and comes back, the visibilitychange
+  //     event fires; we re-arm the flag and the polling effect re-runs
+  //     once. If the backend STILL says unconfigured the polling effect
+  //     will flip the flag back to false immediately — no harm done.
+  //   * A custom ``opennvr:cloud-config-changed`` event. Any future cloud-
+  //     config UI can dispatch ``window.dispatchEvent(new CustomEvent(
+  //     'opennvr:cloud-config-changed'))`` immediately after a successful
+  //     save and the polling resumes without waiting for the next visible.
+  useEffect(() => {
+    if (!user?.is_superuser) return
+    if (cloudUploadConfigured) return  // already polling — nothing to re-arm
+
+    const rearm = () => setCloudUploadConfigured(true)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') rearm()
+    }
+
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('opennvr:cloud-config-changed', rearm)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('opennvr:cloud-config-changed', rearm)
+    }
+  }, [user?.is_superuser, cloudUploadConfigured])
+
   // Toggle camera expansion
   const toggleCamera = (cameraId: number) => {
     setExpandedCameras(prev => {
