@@ -524,17 +524,15 @@ async def process_local_inference(request: dict):
         uri = frame.get("uri") or ""
         params = dict(inp.get("params") or {})
 
-        # 2) Resolve opennvr://frames/... (or kavach://frames/...) to a
+        # 2) Resolve opennvr://frames/... to a
         #    local file KAI-C can read (core mounts shared_frames at
         #    FRAMES_DIR).
         frames_dir = os.getenv("FRAMES_DIR", "/app/AI-adapters/AIAdapters/frames")
         rel = uri
         if rel.startswith("opennvr://frames/"):
             rel = rel[len("opennvr://frames/"):]
-        elif rel.startswith("kavach://frames/"):
-            rel = rel[len("kavach://frames/"):]
         else:
-            rel = rel.replace("opennvr://", "").replace("kavach://", "")
+            rel = rel.replace("opennvr://", "")
         frame_path = os.path.join(frames_dir, rel)
 
         if not os.path.isfile(frame_path):
