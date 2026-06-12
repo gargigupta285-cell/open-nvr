@@ -533,7 +533,28 @@ async def process_local_inference(request: dict):
             rel = rel[len("opennvr://frames/"):]
         else:
             rel = rel.replace("opennvr://", "")
-        frame_path = os.path.join(frames_dir, rel)
+        # Resolve symlinks and normalize ``..`` segments before checking
+        # containment. Otherwise a frame URI like
+        # ``opennvr://frames/../../../etc/passwd`` would resolve to
+        # ``/app/AI-adapters/AIAdapters/frames/../../../etc/passwd`` —
+        # ``os.path.isfile`` accepts it, ``open()`` reads it, and we'd
+        # ship arbitrary host files to the adapter base64-encoded as if
+        # they were a camera frame. KAI-C is the security middleware in
+        # the architecture; URI inputs from a higher-trust caller (the
+        # backend) still get defense-in-depth path validation here.
+        frames_root = os.path.realpath(frames_dir)
+        frame_path = os.path.realpath(os.path.join(frames_dir, rel))
+        if not (
+            frame_path == frames_root
+            or frame_path.startswith(frames_root + os.sep)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "frame URI resolves outside the configured frames "
+                    "directory; rejecting"
+                ),
+            )
 
         if not os.path.isfile(frame_path):
             raise HTTPException(
