@@ -89,7 +89,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=python-builder /build/server-venv /app/server-venv
 COPY --from=python-builder /build/kai-c-venv /app/kai-c-venv
 
-
 # Set up Python path to use virtual environments
 ENV PATH="/app/server-venv/bin:$PATH"
 ENV VIRTUAL_ENV="/app/server-venv"
