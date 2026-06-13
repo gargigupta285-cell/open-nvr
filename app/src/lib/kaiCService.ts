@@ -147,8 +147,8 @@ class KaiCService {
       // Determine URI format
       let frameUri: string
       if (typeof request.stream_url === 'number') {
-        // Camera device ID - use kavach:// format
-        frameUri = `kavach://frames/camera_${request.stream_url}/latest.jpg`
+        // Camera device ID - use opennvr:// format
+        frameUri = `opennvr://frames/camera_${request.stream_url}/latest.jpg`
       } else if (request.stream_url.startsWith('rtsp://')) {
         // RTSP URL - send directly (adapter or backend needs to handle frame capture)
         frameUri = request.stream_url
@@ -156,7 +156,7 @@ class KaiCService {
         // HTTP URL - send directly
         frameUri = request.stream_url
       } else {
-        // Assume it's a file path or kavach:// URI
+        // Assume it's a file path or opennvr:// URI
         frameUri = request.stream_url
       }
 
