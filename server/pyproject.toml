@@ -23,7 +23,7 @@ dependencies = [
     "pyotp>=2.9.0",
     "requests>=2.32.0",
     "SQLAlchemy>=2.0.23",
-    "uvicorn>=0.24.0",
+    "uvicorn[standard]>=0.27.0",
     "WSDiscovery>=2.0.0",
 ]
 
