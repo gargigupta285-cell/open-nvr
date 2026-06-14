@@ -664,7 +664,7 @@ class MediaMtxAdminService:
         rtsp_url: str,
         enable_recording: bool = False,
         rtsp_transport: str = "tcp",
-        recording_segment_seconds: int = 300,
+        recording_segment_seconds: int = settings.recording_segment_seconds,
         recording_path: str | None = None,
         transport_security: str | None = None,
     ) -> dict[str, Any]:
