@@ -4,7 +4,7 @@
 
 ### Cameras are everywhere. Almost none of them are yours.
 
-OpenNVR is the self-hosted network video recorder for everyone who'd rather not give their camera footage — or the AI that watches it — to a vendor's cloud.
+OpenNVR™ is the open, sovereign video-recording platform for organizations that **can't** put their camera footage — or the AI that watches it — in a vendor's cloud. Air-gapped by default, governed AI on your own hardware, an audit trail you can hand to a regulator. From the homelab doorbell that never phones home to the air-gapped government site that legally cannot.
 
 [![CI](https://github.com/open-nvr/open-nvr/actions/workflows/ci.yml/badge.svg)](https://github.com/open-nvr/open-nvr/actions/workflows/ci.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
@@ -23,6 +23,8 @@ In 2016, a botnet called Mirai conscripted hundreds of thousands of IP cameras i
 
 The pattern keeps repeating because the architecture is wrong. Cameras are connected to vendor clouds. The vendor holds the keys. The vendor controls the AI. The vendor's breach is your breach. A decade after Mirai, the industry has not fixed itself.
 
+And now the rules have changed. Under NDAA §889 and the 2025–26 FCC enforcement, U.S. federal agencies, contractors, and a widening set of regulated buyers can no longer use cameras from the dominant vendors — forcing a rip-and-replace cycle in environments where cloud surveillance was never an option to begin with: defence, critical infrastructure, healthcare, schools, and government. They need a recording and AI layer they can run entirely on their own terms. That layer didn't exist as open infrastructure. OpenNVR is the bet that it should.
+
 OpenNVR is the bet that the alternative is open-source surveillance infrastructure built around four commitments: **cameras you connect, hardware you own, AI you author, audit logs you can show to a regulator.**
 
 The architecture is published — a peer-citable paper this year, 34 references, three-tier offline-first model, six categories of systemic IP-camera weakness it structurally eliminates ([DOI 10.5281/zenodo.17261761](https://doi.org/10.5281/zenodo.17261761)). This repo is the reference implementation.
@@ -33,7 +35,7 @@ The architecture is published — a peer-citable paper this year, 34 references,
 
 **It's auditable.** Every inference threads a correlation ID from the alert that fired, through the middleware that proxied it, to the model that made the call. Model weights are fingerprinted with sha256 and polled for drift. Cloud routes return HTTP 403 by default. The audit log answers *"why did this alert fire?"* without guesswork. Procurement-grade evidence in [`docs/COMPLIANCE.md`](docs/COMPLIANCE.md).
 
-**Its AI layer is open.** Any model behind a REST or WebSocket endpoint becomes a first-class capability through the AI Adapter Contract — a published wire spec. Object detection, license-plate OCR, face recognition, scene captioning, multi-object tracking, ASR, TTS, LLM tool-calling all ship out of the box. The SDK to write your own is Apache-2.0 and runs around thirty lines of Python.
+**Its AI layer is open.** Any model behind a REST or WebSocket endpoint becomes a first-class capability through the AI Adapter Contract — a published wire spec. Object detection, open-vocabulary detection, license-plate OCR, face recognition, scene captioning, multi-object tracking, ASR, TTS, LLM tool-calling all ship out of the box. The SDK to write your own is Apache-2.0 and runs around thirty lines of Python.
 
 **You can talk to it.** The included camera-agent is a voice loop — you ask out loud *"is there a person at the front door?"* and a local LLM answers grounded in a live frame from your camera, spoken back through Piper TTS. No cloud, no API keys.
 
@@ -126,6 +128,7 @@ Then open <http://localhost:9100/demo>, click Start, and speak.
 | *"Is anyone in the kitchen?"* | LLM calls YOLOv8 on the current frame |
 | *"Did anyone walk past in the last ten minutes?"* | LLM queries the inference event ring on NATS |
 | *"Who was at the door this morning?"* | LLM calls InsightFace against your enrolled face DB |
+| *"Did a red truck come by the dock earlier?"* | LLM searches the recorded-footage index (when a [`footage-search`](examples/footage-search) index is configured) |
 
 Under the hood: Pipecat pipeline · Silero VAD · Whisper STT · Ollama LLM with OpenAI-style tool-calling · Piper TTS. No cloud, no API keys.
 
@@ -177,30 +180,35 @@ app = AdapterApp(
 
 `uvicorn my_module:app --port 9100`, register the URL with KAI-C, and your adapter is online — hot-swappable, audit-chained, fingerprint-tracked. The SDK is Apache-2.0 so your adapter can ship under any compatible license, including proprietary or classified.
 
-Things developers are building today:
+What the contract makes straightforward to build (some already ship as examples):
 
+- **Natural-language footage search** — "find clips with a red truck at the dock yesterday" — ships today as the [`footage-search`](examples/footage-search) example, using scene captions plus the open-vocabulary [`vlm`](https://github.com/open-nvr/ai-adapter/tree/main/adapters/vlm) adapter.
 - **Tracker-stable alert deduplication** for warehouses ("don't fire 'person detected' sixty times for the same forklift driver walking past").
-- **Pose-based fall detection** for memory-care facilities, with rules a HIPAA-bound auditor signed off on.
-- **Semantic search across recorded footage** — "find clips with a red truck at night" — using a CLIP embedding adapter.
+- **Pose-based fall detection** for memory-care facilities (needs a pose adapter; on the roadmap).
 - **Site-specific PPE compliance** for construction with the false-positive threshold tuned to what the insurer will accept.
-- **Drone-detection** on perimeter cameras, with the classifier weights kept off the vendor cloud.
-- **Domain-specific NVRs** — cannabis dispensary compliance, school weapons detection, port cargo logging — built by forking an example and replacing the predicate.
+- **Domain-specific NVRs** — dispensary compliance, school weapons detection, port cargo logging — built by forking an example and replacing the predicate.
 
-Seven reference adapters and a one-command scaffold to start your own live in the sibling [ai-adapter](https://github.com/open-nvr/ai-adapter) repo. Full authoring walkthrough in the [SDK README](https://github.com/open-nvr/ai-adapter/blob/main/opennvr_adapter_sdk/README.md).
+Eight reference adapters and a one-command scaffold to start your own live in the sibling [ai-adapter](https://github.com/open-nvr/ai-adapter) repo. Full authoring walkthrough in the [SDK README](https://github.com/open-nvr/ai-adapter/blob/main/opennvr_adapter_sdk/README.md).
 
-## What ships out of the box
+## Applications ship on top of it
 
-| Example | What you'll build | Difficulty |
+Adapters are *capabilities*; applications are *solutions*. Each example below is a working application — adapter(s) + a pipeline + alert rules — that you install, point at a camera, and adapt. Replace the predicate (the zone check, the dwell timer, the plate watchlist) with your domain logic and you have a purpose-built NVR. This is the platform's direction: a catalog of installable applications, not a fixed feature set.
+
+| Application | What you'll build | Difficulty |
 |---|---|---|
 | [`intrusion-detection`](examples/intrusion-detection) | People in restricted zones during restricted hours | beginner |
 | [`loitering-detection`](examples/loitering-detection) | Dwell-time state machine on a NATS inference stream | intermediate |
+| [`occupancy-counting`](examples/occupancy-counting) | Zone occupancy with edge-triggered over/under alerts | intermediate |
+| [`line-crossing`](examples/line-crossing) | Directional tripwire / entry-exit counting (tracked) | intermediate |
+| [`abandoned-object`](examples/abandoned-object) | Unattended-item detection with owner-proximity suppression | advanced |
+| [`footage-search`](examples/footage-search) | Natural-language search over recorded inference ("red truck yesterday") | advanced |
 | [`license-plate-recognition`](examples/license-plate-recognition) | YOLOv8 + fast-plate-ocr chain with allowlists | intermediate |
 | [`smart-doorbell`](examples/smart-doorbell) | InsightFace recognition with REST enrollment | intermediate |
 | [`package-delivery`](examples/package-delivery) | Per-track state machine for arrival, linger, pickup | intermediate |
-| [`camera-agent`](examples/camera-agent) | The voice agent above | advanced |
+| [`camera-agent`](examples/camera-agent) | Voice agent that grounds answers in live camera feeds | advanced |
 | [`home-assistant-relay`](examples/home-assistant-relay) | Bridge alerts into Home Assistant via MQTT discovery | intermediate |
 
-Each example is a copy-as-template starting point. Replace the predicate — the zone check, the dwell timer, the plate watchlist — with your domain logic and you have a domain-specific NVR. Gallery walkthrough and the "drives inference vs subscribes to events" axis-grid in [`examples/README.md`](examples/README.md).
+Eleven of the thirteen shipped examples are listed above; [`inference-listener`](examples/inference-listener) and [`alerts-subscriber`](examples/alerts-subscriber) round out the set as minimal subscriber templates. Each application is a copy-as-template starting point. Gallery walkthrough and the "drives inference vs subscribes to events" axis-grid in [`examples/README.md`](examples/README.md). The roadmap for the application catalog — audio-event detection, tamper-evident incident export, and the vertical safety/security packs — is in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Community
 
@@ -216,9 +224,11 @@ Commercial deployments — deployment assistance, NDA adapter authoring, complia
 
 **Project** — [Roadmap](docs/ROADMAP.md) · [Support](docs/SUPPORT.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
 
-## License
+## License & trademark
 
 OpenNVR is **AGPLv3**. The [adapter SDK](https://github.com/open-nvr/ai-adapter/tree/main/opennvr_adapter_sdk) is **Apache-2.0**, so adapters you write can ship under any compatible license — including proprietary or classified for the organisations where that matters.
+
+"OpenNVR" and the OpenNVR logo are trademarks of the project. You may use them to refer to the project and to describe software as "compatible with OpenNVR," but redistribution of modified versions under the OpenNVR name requires permission. See [`TRADEMARK.md`](TRADEMARK.md).
 
 ---
 

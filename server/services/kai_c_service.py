@@ -22,6 +22,7 @@ which then forwards requests to AI Adapter servers.
 """
 
 import asyncio
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -31,6 +32,27 @@ from urllib.parse import quote as urlquote
 import httpx
 
 from core.logging_config import main_logger
+from services.adapter_contract import build_infer_payload, flatten_infer_response
+from services.frame_capture import PersistentCapturePool
+
+# Frame-transport mode for the live inference loop.
+#   "governed" → AI Adapter Contract v1 over KAI-C's governed
+#               /api/v1/infer/{adapter} surface: persistent-pool JPEG
+#               bytes, base64 in the body (+ camera_id + internal key).
+#               KAI-C applies sovereignty/fingerprint governance AND
+#               publishes the result on NATS, so subscriber example apps
+#               see the server's own camera inference. Requires the
+#               adapter to be registered in KAI-C's v1 registry.
+#   "v1" (default) → same contract body, but POSTed to the legacy
+#               /infer/local passthrough (no NATS/governance). Safe when
+#               the v1 registry isn't configured. Works with SDK
+#               adapters (yolov8, blip, vlm, …); no shared volume.
+#   "legacy"  → original behaviour: write latest.jpg, send an
+#               opennvr:// file URI, expect a flat response. Only works
+#               with the in-tree app/ adapters over a shared volume.
+# Default to v1 (contract-correct + safe). Set "governed" once adapters
+# are registered to get NATS fan-out + governance from server inference.
+_ADAPTER_CONTRACT_MODE = os.environ.get("OPENNVR_ADAPTER_CONTRACT", "v1").strip().lower()
 
 try:
     import cv2
@@ -67,6 +89,13 @@ class KaiCService:
 
         # Thread pool for blocking operations (RTSP capture)
         self.executor = ThreadPoolExecutor(max_workers=10)
+
+        # Persistent per-camera RTSP capture pool. Keeps one capture open
+        # per camera instead of reconnecting every frame, and returns
+        # JPEG bytes in memory (no latest.jpg disk round-trip). Used by
+        # the v1 contract path; the legacy URI path still uses
+        # _capture_frame_sync for back-compat.
+        self._capture_pool = PersistentCapturePool()
 
         # Async HTTP client for non-blocking requests
         self.http_client = httpx.AsyncClient(timeout=30.0)
@@ -288,6 +317,43 @@ class KaiCService:
             self._inference_jwt_invalidated_at = time.monotonic()
         return result
 
+    def _internal_api_key(self) -> str:
+        """The shared secret KAI-C's governed ``/api/v1/*`` surface
+        requires in the ``X-Internal-Api-Key`` header. Read lazily from
+        settings (empty string in dev/single-host loopback, where KAI-C
+        treats the key as optional)."""
+        try:
+            from core.config import settings
+            return settings.internal_api_key or ""
+        except Exception:
+            import os
+            return os.environ.get("INTERNAL_API_KEY", "")
+
+    async def capture_frame_bytes(
+        self, rtsp_url: str, camera_id: int
+    ) -> bytes | None:
+        """Capture the latest frame as JPEG bytes via the persistent
+        capture pool — the v1 contract path. Same MediaMTX-tap URL
+        resolution and stale-JWT self-heal as ``capture_frame_from_rtsp``,
+        but it keeps the RTSP session open across frames and returns bytes
+        in memory instead of writing ``latest.jpg`` and returning a URI.
+        """
+        capture_url = self._resolve_inference_rtsp_url(camera_id, rtsp_url)
+        tap_was_used = capture_url != rtsp_url
+        loop = asyncio.get_event_loop()
+        jpeg = await loop.run_in_executor(
+            self.executor, self._capture_pool.get_jpeg, camera_id, capture_url
+        )
+        if jpeg is None and tap_was_used:
+            # Same self-heal rationale as capture_frame_from_rtsp: a
+            # rejected/rotated MediaMTX token surfaces here as a capture
+            # failure, so drop the cached JWT to re-mint next cycle. The
+            # pool will reopen the capture with the fresh ?jwt= URL.
+            self._inference_jwt = None
+            self._inference_jwt_expires_at = 0.0
+            self._inference_jwt_invalidated_at = time.monotonic()
+        return jpeg
+
     # JWT cache TTL knobs — the token MediaMtxJwtService mints has the
     # lifetime below; we refresh 10 minutes before that boundary to
     # leave margin for clock skew between processes and avoid a flurry
@@ -484,43 +550,80 @@ class KaiCService:
             Inference result via KAI-C
         """
         try:
-            # capture_frame_from_rtsp internally swaps to MediaMTX's
-            # loopback path when the tap is enabled (the local-edge
-            # default) — see _resolve_inference_rtsp_url for the
-            # rationale. The ``rtsp_url`` we pass here is the fallback
-            # for the disabled-tap case.
-            frame_uri = await self.capture_frame_from_rtsp(rtsp_url, camera_id)
-            if not frame_uri:
-                return {
-                    "status": "error",
-                    "message": "Failed to capture frame from RTSP stream",
+            # Three transports (see _ADAPTER_CONTRACT_MODE). All swap to
+            # the MediaMTX loopback tap when enabled (the local-edge
+            # default) — see _resolve_inference_rtsp_url.
+            #
+            #  governed: persistent-pool JPEG bytes → contract-v1 body
+            #    (+ camera_id) → POST /api/v1/infer/{model} with the
+            #    internal key. KAI-C applies sovereignty/fingerprint
+            #    governance AND publishes the result on NATS, so the
+            #    subscriber example apps (occupancy / loitering /
+            #    line-crossing / abandoned-object / footage-search) see
+            #    the server's own camera inference without a separate
+            #    producer app running. Returns the adapter body directly.
+            #
+            #  v1 (default): same contract body → POST /infer/local
+            #    (legacy passthrough; no NATS/governance). Safe when the
+            #    v1 registry isn't configured. Returns {status, response}.
+            #
+            #  legacy: write latest.jpg, send an opennvr:// file URI to
+            #    /infer/local. Only the in-tree app/ adapters understand
+            #    this, and it needs a shared frames volume.
+            if _ADAPTER_CONTRACT_MODE == "legacy":
+                frame_uri = await self.capture_frame_from_rtsp(rtsp_url, camera_id)
+                if not frame_uri:
+                    return {
+                        "status": "error",
+                        "message": "Failed to capture frame from RTSP stream",
+                    }
+                payload = {
+                    "task": task,
+                    "input": {"frame": {"uri": frame_uri}, "params": options or {}},
                 }
+                endpoint = f"{self.kai_c_url}/infer/local"
+                headers = {"Content-Type": "application/json", "Accept": "application/json"}
+                response_wrapped = True
+                main_logger.debug(
+                    "inference (legacy URI): camera=%s task=%s frame=%s",
+                    camera_id, task, frame_uri,
+                )
+            else:
+                jpeg = await self.capture_frame_bytes(rtsp_url, camera_id)
+                if not jpeg:
+                    return {
+                        "status": "error",
+                        "message": "Failed to capture frame from RTSP stream",
+                    }
+                if _ADAPTER_CONTRACT_MODE == "governed":
+                    # camera_id is read by KAI-C's v1 route for the NATS
+                    # subject + audit; thread it through as a string so
+                    # subscriber subjects line up.
+                    params = dict(options or {})
+                    params["camera_id"] = str(camera_id)
+                    payload = build_infer_payload(task=task, jpeg_bytes=jpeg, params=params)
+                    endpoint = f"{self.kai_c_url}/api/v1/infer/{model_name}"
+                    headers = {
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                        "X-Internal-Api-Key": self._internal_api_key(),
+                    }
+                    response_wrapped = False
+                else:
+                    payload = build_infer_payload(
+                        task=task, jpeg_bytes=jpeg, params=options or {},
+                    )
+                    endpoint = f"{self.kai_c_url}/infer/local"
+                    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+                    response_wrapped = True
+                main_logger.debug(
+                    "inference (%s): camera=%s task=%s frame_bytes=%d",
+                    _ADAPTER_CONTRACT_MODE, camera_id, task, len(jpeg),
+                )
 
-            # Prepare payload for AI Adapters (correct format)
-            payload = {
-                "task": task,
-                "input": {
-                    "frame": {
-                        "uri": frame_uri
-                    },
-                    "params": options or{}
-                }
-            }
-
-            main_logger.info(
-                f"Sending inference request to AI Adapters: camera={camera_id}, task={task}, frame={frame_uri}"
-            )
-
-            # Send async HTTP POST request to KAI-C service
-            # KAI-C will forward to AI Adapter
-            response = await self.http_client.post(
-                f"{self.kai_c_url}/infer/local",
-                json=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
-            )
+            # Send async HTTP POST request to KAI-C, which forwards to the
+            # AI Adapter.
+            response = await self.http_client.post(endpoint, json=payload, headers=headers)
 
             if response.status_code != 200:
                 error_text = response.text
@@ -532,20 +635,31 @@ class KaiCService:
 
             result = response.json()
 
-            # Check if KAI-C returned an error
-            if result.get("status") == "error":
+            # The legacy /infer/local wraps the adapter body in
+            # {status, response}; the governed v1 route returns the
+            # adapter body directly. Unwrap accordingly.
+            if response_wrapped and isinstance(result, dict) and result.get("status") == "error":
                 return {
                     "status": "error",
                     "message": result.get("message", "Unknown error from KAI-C"),
                 }
+            adapter_response = result.get("response", result) if response_wrapped else result
 
-            # Return standardized response
+            # Translate the adapter's response. Under the contract the
+            # adapter returns a structured ``{"result": {...}}`` body;
+            # flatten_infer_response bridges it to the flat shape the
+            # inference loop persists (label / confidence / bbox / count /
+            # caption / latency_ms). It passes a legacy flat response
+            # through unchanged, so a mixed deployment still works.
+            if _ADAPTER_CONTRACT_MODE != "legacy" and isinstance(adapter_response, dict):
+                adapter_response = flatten_infer_response(adapter_response)
+
             return {
                 "status": "success",
                 "camera_id": camera_id,
                 "model_used": result.get("model_used", model_name),
                 "task": task,
-                "response": result.get("response", result),
+                "response": adapter_response,
             }
 
         except httpx.RequestError as e:

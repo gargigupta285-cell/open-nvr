@@ -36,6 +36,7 @@ from schemas import (
 )
 from services.audit_service import write_audit_log
 from services.camera_config_service import CameraConfigService
+from core.logging_config import main_logger
 
 router = APIRouter(prefix="/camera-config", tags=["camera-config"])
 
@@ -63,7 +64,13 @@ async def create_config(
             user_agent=request.headers.get("user-agent") if request else None,
         )
     except Exception:
-        pass
+        # §8.6 (SECURITY_ARCHITECTURE.md): a state-changing route must record
+        # an audit entry. We must not let an audit-write failure fail the
+        # operation, but swallowing it silently breaks the audit guarantee —
+        # surface it at ERROR so the failure is at least visible/alertable.
+        main_logger.error(
+            "audit-log write failed for camera_config route", exc_info=True
+        )
     return cfg
 
 
@@ -94,7 +101,13 @@ async def update_config(
             user_agent=request.headers.get("user-agent") if request else None,
         )
     except Exception:
-        pass
+        # §8.6 (SECURITY_ARCHITECTURE.md): a state-changing route must record
+        # an audit entry. We must not let an audit-write failure fail the
+        # operation, but swallowing it silently breaks the audit guarantee —
+        # surface it at ERROR so the failure is at least visible/alertable.
+        main_logger.error(
+            "audit-log write failed for camera_config route", exc_info=True
+        )
     return cfg
 
 
@@ -130,7 +143,13 @@ async def provision(
             user_agent=request.headers.get("user-agent") if request else None,
         )
     except Exception:
-        pass
+        # §8.6 (SECURITY_ARCHITECTURE.md): a state-changing route must record
+        # an audit entry. We must not let an audit-write failure fail the
+        # operation, but swallowing it silently breaks the audit guarantee —
+        # surface it at ERROR so the failure is at least visible/alertable.
+        main_logger.error(
+            "audit-log write failed for camera_config route", exc_info=True
+        )
     return ProvisionResult(
         camera_id=camera_id,
         path=result.get("path"),
@@ -159,7 +178,13 @@ async def unprovision(
             user_agent=request.headers.get("user-agent") if request else None,
         )
     except Exception:
-        pass
+        # §8.6 (SECURITY_ARCHITECTURE.md): a state-changing route must record
+        # an audit entry. We must not let an audit-write failure fail the
+        # operation, but swallowing it silently breaks the audit guarantee —
+        # surface it at ERROR so the failure is at least visible/alertable.
+        main_logger.error(
+            "audit-log write failed for camera_config route", exc_info=True
+        )
     return ProvisionResult(
         camera_id=camera_id,
         path=result.get("path"),
