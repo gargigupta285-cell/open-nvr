@@ -635,12 +635,10 @@ async def logout(
 async def read_users_me(current_user: User = Depends(get_current_active_user)):
     """Get current user information."""
     try:
-        print(f"DEBUG: /me endpoint called, user: {current_user.username}")
+        auth_logger.debug("/me endpoint called for user_id=%s", current_user.id)
         return current_user
-    except Exception as e:
-        print(f"ERROR in /me endpoint: {e}")
-        print(f"ERROR type: {type(e)}")
-        import traceback
-
-        traceback.print_exc()
+    except Exception:
+        # Don't print() to stdout (pollutes the audit/stdout stream and can
+        # leak detail); log at ERROR with a stack trace via the logger.
+        auth_logger.error("error in /me endpoint", exc_info=True)
         raise

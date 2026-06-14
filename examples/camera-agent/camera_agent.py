@@ -88,6 +88,13 @@ class AppConfig:
     nats_inference_url: str | None = None
     nats_inference_token: str | None = None
 
+    # Optional path to the footage-search SQLite index. When set and the
+    # file exists, the agent gains a ``search_footage`` tool that answers
+    # natural-language questions about the recorded past ("did a red
+    # truck come by earlier?"). Build the index with the footage-search
+    # example's ``index`` subcommand.
+    footage_index_path: str | None = None
+
     # HTTP listen address.
     host: str = "127.0.0.1"
     port: int = 9100
@@ -167,6 +174,7 @@ def load_config(path: str | Path) -> AppConfig:
         event_ring_size=_int("event_ring_size", 256),
         nats_inference_url=raw.get("nats_inference_url"),
         nats_inference_token=raw.get("nats_inference_token"),
+        footage_index_path=raw.get("footage_index_path"),
         host=_str("host", "127.0.0.1"),
         port=_int("port", 9100),
         system_prompt=str(raw.get("system_prompt") or _DEFAULT_SYSTEM_PROMPT),
@@ -220,11 +228,32 @@ class CameraAgentRuntime:
             adapter_name=cfg.recognition_adapter,
         )
 
+        # Optional read-only footage-search index → enables search_footage.
+        self.footage_index = None
+        if cfg.footage_index_path:
+            from footage_index import FootageIndex
+
+            self.footage_index = FootageIndex(cfg.footage_index_path)
+            if self.footage_index.available:
+                logger.info(
+                    "camera-agent: footage index loaded from %s; "
+                    "search_footage tool enabled",
+                    cfg.footage_index_path,
+                )
+            else:
+                logger.info(
+                    "camera-agent: footage_index_path set (%s) but the index "
+                    "isn't readable yet; search_footage will report it's "
+                    "unavailable until the footage-search indexer has run",
+                    cfg.footage_index_path,
+                )
+
         self.tools = CameraTools(
             context=self.context,
             caption_client=self.caption_client,
             detection_client=self.detection_client,
             recognition_client=self.recognition_client,
+            footage_index=self.footage_index,
         )
         self.tool_definitions = build_tool_definitions(
             [cam.camera_id for cam in cfg.cameras]
@@ -233,6 +262,7 @@ class CameraAgentRuntime:
             "describe_camera": self.tools.describe_camera,
             "detect_objects": self.tools.detect_objects,
             "recognize_faces": self.tools.recognize_faces,
+            "search_footage": self.tools.search_footage,
             "recent_events": self.tools.recent_events,
         }
 

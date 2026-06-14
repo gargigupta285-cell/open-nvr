@@ -225,10 +225,15 @@ async def run_inference(
 
                 db.add(detection_result)
                 db.commit()
-            except Exception as e:
-                # Don't fail inference if db save fails
+            except Exception:
+                # Don't fail inference if db save fails. Log via the logger
+                # rather than print() to stdout (avoids polluting the
+                # audit/stdout stream and leaking error detail).
                 db.rollback()
-                print(f"Failed to save detection result to database: {e}")
+                from core.logging_config import main_logger
+                main_logger.error(
+                    "failed to save detection result to database", exc_info=True
+                )
 
         # Log inference request
         try:

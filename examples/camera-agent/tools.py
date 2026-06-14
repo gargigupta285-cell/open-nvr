@@ -114,6 +114,51 @@ def build_tool_definitions(cameras: list[str]) -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "search_footage",
+                "description": (
+                    "Search the recorded-footage index for past events "
+                    "matching a description. Use when the user asks about "
+                    "the past with specific attributes the live tools "
+                    "can't answer — 'did a red truck come by the dock "
+                    "earlier?', 'was anyone in a yellow jacket here this "
+                    "morning?'. You break the request into keywords "
+                    "(object types AND descriptors like colours/clothing); "
+                    "the index matches them against detected objects and "
+                    "scene captions. Returns matching moments newest-first."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "keywords": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "The descriptive words to match, e.g. "
+                                "['red', 'truck'] or ['yellow', 'jacket']. "
+                                "Include both the object and its attributes."
+                            ),
+                        },
+                        "within_minutes": {
+                            "type": "number",
+                            "description": (
+                                "Only search this many minutes back. "
+                                "Omit for no time limit. 'earlier today' "
+                                "≈ 720, 'in the last hour' = 60."
+                            ),
+                        },
+                        "camera_id": {
+                            "type": "string",
+                            "enum": camera_enum + ["__any__"],
+                            "description": "Filter to one camera or '__any__'.",
+                        },
+                    },
+                    "required": ["keywords"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "recent_events",
                 "description": (
                     "Look back at recent inference events on the "
@@ -166,11 +211,15 @@ class CameraTools:
         caption_client: KaicAdapterClient,
         detection_client: KaicAdapterClient,
         recognition_client: KaicAdapterClient,
+        footage_index: Any = None,
     ) -> None:
         self._ctx = context
         self._caption = caption_client
         self._detect = detection_client
         self._recognise = recognition_client
+        # Optional read-only FootageIndex (footage_index.FootageIndex).
+        # When None or unavailable, search_footage reports that cleanly.
+        self._footage_index = footage_index
 
     # ── describe_camera ────────────────────────────────────────────
 
@@ -305,6 +354,69 @@ class CameraTools:
             for e in events[:6]
         ]
         return "Recent events:\n" + "\n".join(lines)
+
+    # ── search_footage ─────────────────────────────────────────────
+
+    async def search_footage(self, args: dict[str, Any]) -> str:
+        if self._footage_index is None or not getattr(
+            self._footage_index, "available", False
+        ):
+            return (
+                "Footage search isn't available — the footage-search index "
+                "is not configured or hasn't been built yet."
+            )
+        keywords = args.get("keywords")
+        if isinstance(keywords, str):
+            keywords = [keywords]
+        if not isinstance(keywords, list) or not keywords:
+            return "ERROR: search_footage needs a 'keywords' list, e.g. ['red', 'truck']."
+        keywords = [str(k).strip() for k in keywords if str(k).strip()]
+        if not keywords:
+            return "ERROR: no usable keywords provided."
+
+        within_minutes: float | None
+        raw_within = args.get("within_minutes")
+        if raw_within in (None, ""):
+            within_minutes = None
+        else:
+            try:
+                within_minutes = float(raw_within)
+            except (TypeError, ValueError):
+                return "ERROR: within_minutes must be a number of minutes."
+
+        camera_arg = args.get("camera_id")
+        camera_id: str | None
+        if camera_arg in (None, "", "__any__"):
+            camera_id = None
+        elif isinstance(camera_arg, str) and self._ctx.known_camera(camera_arg):
+            camera_id = camera_arg
+        else:
+            return (
+                f"ERROR: unknown camera_id {camera_arg!r}. Use one of "
+                f"{sorted(c.camera_id for c in self._ctx.cameras)} or '__any__'."
+            )
+
+        try:
+            hits = self._footage_index.search(
+                keywords=keywords, within_minutes=within_minutes,
+                camera_id=camera_id,
+            )
+        except Exception:
+            logger.exception("search_footage: index query failed")
+            return "Footage search failed."
+
+        if not hits:
+            phrase = " ".join(keywords)
+            return f"No recorded footage matched {phrase!r}."
+
+        import time as _time
+        now = _time.time()
+        lines = []
+        for h in hits:
+            mins = max(0, int((now - h.ts) / 60))
+            descr = h.caption or (" ".join(h.labels) or "match")
+            lines.append(f"{mins} min ago on {h.camera_id}: {descr}")
+        return "Found in recorded footage:\n" + "\n".join(lines)
 
     # ── Helpers ────────────────────────────────────────────────────
 

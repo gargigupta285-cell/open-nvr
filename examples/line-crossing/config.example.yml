@@ -1,0 +1,71 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Line-crossing (tripwire) example app — config template.
+#
+# Copy this file to ``config.yml``, fill in the values, and run:
+#
+#   python line_crossing.py --config config.yml
+
+# ── NATS endpoint (KAI-C's event bus) ──────────────────────────────
+nats_url: "nats://nats:4222"
+# nats_url: "nats://127.0.0.1:4222"   # bare-metal / host-mode
+nats_token: null
+
+# IMPORTANT: line-crossing needs per-object identity. Subscribe to a
+# stream whose detections carry a ``track_id`` — chain the ``bytetrack``
+# adapter after your detector, or use a detector that tracks natively.
+# Narrow the subject to that tracked stream if you can:
+subject_pattern: "opennvr.inference.>"
+
+# ── What to count ─────────────────────────────────────────────────
+watch_labels:
+  - "person"
+
+# ── Track memory ──────────────────────────────────────────────────
+#
+# track_ttl_seconds: forget a track this long after its last sighting.
+#   Keeps the per-track map bounded in busy scenes. 30s suits walking
+#   speeds at 1-5 fps inference; lower it for high-throughput gates.
+track_ttl_seconds: 30
+
+# ── Webhook (optional) ────────────────────────────────────────────
+webhook_url: null
+
+# ── NATS alert fan-out (optional) ─────────────────────────────────
+# Publishes alerts to opennvr.alerts.app.line-crossing.{camera_id}
+nats_alerts_url: null
+nats_alerts_token: null
+
+# ── Cameras / tripwires ───────────────────────────────────────────
+#
+# One entry per camera × tripwire. Each needs:
+#   camera_id      — must match KAI-C's camera_id in event subjects.
+#   frame_width / frame_height — pixel dimensions (normalized-bbox math).
+#   wire_name      — human label shown in alerts.
+#   line.a / line.b — the two endpoints of the tripwire, in pixel
+#                     coords [x, y]. Orientation A→B defines direction.
+#   line.count_direction — "a_to_b", "b_to_a", or "both".
+#
+# Direction convention: an object starting on the LEFT of the A→B
+# vector and ending on the right is "a_to_b"; the reverse is "b_to_a".
+# If you're unsure which way is which, run with count_direction: both,
+# watch the alerts' ``direction`` field, then pin it down.
+cameras:
+  - camera_id: "cam-perimeter"
+    frame_width: 1920
+    frame_height: 1080
+    wire_name: "fence-line"
+    line:
+      a: [200, 540]
+      b: [1720, 540]
+      count_direction: "both"     # any crossing of the fence line
+
+  - camera_id: "cam-entrance"
+    frame_width: 1920
+    frame_height: 1080
+    wire_name: "front-door"
+    line:
+      a: [960, 200]
+      b: [960, 880]
+      count_direction: "a_to_b"   # count only entries, not exits

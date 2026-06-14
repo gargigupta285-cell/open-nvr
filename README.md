@@ -35,7 +35,7 @@ The architecture is published — a peer-citable paper this year, 34 references,
 
 **It's auditable.** Every inference threads a correlation ID from the alert that fired, through the middleware that proxied it, to the model that made the call. Model weights are fingerprinted with sha256 and polled for drift. Cloud routes return HTTP 403 by default. The audit log answers *"why did this alert fire?"* without guesswork. Procurement-grade evidence in [`docs/COMPLIANCE.md`](docs/COMPLIANCE.md).
 
-**Its AI layer is open.** Any model behind a REST or WebSocket endpoint becomes a first-class capability through the AI Adapter Contract — a published wire spec. Object detection, license-plate OCR, face recognition, scene captioning, multi-object tracking, ASR, TTS, LLM tool-calling all ship out of the box. The SDK to write your own is Apache-2.0 and runs around thirty lines of Python.
+**Its AI layer is open.** Any model behind a REST or WebSocket endpoint becomes a first-class capability through the AI Adapter Contract — a published wire spec. Object detection, open-vocabulary detection, license-plate OCR, face recognition, scene captioning, multi-object tracking, ASR, TTS, LLM tool-calling all ship out of the box. The SDK to write your own is Apache-2.0 and runs around thirty lines of Python.
 
 **You can talk to it.** The included camera-agent is a voice loop — you ask out loud *"is there a person at the front door?"* and a local LLM answers grounded in a live frame from your camera, spoken back through Piper TTS. No cloud, no API keys.
 
@@ -128,6 +128,7 @@ Then open <http://localhost:9100/demo>, click Start, and speak.
 | *"Is anyone in the kitchen?"* | LLM calls YOLOv8 on the current frame |
 | *"Did anyone walk past in the last ten minutes?"* | LLM queries the inference event ring on NATS |
 | *"Who was at the door this morning?"* | LLM calls InsightFace against your enrolled face DB |
+| *"Did a red truck come by the dock earlier?"* | LLM searches the recorded-footage index (when a [`footage-search`](examples/footage-search) index is configured) |
 
 Under the hood: Pipecat pipeline · Silero VAD · Whisper STT · Ollama LLM with OpenAI-style tool-calling · Piper TTS. No cloud, no API keys.
 
@@ -179,16 +180,15 @@ app = AdapterApp(
 
 `uvicorn my_module:app --port 9100`, register the URL with KAI-C, and your adapter is online — hot-swappable, audit-chained, fingerprint-tracked. The SDK is Apache-2.0 so your adapter can ship under any compatible license, including proprietary or classified.
 
-Things developers are building today:
+What the contract makes straightforward to build (some already ship as examples):
 
+- **Natural-language footage search** — "find clips with a red truck at the dock yesterday" — ships today as the [`footage-search`](examples/footage-search) example, using scene captions plus the open-vocabulary [`vlm`](https://github.com/open-nvr/ai-adapter/tree/main/adapters/vlm) adapter.
 - **Tracker-stable alert deduplication** for warehouses ("don't fire 'person detected' sixty times for the same forklift driver walking past").
-- **Pose-based fall detection** for memory-care facilities, with rules a HIPAA-bound auditor signed off on.
-- **Semantic search across recorded footage** — "find clips with a red truck at night" — using a CLIP embedding adapter.
+- **Pose-based fall detection** for memory-care facilities (needs a pose adapter; on the roadmap).
 - **Site-specific PPE compliance** for construction with the false-positive threshold tuned to what the insurer will accept.
-- **Drone-detection** on perimeter cameras, with the classifier weights kept off the vendor cloud.
-- **Domain-specific NVRs** — cannabis dispensary compliance, school weapons detection, port cargo logging — built by forking an example and replacing the predicate.
+- **Domain-specific NVRs** — dispensary compliance, school weapons detection, port cargo logging — built by forking an example and replacing the predicate.
 
-Seven reference adapters and a one-command scaffold to start your own live in the sibling [ai-adapter](https://github.com/open-nvr/ai-adapter) repo. Full authoring walkthrough in the [SDK README](https://github.com/open-nvr/ai-adapter/blob/main/opennvr_adapter_sdk/README.md).
+Eight reference adapters and a one-command scaffold to start your own live in the sibling [ai-adapter](https://github.com/open-nvr/ai-adapter) repo. Full authoring walkthrough in the [SDK README](https://github.com/open-nvr/ai-adapter/blob/main/opennvr_adapter_sdk/README.md).
 
 ## Applications ship on top of it
 
@@ -198,13 +198,17 @@ Adapters are *capabilities*; applications are *solutions*. Each example below is
 |---|---|---|
 | [`intrusion-detection`](examples/intrusion-detection) | People in restricted zones during restricted hours | beginner |
 | [`loitering-detection`](examples/loitering-detection) | Dwell-time state machine on a NATS inference stream | intermediate |
+| [`occupancy-counting`](examples/occupancy-counting) | Zone occupancy with edge-triggered over/under alerts | intermediate |
+| [`line-crossing`](examples/line-crossing) | Directional tripwire / entry-exit counting (tracked) | intermediate |
+| [`abandoned-object`](examples/abandoned-object) | Unattended-item detection with owner-proximity suppression | advanced |
+| [`footage-search`](examples/footage-search) | Natural-language search over recorded inference ("red truck yesterday") | advanced |
 | [`license-plate-recognition`](examples/license-plate-recognition) | YOLOv8 + fast-plate-ocr chain with allowlists | intermediate |
 | [`smart-doorbell`](examples/smart-doorbell) | InsightFace recognition with REST enrollment | intermediate |
 | [`package-delivery`](examples/package-delivery) | Per-track state machine for arrival, linger, pickup | intermediate |
-| [`camera-agent`](examples/camera-agent) | The voice agent above | advanced |
+| [`camera-agent`](examples/camera-agent) | Voice agent that grounds answers in live camera feeds | advanced |
 | [`home-assistant-relay`](examples/home-assistant-relay) | Bridge alerts into Home Assistant via MQTT discovery | intermediate |
 
-Each application is a copy-as-template starting point. Gallery walkthrough and the "drives inference vs subscribes to events" axis-grid in [`examples/README.md`](examples/README.md). The roadmap for the application catalog — natural-language footage search, audio-event detection, tamper-evident incident export, and the vertical safety/security packs — is in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+Eleven of the thirteen shipped examples are listed above; [`inference-listener`](examples/inference-listener) and [`alerts-subscriber`](examples/alerts-subscriber) round out the set as minimal subscriber templates. Each application is a copy-as-template starting point. Gallery walkthrough and the "drives inference vs subscribes to events" axis-grid in [`examples/README.md`](examples/README.md). The roadmap for the application catalog — audio-event detection, tamper-evident incident export, and the vertical safety/security packs — is in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Community
 

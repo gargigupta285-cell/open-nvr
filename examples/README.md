@@ -4,7 +4,7 @@ Every example here is a **copy-as-template** starting point — minimal, readabl
 and opinionated. Pick one that's close to what you want to build, copy the
 folder, and edit the predicate.
 
-The nine shipped examples cover two orthogonal axes of the OpenNVR pipeline:
+The thirteen shipped examples cover two orthogonal axes of the OpenNVR pipeline:
 *driving* inference vs *subscribing* to it, and *inference events* vs *alerts*.
 
 ```
@@ -14,7 +14,10 @@ The nine shipped examples cover two orthogonal axes of the OpenNVR pipeline:
                   ┌─────────────────────────┬──────────────────────┐
   Subscribes to   │                         │ inference-listener   │
   inference       │                         │ loitering-detection  │
-  events          │                         │                      │
+  events          │                         │ occupancy-counting   │
+                  │                         │ line-crossing        │
+                  │                         │ abandoned-object     │
+                  │                         │ footage-search       │
                   ├─────────────────────────┼──────────────────────┤
   Subscribes to   │ intrusion-detection¹    │ alerts-subscriber    │
   alert envelopes │ license-plate-          │ camera-agent²        │
@@ -78,6 +81,107 @@ already running.
 cd examples/loitering-detection && uv sync --extra dev
 cp config.example.yml config.yml      # edit threshold seconds, zones
 python loitering_detection.py --config config.yml
+```
+
+---
+
+### [`occupancy-counting/`](occupancy-counting)
+
+**Count people (or vehicles) in a zone; alert when it's too crowded — or
+too empty.** Rides the same NATS inference stream as loitering-detection
+and counts in-zone detections per frame, firing an *edge-triggered* alert
+on band transitions (`over` / `under` / back-to-`normal`) so a crowded
+room emits one alert, not one per frame. Per-camera thresholds, debounce,
+optional under-occupancy for posts that must stay staffed.
+
+| | |
+|---|---|
+| Pattern | Subscribes to NATS inference events → fires alerts |
+| Adapter | (rides upstream's YOLOv8 — no direct adapter call) |
+| Difficulty | ⭐⭐ intermediate |
+| Best for learning | Edge-triggered state machines, zone counting, threshold debounce |
+| Tests | 7 |
+
+```bash
+cd examples/occupancy-counting && uv sync --extra dev
+cp config.example.yml config.yml      # edit zones + max/min occupancy
+python occupancy_counting.py --config config.yml
+```
+
+---
+
+### [`line-crossing/`](line-crossing)
+
+**Alert when a tracked person or vehicle crosses a line in a chosen
+direction.** Perimeter tripwire, directional entry/exit counter, one-way
+corridor. Needs a *tracked* stream (`track_id` on detections — chain the
+`bytetrack` adapter) so it knows the same object moved across the wire.
+Directional segment-crossing geometry with `a_to_b` / `b_to_a` / `both`.
+
+| | |
+|---|---|
+| Pattern | Subscribes to NATS inference events (tracked) → fires alerts |
+| Adapter | (rides upstream's detector + `bytetrack` — no direct call) |
+| Difficulty | ⭐⭐ intermediate |
+| Best for learning | Per-track state, directional segment-crossing geometry |
+| Tests | 8 |
+
+```bash
+cd examples/line-crossing && uv sync --extra dev
+cp config.example.yml config.yml      # edit line endpoints + direction
+python line_crossing.py --config config.yml
+```
+
+---
+
+### [`abandoned-object/`](abandoned-object)
+
+**Alert when a bag, suitcase, or box is left stationary and unattended.**
+The "unattended baggage" primitive for transport hubs and lobbies. Tracks
+stationary watched-objects in a zone and fires when one is unattended past
+a dwell threshold — with **person-proximity suppression** so a bag next to
+its owner doesn't alert. Needs a tracked stream (`bytetrack`).
+
+| | |
+|---|---|
+| Pattern | Subscribes to NATS inference events (tracked) → fires alerts |
+| Adapter | (rides upstream's detector + `bytetrack` — no direct call) |
+| Difficulty | ⭐⭐⭐ advanced |
+| Best for learning | Multi-track state, spatial proximity suppression, anchor/dwell logic |
+| Tests | 6 |
+
+```bash
+cd examples/abandoned-object && uv sync --extra dev
+cp config.example.yml config.yml      # edit zone, object labels, thresholds
+python abandoned_object.py --config config.yml
+```
+
+---
+
+### [`footage-search/`](footage-search)
+
+**Search recorded footage in plain language — "every red truck at the dock
+yesterday."** An indexer subscribes to detector + captioner events into a
+local SQLite index; a `search` CLI parses a natural-language query into
+labels + descriptor keywords + time window + camera and returns matching
+moments, each with the `correlation_id` for the recorded segment. Works on
+existing adapters (object class from the detector, "red" from BLIP
+captions); point it at the `vlm` adapter for precise attributes. Optional
+local-Ollama query parsing. No cloud, no API keys.
+
+| | |
+|---|---|
+| Pattern | Indexer subscribes to NATS → SQLite; CLI natural-language search |
+| Adapters | (rides upstream's detector + a captioner/VLM — no direct call) |
+| Difficulty | ⭐⭐⭐ advanced |
+| Best for learning | Building a searchable index off the event bus, NL→filter parsing |
+| Tests | 6 |
+
+```bash
+cd examples/footage-search && uv sync --extra dev
+cp config.example.yml config.yml
+python footage_search.py index  --config config.yml      # build the index
+python footage_search.py search --config config.yml "red truck yesterday"
 ```
 
 ---
@@ -265,14 +369,17 @@ python home_assistant_relay.py --config config.yml
 These are explicitly welcome contributions
 (see also the [adapter wishlist](https://github.com/open-nvr/ai-adapter#-adapters-wed-love-to-see)):
 
+(Abandoned-object detection and natural-language footage search already
+ship — see the gallery above.)
+
 | Category | Idea |
 |---|---|
-| Safety | Fall detection, fire/smoke detection, PPE compliance (hard hat / vest / mask) |
+| Safety | Fall detection (pose), fire/smoke detection, PPE compliance (hard hat / vest / mask) |
+| Security | Weapon detection, tailgating at access points |
 | Analytics | Crowd density, queue length, dwell-time heatmaps, vehicle classification |
 | Audio | Glass-break detection, gunshot detection, aggression detection |
-| Conversational | "What's at the gate?" voice agent (ASR + TTS + LLM) |
+| Forensic | Tamper-evident incident export |
 | Wildlife | Pet / livestock detection, bird-species ID |
-| Forensic | "Show me everyone in red between 2 and 4 pm" semantic search |
 
 Open a [discussion](https://github.com/open-nvr/open-nvr/discussions) before
 you start coding — we'll help scope it and (if it fits the first-party tier)
@@ -296,7 +403,7 @@ examples/<example-name>/
 ```
 
 `alerts.py` and the config-loading shape are deliberately consistent across
-all nine shipped examples so you can copy one folder, rename `<example>.py`,
+all thirteen shipped examples so you can copy one folder, rename `<example>.py`,
 and replace the predicate with your domain logic — everything else (alert
 routing, correlation IDs, NATS publishing, SIGINT handling) is the template.
 
@@ -309,7 +416,7 @@ The fastest path to a first-party example slot:
 1. Open a [discussion](https://github.com/open-nvr/open-nvr/discussions) with
    your idea, the camera setup you'll demo on, and the adapter(s) you'll
    chain.
-2. Fork, branch, and copy one of the nine shipped examples as your starting
+2. Fork, branch, and copy one of the thirteen shipped examples as your starting
    template.
 3. Replace the predicate (`zone.contains?`, the dwell-time state machine,
    etc.) with your domain logic.

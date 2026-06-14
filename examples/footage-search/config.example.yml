@@ -1,0 +1,58 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Footage-search example app — config template.
+#
+# Copy this file to ``config.yml``, fill in the values, and run:
+#
+#   python footage_search.py index  --config config.yml      # build the index
+#   python footage_search.py search --config config.yml "red truck yesterday"
+
+# ── Index location ────────────────────────────────────────────────
+#
+# SQLite file the indexer writes to and `search` reads from. Portable,
+# offline, no server. Point both subcommands at the same path.
+db_path: "footage_index.sqlite3"
+
+# ── NATS endpoint (KAI-C's event bus) — used by `index` ────────────
+nats_url: "nats://nats:4222"
+# nats_url: "nats://127.0.0.1:4222"   # bare-metal / host-mode
+nats_token: null
+
+# Subscribe to detector events (labels) AND captioner events (scene
+# text). The wildcard catches both; the indexer merges a detection
+# event and a caption event that share a correlation_id into one
+# searchable keyframe.
+subject_pattern: "opennvr.inference.>"
+
+# ── Search vocabulary ─────────────────────────────────────────────
+#
+# extra_labels: object classes beyond the built-in COCO-ish vocabulary
+#   that your detector emits (so the parser treats them as labels, not
+#   free-text keywords). Everything else meaningful in a query becomes
+#   a caption keyword (colors, clothing, etc.).
+extra_labels:
+  - "forklift"
+  - "pallet"
+
+# camera_aliases: words a user might say mapped to the camera_id KAI-C
+#   uses. "the dock" → cam-dock, so "trucks at the dock" filters camera.
+camera_aliases:
+  dock: "cam-dock"
+  lobby: "cam-lobby"
+  gate: "cam-gate"
+
+# Max results returned by a search.
+result_limit: 25
+
+# ── Optional LLM query parsing (Ollama) ───────────────────────────
+#
+# When enabled, the natural-language query is parsed by a local Ollama
+# model instead of the built-in heuristic parser — better at messy
+# phrasing ("someone in a hoodie hanging around the gate after dark").
+# Falls back to the heuristic parser automatically on any error, so
+# enabling it never makes search worse. No cloud, no API keys.
+ollama:
+  enabled: false
+  url: "http://ollama:11434"
+  model: "llama3.2"
