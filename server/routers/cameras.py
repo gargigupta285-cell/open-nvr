@@ -791,7 +791,7 @@ async def provision_camera_mediamtx(
     camera_id: int,
     enable_recording: bool = False,
     rtsp_transport: str = "tcp",
-    recording_segment_seconds: int = 300,
+    recording_segment_seconds: int = settings.recording_segment_seconds,
     recording_path: str | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
@@ -945,7 +945,7 @@ def _update_camera_recording_config(db: Session, camera_id: int, enable: bool):
                 source_url=cam.rtsp_url,
                 recording_enabled=enable,
                 rtsp_transport="tcp",
-                recording_segment_seconds=300,
+                recording_segment_seconds=settings.recording_segment_seconds,
                 last_provisioned_at=func.now(),
             )
             db.add(config)
