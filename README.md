@@ -4,7 +4,7 @@
 
 ### Cameras are everywhere. Almost none of them are yours.
 
-OpenNVR is the self-hosted network video recorder for everyone who'd rather not give their camera footage — or the AI that watches it — to a vendor's cloud.
+OpenNVR™ is the open, sovereign video-recording platform for organizations that **can't** put their camera footage — or the AI that watches it — in a vendor's cloud. Air-gapped by default, governed AI on your own hardware, an audit trail you can hand to a regulator. From the homelab doorbell that never phones home to the air-gapped government site that legally cannot.
 
 [![CI](https://github.com/open-nvr/open-nvr/actions/workflows/ci.yml/badge.svg)](https://github.com/open-nvr/open-nvr/actions/workflows/ci.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
@@ -22,6 +22,8 @@ OpenNVR is the self-hosted network video recorder for everyone who'd rather not 
 In 2016, a botnet called Mirai conscripted hundreds of thousands of IP cameras into the largest DDoS attack the internet had ever seen. In 2021, an attacker compromised cloud credentials at Verkada and took live feeds from around 150,000 cameras across hospitals, schools, prisons, and factories. Federal advisories continue to land against major vendors — Hikvision, Dahua, Uniview, Edimax — whose firmware quietly powers critical infrastructure around the world.
 
 The pattern keeps repeating because the architecture is wrong. Cameras are connected to vendor clouds. The vendor holds the keys. The vendor controls the AI. The vendor's breach is your breach. A decade after Mirai, the industry has not fixed itself.
+
+And now the rules have changed. Under NDAA §889 and the 2025–26 FCC enforcement, U.S. federal agencies, contractors, and a widening set of regulated buyers can no longer use cameras from the dominant vendors — forcing a rip-and-replace cycle in environments where cloud surveillance was never an option to begin with: defence, critical infrastructure, healthcare, schools, and government. They need a recording and AI layer they can run entirely on their own terms. That layer didn't exist as open infrastructure. OpenNVR is the bet that it should.
 
 OpenNVR is the bet that the alternative is open-source surveillance infrastructure built around four commitments: **cameras you connect, hardware you own, AI you author, audit logs you can show to a regulator.**
 
@@ -188,9 +190,11 @@ Things developers are building today:
 
 Seven reference adapters and a one-command scaffold to start your own live in the sibling [ai-adapter](https://github.com/open-nvr/ai-adapter) repo. Full authoring walkthrough in the [SDK README](https://github.com/open-nvr/ai-adapter/blob/main/opennvr_adapter_sdk/README.md).
 
-## What ships out of the box
+## Applications ship on top of it
 
-| Example | What you'll build | Difficulty |
+Adapters are *capabilities*; applications are *solutions*. Each example below is a working application — adapter(s) + a pipeline + alert rules — that you install, point at a camera, and adapt. Replace the predicate (the zone check, the dwell timer, the plate watchlist) with your domain logic and you have a purpose-built NVR. This is the platform's direction: a catalog of installable applications, not a fixed feature set.
+
+| Application | What you'll build | Difficulty |
 |---|---|---|
 | [`intrusion-detection`](examples/intrusion-detection) | People in restricted zones during restricted hours | beginner |
 | [`loitering-detection`](examples/loitering-detection) | Dwell-time state machine on a NATS inference stream | intermediate |
@@ -200,7 +204,7 @@ Seven reference adapters and a one-command scaffold to start your own live in th
 | [`camera-agent`](examples/camera-agent) | The voice agent above | advanced |
 | [`home-assistant-relay`](examples/home-assistant-relay) | Bridge alerts into Home Assistant via MQTT discovery | intermediate |
 
-Each example is a copy-as-template starting point. Replace the predicate — the zone check, the dwell timer, the plate watchlist — with your domain logic and you have a domain-specific NVR. Gallery walkthrough and the "drives inference vs subscribes to events" axis-grid in [`examples/README.md`](examples/README.md).
+Each application is a copy-as-template starting point. Gallery walkthrough and the "drives inference vs subscribes to events" axis-grid in [`examples/README.md`](examples/README.md). The roadmap for the application catalog — natural-language footage search, audio-event detection, tamper-evident incident export, and the vertical safety/security packs — is in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Community
 
@@ -216,9 +220,11 @@ Commercial deployments — deployment assistance, NDA adapter authoring, complia
 
 **Project** — [Roadmap](docs/ROADMAP.md) · [Support](docs/SUPPORT.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
 
-## License
+## License & trademark
 
 OpenNVR is **AGPLv3**. The [adapter SDK](https://github.com/open-nvr/ai-adapter/tree/main/opennvr_adapter_sdk) is **Apache-2.0**, so adapters you write can ship under any compatible license — including proprietary or classified for the organisations where that matters.
+
+"OpenNVR" and the OpenNVR logo are trademarks of the project. You may use them to refer to the project and to describe software as "compatible with OpenNVR," but redistribution of modified versions under the OpenNVR name requires permission. See [`TRADEMARK.md`](TRADEMARK.md).
 
 ---
 
