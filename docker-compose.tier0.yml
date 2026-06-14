@@ -337,9 +337,13 @@ services:
         condition: service_completed_successfully
     environment:
       - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
-      - YOLOV8_WEIGHTS_DIR=/weights
+      # The adapter code reads MODEL_WEIGHTS_DIR (app/config/config.py),
+      # NOT YOLOV8_WEIGHTS_DIR — and it defaults to /app/model_weights.
+      # So the weights volume MUST be mounted there, otherwise the model
+      # loads to FileNotFoundError and every /infer returns 503.
+      - MODEL_WEIGHTS_DIR=/app/model_weights
     volumes:
-      - opennvr_yolov8_weights:/weights:ro
+      - opennvr_yolov8_weights:/app/model_weights:ro
     networks:
       - opennvr_internal
     # No port mapping — the adapter is internal-only, reached by

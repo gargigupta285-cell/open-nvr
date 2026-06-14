@@ -73,6 +73,7 @@ interface HlsPlaybackSession {
 interface CloudUploadStatus {
   queue_size: number
   worker_running: boolean
+  configured?: boolean
   active_file?: string | null
   stats?: {
     queued_total?: number
@@ -110,6 +111,7 @@ export function PlaybackView() {
   const [playbackError, setPlaybackError] = useState<string | null>(null)
   const [playbackLoading, setPlaybackLoading] = useState(false)
   const [cloudUploadStatus, setCloudUploadStatus] = useState<CloudUploadStatus | null>(null)
+  const [cloudUploadConfigured, setCloudUploadConfigured] = useState(true)
   const [queueingDayKey, setQueueingDayKey] = useState<string | null>(null)
   const [queuedDayKey, setQueuedDayKey] = useState<string | null>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -148,20 +150,31 @@ export function PlaybackView() {
 
   useEffect(() => {
     if (!user?.is_superuser) return
+    // No cloud recording server configured → nothing to poll.
+    if (!cloudUploadConfigured) return
+    // Pause polling while a recording is open in the player so it can't
+    // disturb playback; resumes automatically when the player is closed.
+    if (showPlayer) return
 
     let stopped = false
     let timer: ReturnType<typeof setTimeout> | null = null
 
     const poll = async () => {
+      let keepGoing = true
       try {
         const { data } = await apiService.getCloudUploadStatus()
         if (!stopped) {
           setCloudUploadStatus(data)
+          if (data?.configured === false) {
+            // Server not set up — stop polling for the rest of the session.
+            setCloudUploadConfigured(false)
+            keepGoing = false
+          }
         }
       } catch {
         // Non-blocking UI: keep playback usable even if status polling fails.
       } finally {
-        if (!stopped) {
+        if (!stopped && keepGoing) {
           timer = setTimeout(poll, 3000)
         }
       }
@@ -172,7 +185,41 @@ export function PlaybackView() {
       stopped = true
       if (timer) clearTimeout(timer)
     }
-  }, [user?.is_superuser])
+  }, [user?.is_superuser, cloudUploadConfigured, showPlayer])
+
+  // Self-healing recovery from the "we gave up polling" state.
+  //
+  // The polling effect above flips cloudUploadConfigured → false when the
+  // backend reports no cloud server is configured. Without this, the
+  // frontend would stay in that state until the operator hard-refreshed
+  // the page, even if they configured the cloud server in another route.
+  //
+  // Two cheap recovery triggers:
+  //   * Tab visibility change. When the operator navigates away to
+  //     configure the cloud server and comes back, the visibilitychange
+  //     event fires; we re-arm the flag and the polling effect re-runs
+  //     once. If the backend STILL says unconfigured the polling effect
+  //     will flip the flag back to false immediately — no harm done.
+  //   * A custom ``opennvr:cloud-config-changed`` event. Any future cloud-
+  //     config UI can dispatch ``window.dispatchEvent(new CustomEvent(
+  //     'opennvr:cloud-config-changed'))`` immediately after a successful
+  //     save and the polling resumes without waiting for the next visible.
+  useEffect(() => {
+    if (!user?.is_superuser) return
+    if (cloudUploadConfigured) return  // already polling — nothing to re-arm
+
+    const rearm = () => setCloudUploadConfigured(true)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') rearm()
+    }
+
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('opennvr:cloud-config-changed', rearm)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('opennvr:cloud-config-changed', rearm)
+    }
+  }, [user?.is_superuser, cloudUploadConfigured])
 
   // Toggle camera expansion
   const toggleCamera = (cameraId: number) => {
