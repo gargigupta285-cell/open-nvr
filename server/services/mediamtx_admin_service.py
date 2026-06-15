@@ -942,8 +942,14 @@ class MediaMtxAdminService:
 
     @staticmethod
     async def enable_recording(
-        camera_id: int, duration: str = "60s", segment_duration: str = "10s"
+        camera_id: int,
+        duration: str | None = None,
+        segment_duration: str = "10s",
     ) -> dict[str, Any]:
+        # Default the segment length to the configured RECORDING_SEGMENT_SECONDS
+        # (resolved at call time) instead of a hardcoded value.
+        if duration is None:
+            duration = f"{settings.recording_segment_seconds}s"
         """Enable recording for a camera stream."""
         from core.database import SessionLocal
         from models import Camera

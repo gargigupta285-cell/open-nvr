@@ -261,7 +261,7 @@ async def mtx_recording_delete(
 @router.post("/admin/recordings/enable/{camera_id}")
 async def enable_recording(
     camera_id: int,
-    duration: str | None = "60s",
+    duration: str | None = None,
     segment_duration: str | None = "10s",
     db: Session = Depends(get_db),
     current_user=Depends(get_current_superuser),
@@ -270,6 +270,11 @@ async def enable_recording(
     cam = db.query(Camera).filter(Camera.id == camera_id).first()
     if not cam:
         raise HTTPException(status_code=404, detail="Camera not found")
+
+    # Default the segment length to the configured RECORDING_SEGMENT_SECONDS
+    # instead of a hardcoded value — single source of truth.
+    if duration is None:
+        duration = f"{settings.recording_segment_seconds}s"
 
     # Use effective path from database (user setting) or settings fallback
     base_path = get_effective_recordings_base_path(db)

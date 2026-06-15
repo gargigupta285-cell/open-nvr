@@ -42,7 +42,8 @@ export const mediaMtxService = {
   mtxPathPatch: (cameraId: number, payload: any) => api.patch(`/api/v1/mediamtx/admin/paths/${cameraId}`, payload as any),
   mtxPushRtsp: (cameraId: number, rtspUrl: string, enableRecording: boolean) =>
     api.post(`/api/v1/mediamtx/admin/streams/push/${cameraId}`, '', { params: { rtsp_url: rtspUrl, enable_recording: enableRecording } }),
-  mtxEnableRecording: (cameraId: number, duration: string = '60s', segmentDuration: string = '10s') =>
+  // duration omitted => backend applies the configured RECORDING_SEGMENT_SECONDS (single source of truth)
+  mtxEnableRecording: (cameraId: number, duration?: string, segmentDuration: string = '10s') =>
     api.post(`/api/v1/mediamtx/admin/recordings/enable/${cameraId}`, '', { params: { duration, segment_duration: segmentDuration } }),
   mtxDisableRecording: (cameraId: number) =>
     api.post(`/api/v1/mediamtx/admin/recordings/disable/${cameraId}`, ''),

@@ -985,7 +985,9 @@ async def toggle_camera_recording(
     try:
         if enable:
             result = await MediaMtxAdminService.enable_recording(
-                camera_id, duration="300s", segment_duration="10s"
+                camera_id,
+                duration=f"{settings.recording_segment_seconds}s",
+                segment_duration="10s",
             )
         else:
             result = await MediaMtxAdminService.disable_recording(camera_id)
