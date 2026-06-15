@@ -262,11 +262,20 @@ async def mtx_recording_delete(
 async def enable_recording(
     camera_id: int,
     duration: str | None = None,
-    segment_duration: str | None = "10s",
+    part_duration: str | None = "1s",
     db: Session = Depends(get_db),
     current_user=Depends(get_current_superuser),
 ):
-    """Enable recording for a camera stream with configurable duration."""
+    """Enable recording for a camera stream with configurable duration.
+
+    `duration` is the segment length (`recordSegmentDuration`) — when a new
+    recording file is started. Defaults to the configured
+    RECORDING_SEGMENT_SECONDS (single source of truth).
+
+    `part_duration` is the fMP4 part length (`recordPartDuration`) — the
+    flush/seek granularity *inside* each file. Defaults to `1s` to match the
+    mediamtx*.yml configs and favour low-latency playback.
+    """
     cam = db.query(Camera).filter(Camera.id == camera_id).first()
     if not cam:
         raise HTTPException(status_code=404, detail="Camera not found")
@@ -284,7 +293,7 @@ async def enable_recording(
         "record": True,
         "recordPath": f"{base_path}/cam-{camera_id}/%Y/%m/%d/%H-%M-%S-%f",
         "recordFormat": "mp4",
-        "recordPartDuration": segment_duration,
+        "recordPartDuration": part_duration,
         "recordSegmentDuration": duration,
         "recordDeleteAfter": "168h",  # 7 days default
     }
@@ -334,8 +343,10 @@ async def get_recording_status(
             "recording_enabled": conf.get("record", False),
             "record_path": conf.get("recordPath"),
             "record_format": conf.get("recordFormat", "mp4"),
-            "segment_duration": conf.get("recordPartDuration", "10s"),
-            "total_duration": conf.get("recordSegmentDuration", "60s"),
+            "part_duration": conf.get("recordPartDuration", "1s"),
+            "segment_duration": conf.get(
+                "recordSegmentDuration", f"{settings.recording_segment_seconds}s"
+            ),
             "delete_after": conf.get("recordDeleteAfter", "168h"),
         }
 
