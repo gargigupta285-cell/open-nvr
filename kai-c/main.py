@@ -501,15 +501,28 @@ async def process_local_inference(request: dict):
     """
     Process local AI inference request through KAI-C.
 
-    Accepts the backend's task/input format:
-        {"task": "...",
-         "input": {"frame": {"uri": "opennvr://frames/camera_1/latest.jpg"},
-                   "params": {...}}}
+    Accepts TWO request shapes (ISSUE-73):
 
-    Bridges it to the SDK adapter contract:
-      * resolves the frame URI to bytes and sends them as `frame_b64`
+      * contract-v1 (current backend default, OPENNVR_ADAPTER_CONTRACT=v1)::
+
+            {"task": "...", "frame_b64": "<base64 jpeg>", **params}
+
+        The frame bytes are already inline, so KAI-C forwards the body to
+        the adapter as-is. This is what ``server/services/kai_c_service.py``
+        sends via ``build_infer_payload``.
+
+      * legacy URI (OPENNVR_ADAPTER_CONTRACT=legacy)::
+
+            {"task": "...",
+             "input": {"frame": {"uri": "opennvr://frames/camera_1/latest.jpg"},
+                       "params": {...}}}
+
+        KAI-C resolves the frame URI to local bytes and sends them as
+        ``frame_b64``.
+
+    Either way it then:
       * attaches the adapter bearer token (INTERNAL_API_KEY) so the
-        adapter's auth stays enforced
+        adapter's auth stays enforced, and
       * translates the adapter's DetectionResult back into the flat
         {label, confidence, bbox, count} shape the backend stores.
 
@@ -518,57 +531,76 @@ async def process_local_inference(request: dict):
     try:
         adapter_url = get_adapter_url()
 
-        # 1) Pull frame URI + params out of the backend payload
-        inp = (request or {}).get("input") or {}
-        frame = inp.get("frame") or {}
-        uri = frame.get("uri") or ""
-        params = dict(inp.get("params") or {})
-
-        # 2) Resolve opennvr://frames/... to a
-        #    local file KAI-C can read (core mounts shared_frames at
-        #    FRAMES_DIR).
-        frames_dir = os.getenv("FRAMES_DIR", "/app/AI-adapters/AIAdapters/frames")
-        rel = uri
-        if rel.startswith("opennvr://frames/"):
-            rel = rel[len("opennvr://frames/"):]
+        # 1) Build the adapter body from whichever request shape we got.
+        req = request or {}
+        if "frame_b64" in req:
+            # contract-v1: the frame bytes are already inline, so the body
+            # is effectively in adapter-contract shape already. Forward
+            # every top-level key (``task`` + params) as an inference
+            # parameter per the contract; drop only the structural
+            # ``input`` key if a caller sends a hybrid body. (ISSUE-73:
+            # this branch used not to exist, so v1 bodies hit the URI
+            # path below, found no URI, and 400'd as "frame not found".)
+            adapter_body = {k: v for k, v in req.items() if k != "input"}
+            if not adapter_body.get("frame_b64"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="frame_b64 was provided but empty; nothing to infer on",
+                )
+            if "confidence" in adapter_body and "confidence_threshold" not in adapter_body:
+                adapter_body["confidence_threshold"] = adapter_body.pop("confidence")
         else:
-            rel = rel.replace("opennvr://", "")
-        # Resolve symlinks and normalize ``..`` segments before checking
-        # containment. Otherwise a frame URI like
-        # ``opennvr://frames/../../../etc/passwd`` would resolve to
-        # ``/app/AI-adapters/AIAdapters/frames/../../../etc/passwd`` —
-        # ``os.path.isfile`` accepts it, ``open()`` reads it, and we'd
-        # ship arbitrary host files to the adapter base64-encoded as if
-        # they were a camera frame. KAI-C is the security middleware in
-        # the architecture; URI inputs from a higher-trust caller (the
-        # backend) still get defense-in-depth path validation here.
-        frames_root = os.path.realpath(frames_dir)
-        frame_path = os.path.realpath(os.path.join(frames_dir, rel))
-        if not (
-            frame_path == frames_root
-            or frame_path.startswith(frames_root + os.sep)
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "frame URI resolves outside the configured frames "
-                    "directory; rejecting"
-                ),
-            )
+            # legacy URI path. Resolve opennvr://frames/... to a local
+            # file KAI-C can read (core mounts shared_frames at
+            # FRAMES_DIR), then base64-encode it.
+            inp = req.get("input") or {}
+            frame = inp.get("frame") or {}
+            uri = frame.get("uri") or ""
+            params = dict(inp.get("params") or {})
 
-        if not os.path.isfile(frame_path):
-            raise HTTPException(
-                status_code=400,
-                detail=f"frame not found for inference: {frame_path}",
-            )
-        with open(frame_path, "rb") as fh:
-            frame_b64 = base64.b64encode(fh.read()).decode("ascii")
+            frames_dir = os.getenv("FRAMES_DIR", "/app/AI-adapters/AIAdapters/frames")
+            rel = uri
+            if rel.startswith("opennvr://frames/"):
+                rel = rel[len("opennvr://frames/"):]
+            else:
+                rel = rel.replace("opennvr://", "")
+            # Resolve symlinks and normalize ``..`` segments before
+            # checking containment. Otherwise a frame URI like
+            # ``opennvr://frames/../../../etc/passwd`` would resolve to
+            # ``/app/AI-adapters/AIAdapters/frames/../../../etc/passwd`` —
+            # ``os.path.isfile`` accepts it, ``open()`` reads it, and we'd
+            # ship arbitrary host files to the adapter base64-encoded as
+            # if they were a camera frame. KAI-C is the security
+            # middleware in the architecture; URI inputs from a
+            # higher-trust caller (the backend) still get defense-in-depth
+            # path validation here.
+            frames_root = os.path.realpath(frames_dir)
+            frame_path = os.path.realpath(os.path.join(frames_dir, rel))
+            if not (
+                frame_path == frames_root
+                or frame_path.startswith(frames_root + os.sep)
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "frame URI resolves outside the configured frames "
+                        "directory; rejecting"
+                    ),
+                )
 
-        # 3) Build adapter body. SDK adapter wants frame_b64 + flat
-        #    params; map the UI's "confidence" to "confidence_threshold".
-        if "confidence" in params and "confidence_threshold" not in params:
-            params["confidence_threshold"] = params.pop("confidence")
-        adapter_body = {"frame_b64": frame_b64, **params}
+            if not os.path.isfile(frame_path):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"frame not found for inference: {frame_path}",
+                )
+            with open(frame_path, "rb") as fh:
+                frame_b64 = base64.b64encode(fh.read()).decode("ascii")
+
+            # SDK adapter wants frame_b64 + flat params; map the UI's
+            # "confidence" to "confidence_threshold".
+            if "confidence" in params and "confidence_threshold" not in params:
+                params["confidence_threshold"] = params.pop("confidence")
+            adapter_body = {"frame_b64": frame_b64, **params}
 
         headers = {"Content-Type": "application/json"}
         if INTERNAL_API_KEY:
