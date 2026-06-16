@@ -145,7 +145,11 @@ def test_register_refuses_non_loopback_under_local_only(kaic_app):
         json={"name": "bad", "url": "http://192.168.1.50:9100"},
     )
     assert response.status_code == 403
-    assert "non-loopback" in response.json()["detail"].lower()
+    detail = response.json()["detail"].lower()
+    # The host is a LAN peer (not loopback, not in the Docker bridge
+    # subnet), so local_only refuses it as "not on this machine".
+    assert "local_only" in detail
+    assert "not on this machine" in detail
 
 
 def test_list_adapters_after_register(kaic_app):
