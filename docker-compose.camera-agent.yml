@@ -63,6 +63,12 @@ services:
       - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
       # The Ollama adapter inside this image calls Ollama at this URL.
       - OLLAMA_BASE_URL=http://ollama:11434
+      # English-only Whisper: faster on CPU and avoids the multilingual
+      # model hallucinating foreign-language tokens on noisy/quiet audio.
+      - WHISPER_MODEL_SIZE=base.en
+      # Generous LLM timeout for slow first-token CPU prefill (overrides
+      # the adapter's own default; also see OLLAMA_KEEP_ALIVE on ollama).
+      - OLLAMA_TIMEOUT_S=300
     volumes:
       - ../ai-adapter/model_weights:/app/model_weights
       - shared_frames:/app/frames
@@ -85,6 +91,12 @@ services:
     image: ollama/ollama:0.5.4
     container_name: opennvr_ollama
     restart: unless-stopped
+    environment:
+      # Keep the model resident in RAM indefinitely. Without this Ollama
+      # unloads after 5 min idle, so the next turn pays a cold reload +
+      # full prompt prefill and can blow past the request timeout. Warm,
+      # turns return in seconds instead of ~a minute.
+      - OLLAMA_KEEP_ALIVE=-1
     volumes:
       - opennvr_ollama_models:/root/.ollama
     networks:

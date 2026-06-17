@@ -76,7 +76,7 @@ class KaicAdapterClient(_ReusableClientMixin):
         kaic_url: str,
         api_key: str,
         adapter_name: str,
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float = 120.0,
     ) -> None:
         self._url = f"{kaic_url.rstrip('/')}/api/v1/infer/{adapter_name}"
         self._api_key = api_key
@@ -120,7 +120,7 @@ class WhisperClient(_ReusableClientMixin):
         *,
         url: str,
         token: str,
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float = 120.0,
     ) -> None:
         self._url = url.rstrip("/") + "/infer"
         self._token = token
@@ -132,24 +132,61 @@ class WhisperClient(_ReusableClientMixin):
             "Content-Type": "application/json",
         }
         body = {
-            "audio_b64": base64.b64encode(audio_bytes).decode("ascii"),
             "task": "audio_transcription",
+            "input": {
+                "audio_b64": base64.b64encode(audio_bytes).decode("ascii"),
+                "language": "en",
+                # vad_filter OFF: the agent already VAD-segments each
+                # utterance (Pipecat Silero + the force-stop logic in
+                # services.py) before it reaches here, so the clip is
+                # ALREADY trimmed speech. Running Whisper's own Silero VAD
+                # again was re-classifying the short, mic-quiet clips as
+                # non-speech and discarding the whole utterance ("returned
+                # no segments"). The hallucination-token filter in
+                # services.py handles the 'You'/'Thank you' noise case.
+                "vad_filter": False,
+            },
         }
         resp = await self._client().post(self._url, json=body, headers=headers)
         resp.raise_for_status()
         payload = resp.json()
-        # The contract's §5.3 ASR result names the transcript field
-        # ``transcript``; the legacy Whisper adapter emits ``text``;
-        # some forks use ``transcription``. Accept all three so we
-        # work against whichever shape happens to be deployed.
-        result = payload.get("result") or {}
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else payload
+        # Log full diagnostic info so we can see no_speech_prob per segment.
+        segments = result.get("segments") or []
+        if segments:
+            seg_info = [(s.get("text", ""), s.get("no_speech_prob")) for s in segments]
+            logger.info("Whisper segments: %r", seg_info)
+        else:
+            logger.info("Whisper returned no segments (vad_filter likely removed all audio)")
         text = (
-            result.get("transcript")
-            or result.get("text")
+            result.get("text")
+            or result.get("transcript")
             or result.get("transcription")
             or ""
         )
-        return str(text).strip()
+        text = str(text).strip()
+        # no_speech_prob gate: Whisper flags hallucinated noise ('You',
+        # 'Thank you', …) with a high no_speech_prob. Real speech sits low
+        # (~0.1); noise sits high (~0.75+). When EVERY segment is above the
+        # gate, treat the whole clip as non-speech and drop it. This is more
+        # robust than matching a fixed token list because it also catches
+        # hallucinations we didn't enumerate. Segments with no probability
+        # reported are treated as speech (fail-open) so we never silently
+        # eat a real transcript.
+        if text and segments:
+            probs = [
+                s.get("no_speech_prob")
+                for s in segments
+                if isinstance(s.get("no_speech_prob"), (int, float))
+            ]
+            if probs and all(p > 0.6 for p in probs):
+                logger.info(
+                    "Whisper transcript %r dropped: all segments non-speech "
+                    "(no_speech_prob=%r)",
+                    text, probs,
+                )
+                return ""
+        return text
 
 
 class OllamaClient(_ReusableClientMixin):
@@ -164,7 +201,10 @@ class OllamaClient(_ReusableClientMixin):
         url: str,
         token: str,
         model: str,
-        timeout_seconds: float = 60.0,
+        # First CPU inference cold-loads the model + processes a tool-heavy
+        # prompt; keep this comfortably above the adapter-side timeout so the
+        # first turn completes instead of being cut off.
+        timeout_seconds: float = 300.0,
     ) -> None:
         self._url = url.rstrip("/") + "/infer"
         self._token = token
@@ -183,18 +223,21 @@ class OllamaClient(_ReusableClientMixin):
             "Authorization": f"Bearer {self._token}",
             "Content-Type": "application/json",
         }
-        body: dict[str, Any] = {
-            "task": "chat_completion",
+        # Combined /infer takes the SDK envelope {task, input:{...}}; the
+        # chat fields go inside ``input``. The response carries
+        # ``message`` (incl. ``tool_calls``) at the top level.
+        inner: dict[str, Any] = {
             "messages": messages,
             "model": self._model,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
         if tools:
-            body["tools"] = tools
+            inner["tools"] = tools
             # Explicit ``auto`` since 3B-class models otherwise
             # sometimes ignore the tools list when uncertain.
-            body["tool_choice"] = "auto"
+            inner["tool_choice"] = "auto"
+        body = {"task": "chat_completion", "input": inner}
         resp = await self._client().post(self._url, json=body, headers=headers)
         resp.raise_for_status()
         return resp.json()
@@ -209,7 +252,7 @@ class PiperClient(_ReusableClientMixin):
         *,
         url: str,
         token: str,
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float = 120.0,
     ) -> None:
         self._url = url.rstrip("/") + "/infer"
         self._token = token
@@ -230,12 +273,20 @@ class PiperClient(_ReusableClientMixin):
         # filesystem mount to dereference the opennvr://audio/...
         # URI, so the inline body is the only way we get the audio
         # bytes back over plain HTTP.
-        body = {"task": "text_to_speech", "text": text, "inline": True}
+        # Combined /infer envelope. The adapter task is ``speech_synthesis``
+        # (not ``text_to_speech``); ``inline: true`` asks it to return the
+        # WAV bytes base64-encoded since we have no shared audio mount.
+        body = {
+            "task": "speech_synthesis",
+            "input": {"text": text, "inline": True},
+        }
         client = self._client()
         resp = await client.post(self._url, json=body, headers=headers)
         resp.raise_for_status()
         payload = resp.json()
-        result = payload.get("result") or {}
+        # Combined /infer returns SpeechSynthesisResponse at the top level;
+        # per-adapter shapes nest it under "result". Accept both.
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else payload
         # Two response shapes in flight: inline base64 audio for
         # streaming-friendly clients, and a server-side URI for
         # bandwidth-conscious deployments. Prefer inline; fall back

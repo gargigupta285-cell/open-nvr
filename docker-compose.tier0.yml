@@ -434,7 +434,9 @@ services:
       - NATS_URL=nats://nats:4222
       - FRAMES_DIR=/app/AI-adapters/AIAdapters/frames
       - HOST=${HOST:-0.0.0.0}
-      - DEBUG=${DEBUG:-False}
+      # Avoid inheriting a generic host DEBUG value (some shells/tools set
+      # DEBUG=release), because the backend expects this setting to be boolean.
+      - DEBUG=${OPENNVR_DEBUG:-False}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     networks:
       - opennvr_internal

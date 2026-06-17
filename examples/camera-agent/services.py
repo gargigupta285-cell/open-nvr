@@ -47,8 +47,14 @@ try:  # pragma: no cover — import-time only
         TTSAudioRawFrame,
         TTSStartedFrame,
         TTSStoppedFrame,
+        UserStoppedSpeakingFrame,
     )
-    from pipecat.services.ai_services import LLMService, STTService, TTSService
+    from pipecat.services.ai_services import (
+        LLMService,
+        SegmentedSTTService,
+        STTService,
+        TTSService,
+    )
     from pipecat.processors.aggregators.openai_llm_context import (
         OpenAILLMContext,
         OpenAILLMContextFrame,
@@ -67,8 +73,10 @@ except Exception:  # pragma: no cover
     TTSAudioRawFrame = object  # type: ignore
     TTSStartedFrame = object  # type: ignore
     TTSStoppedFrame = object  # type: ignore
+    UserStoppedSpeakingFrame = object  # type: ignore
     LLMService = object  # type: ignore
     STTService = object  # type: ignore
+    SegmentedSTTService = object  # type: ignore
     TTSService = object  # type: ignore
     OpenAILLMContext = object  # type: ignore
     OpenAILLMContextFrame = object  # type: ignore
@@ -86,14 +94,16 @@ logger = logging.getLogger(__name__)
 # ── STT: Whisper via OpenNVR adapter ───────────────────────────────
 
 
-class OpenNvrWhisperSTT(STTService):
+class OpenNvrWhisperSTT(SegmentedSTTService):
     """Bridges Pipecat's STTService contract to the Whisper adapter.
 
-    Pipecat collects an utterance worth of audio (VAD-driven), passes
-    it as a single ``bytes`` chunk to ``run_stt`` and expects an
-    async iterator of frames. Our adapter is non-streaming so we
-    return one ``TranscriptionFrame`` per utterance — perfectly
-    acceptable for v0.1 latency.
+    Uses ``SegmentedSTTService`` (not the streaming ``STTService``) so
+    Pipecat VAD-buffers a whole utterance and hands ``run_stt`` one
+    WAV-wrapped ``bytes`` blob per utterance. The streaming base would
+    instead fire ``run_stt`` on every ~0.25s audio chunk, feeding
+    Whisper fragments and yielding empty/garbled transcripts. Our
+    adapter is non-streaming, so one ``TranscriptionFrame`` per
+    utterance is exactly the right shape.
     """
 
     def __init__(
@@ -104,17 +114,143 @@ class OpenNvrWhisperSTT(STTService):
     ) -> None:
         super().__init__(sample_rate=sample_rate)
         self._client = client
+        self._trailing_silence_secs = 0.0
+        self._speaking_secs = 0.0
+        # RMS below which audio is treated as trailing silence for force-stop.
+        # 200 is well below normal speech (rms ~300-2000) but above true silence.
+        # The old value of 450 was mis-classifying real speech as silence and
+        # triggering force-stop after just 1 second, giving Whisper a 1s clip
+        # that it transcribes as 'You'.
+        self._silence_rms_threshold = 200
+        # Wait 2s of silence before force-stopping. 1.1s was too short — any
+        # brief pause mid-sentence triggered it.
+        self._force_stop_after_silence_secs = 2.0
+        self._force_stop_after_speech_secs = 14.0
+
+    async def _handle_user_started_speaking(self, frame):  # type: ignore[override]
+        self._trailing_silence_secs = 0.0
+        self._speaking_secs = 0.0
+        await super()._handle_user_started_speaking(frame)
+
+    async def _handle_user_stopped_speaking(self, frame):  # type: ignore[override]
+        self._trailing_silence_secs = 0.0
+        self._speaking_secs = 0.0
+        await super()._handle_user_stopped_speaking(frame)
+
+    async def process_audio_frame(self, frame, direction):  # type: ignore[override]
+        await super().process_audio_frame(frame, direction)
+
+        if not getattr(self, "_user_speaking", False):
+            self._trailing_silence_secs = 0.0
+            self._speaking_secs = 0.0
+            return
+
+        audio = getattr(frame, "audio", b"") or b""
+        sample_rate = int(getattr(frame, "sample_rate", self.sample_rate) or self.sample_rate)
+        channels = int(getattr(frame, "num_channels", 1) or 1)
+        if not audio or sample_rate <= 0:
+            return
+
+        seconds = len(audio) / float(sample_rate * channels * 2)
+        self._speaking_secs += seconds
+        try:
+            import audioop
+
+            rms = audioop.rms(audio, 2)
+        except Exception:
+            rms = self._silence_rms_threshold + 1
+
+        if rms < self._silence_rms_threshold:
+            self._trailing_silence_secs += seconds
+        else:
+            self._trailing_silence_secs = 0.0
+
+        should_force_stop = (
+            self._trailing_silence_secs >= self._force_stop_after_silence_secs
+            or self._speaking_secs >= self._force_stop_after_speech_secs
+        )
+        if should_force_stop:
+            logger.info(
+                "STT forcing utterance end: trailing_silence=%.2fs speech=%.2fs rms=%d",
+                self._trailing_silence_secs,
+                self._speaking_secs,
+                rms,
+            )
+            stop_frame = UserStoppedSpeakingFrame()
+            await self._handle_user_stopped_speaking(stop_frame)
+            await self.push_frame(stop_frame, direction)
+
+    # Whisper hallucinates short tokens when fed near-silence or very short
+    # noise bursts. Drop these so they don't loop the LLM indefinitely.
+    # Keep this list SMALL — only tokens Whisper emits on silence/noise,
+    # NOT legitimate one-word commands ('yes', 'no', 'ok', 'bye', etc.).
+    _HALLUCINATION_TOKENS: frozenset[str] = frozenset({
+        "you", "you.", "you!", "you?",
+        "thank you", "thank you.", "thank you!",
+        "thanks", "thanks.",
+        ".", "..", "...",
+        "uh", "um", "hmm", "hm",
+    })
 
     async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
         if not audio:
+            logger.info("STT run_stt: received 0 bytes (no audio captured)")
             return
+        # Auto-gain: browser/OS mic levels are wildly inconsistent, and a
+        # faint capture makes Whisper return an empty transcript. Measure the
+        # peak and, if the signal is quiet, amplify the PCM toward a target
+        # level before sending.
+        #
+        # Noise-gate: drop truly silent bursts (peak < 500 = below background
+        # hiss level) before paying the Whisper round-trip cost. Keep this
+        # threshold LOW — real speech with a quiet mic can peak as low as
+        # 800–1500. The hallucination filter below handles the case where
+        # Whisper still fires on marginal audio.
+        # ``audio`` is a WAV blob, so we skip the 44-byte RIFF header when
+        # measuring/scaling the samples.
+        try:
+            import audioop
+            head, pcm = (audio[:44], audio[44:]) if audio[:4] == b"RIFF" else (b"", audio)
+            peak = audioop.max(pcm, 2)
+            # Target 28000 (≈86% of int16 max) — loud enough for Whisper's
+            # internal VAD to detect speech. Cap at 40x so a genuinely silent
+            # burst (pure hiss, peak ~100) isn't amplified to clipping.
+            target = 28000
+            if peak < 500:
+                logger.info(
+                    "STT run_stt: %d bytes, peak_amp=%d -> noise gate drop (below 500)",
+                    len(audio), peak,
+                )
+                return
+            if peak < target:
+                gain = min(target / peak, 40.0)
+                pcm = audioop.mul(pcm, 2, gain)
+                audio = head + pcm
+                logger.info(
+                    "STT run_stt: %d bytes, peak_amp=%d -> amplified %.1fx (peak_after=%d)",
+                    len(audio), peak, gain, min(int(peak * gain), 32767),
+                )
+            else:
+                logger.info(
+                    "STT run_stt: %d bytes, peak_amp=%d (no boost)",
+                    len(audio), peak,
+                )
+        except Exception:
+            logger.exception("STT auto-gain failed; sending original audio")
         try:
             text = await self._client.transcribe(audio)
         except Exception:
             logger.exception("Whisper adapter call failed; emitting empty transcript")
             return
         text = (text or "").strip()
+        logger.info("STT transcript: %r", text)
         if not text:
+            return
+        # Hallucination filter: Whisper emits known noise tokens ('You',
+        # 'Thank you', etc.) when fed short or near-silent audio bursts.
+        # Drop these so they don't trigger the LLM tool-calling loop.
+        if text.lower() in self._HALLUCINATION_TOKENS:
+            logger.info("STT transcript: %r -> hallucination filter drop", text)
             return
         yield TranscriptionFrame(text, "", time_now_iso8601())
 
@@ -179,6 +315,7 @@ class OpenNvrOllamaLLM(LLMService):
         # Snapshot the conversation messages; Pipecat's context
         # aggregator owns the canonical list.
         messages = list(context.get_messages())
+        logger.info("LLM _handle_context fired with %d messages", len(messages))
 
         # Emit the "LLM is thinking" bracket so downstream TTS knows
         # when to start / stop assembling its audio chunks.
@@ -201,8 +338,13 @@ class OpenNvrOllamaLLM(LLMService):
                 messages.append({
                     "role": "assistant",
                     "content": content,
-                    **({"tool_calls": tool_calls} if tool_calls else {}),
+                    **({} if not tool_calls else {"tool_calls": tool_calls}),
                 })
+
+                logger.info(
+                    "LLM iter %d: content=%r tool_calls=%d",
+                    iteration, content[:120], len(tool_calls),
+                )
 
                 if not tool_calls:
                     # Final assistant text — stream into the pipeline.
@@ -301,6 +443,7 @@ class OpenNvrPiperTTS(TTSService):
         text = (text or "").strip()
         if not text:
             return
+        logger.info("TTS synthesizing: %r", text[:120])
         yield TTSStartedFrame()
         try:
             audio_bytes = await self._client.synthesize(text)
@@ -308,6 +451,7 @@ class OpenNvrPiperTTS(TTSService):
             logger.exception("Piper adapter synthesise failed")
             yield TTSStoppedFrame()
             return
+        logger.info("TTS got %d audio bytes from Piper", len(audio_bytes or b""))
         if not audio_bytes:
             yield TTSStoppedFrame()
             return

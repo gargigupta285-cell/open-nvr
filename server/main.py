@@ -56,6 +56,7 @@ from routers import (
     auth,
     camera_config,
     cameras,
+    internal_camera_agent,
     cloud as cloud_router,
     cloud_inference,
     cloud_providers,
@@ -476,6 +477,7 @@ async def get_jwks():
 app.include_router(auth.router, prefix=settings.api_prefix)
 app.include_router(users.router, prefix=settings.api_prefix)
 app.include_router(cameras.router, prefix=settings.api_prefix)
+app.include_router(internal_camera_agent.router, prefix=settings.api_prefix)
 app.include_router(streams.router, prefix=settings.api_prefix)
 app.include_router(camera_config.router, prefix=settings.api_prefix)
 app.include_router(roles.router, prefix=settings.api_prefix)

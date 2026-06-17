@@ -5,23 +5,19 @@
 
   Self-contained demo client for the camera-agent example.
 
-  No build step, no framework, no JS dependencies — ~200 lines of
-  vanilla JS. Connects to the FastAPI WebSocket endpoint and speaks
-  raw int16-PCM in both directions (pairs with the camera-agent's
-  RawPcmSerializer on the server side). The browser uses the Web
-  Audio API for capture (16 kHz mono) and playback (22 kHz mono,
-  Piper's default).
+  No build step, no framework, no JS dependencies — vanilla JS.
 
-  Honest caveats:
-  * Voice-only. Transcripts and agent text are not surfaced on the
-    page — the RawPcmSerializer drops every non-audio frame on the
-    wire so the demo stays vanilla. A production UI bundles
-    @pipecat-ai/client-js and the matching ProtobufFrameSerializer
-    on the server to get transcripts, control frames, and metrics
-    over the same WebSocket.
-  * No jitter buffer, no reconnect, no audio worklet — just the
-    simplest possible glue. Production deployments will outgrow
-    this; that's expected.
+  Push-to-talk design: the browser records ONE complete utterance with
+  the native MediaRecorder API and POSTs the whole blob to /converse.
+  The server transcodes it (ffmpeg), transcribes (Whisper), runs the
+  tool-calling LLM, synthesises the reply (Piper), and returns
+  {transcript, reply, audio_b64} in one response. We play the returned
+  WAV directly.
+
+  Why not stream raw PCM? Whisper is a batch transcriber, not a streaming
+  ASR. Sending it complete, browser-encoded utterances (instead of a
+  hand-resampled PCM stream + hand-rolled VAD) is dramatically more
+  reliable and removes the whole class of "You"/"Thank you" hallucinations.
 -->
 <html lang="en">
 <head>
@@ -37,6 +33,8 @@
       --accent: #4fd1c5;
       --accent-strong: #38b2ac;
       --danger: #e53e3e;
+      --user: #9ae6b4;
+      --agent: #90cdf4;
     }
     * { box-sizing: border-box; }
     body {
@@ -60,20 +58,27 @@
     }
     h1 { margin: 0 0 0.25rem 0; font-size: 1.5rem; }
     p.lede { margin: 0 0 1.5rem 0; color: var(--muted); }
-    .row { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem; }
-    button {
+    .talk {
+      width: 100%;
       background: var(--accent);
       color: #062321;
       border: none;
-      padding: 0.75rem 1.25rem;
-      border-radius: 0.5rem;
-      font-weight: 600;
+      padding: 1.1rem 1.25rem;
+      border-radius: 0.6rem;
+      font-weight: 700;
       cursor: pointer;
-      font-size: 0.95rem;
+      font-size: 1.05rem;
+      transition: background 0.15s, transform 0.05s;
     }
-    button:hover:not(:disabled) { background: var(--accent-strong); }
-    button:disabled { opacity: 0.4; cursor: not-allowed; }
-    button.danger { background: var(--danger); color: white; }
+    .talk:hover:not(:disabled) { background: var(--accent-strong); }
+    .talk:active:not(:disabled) { transform: scale(0.99); }
+    .talk:disabled { opacity: 0.5; cursor: progress; }
+    .talk.recording { background: var(--danger); color: #fff; }
+    .talk.recording::before {
+      content: "● "; animation: blink 1s steps(2, start) infinite;
+    }
+    @keyframes blink { to { visibility: hidden; } }
+    .row { display: flex; gap: 0.5rem; align-items: center; margin: 1rem 0 0.5rem; }
     .status {
       padding: 0.5rem 0.75rem;
       border-radius: 0.375rem;
@@ -83,200 +88,209 @@
       flex: 1;
     }
     .status.active { color: var(--accent); }
+    .status.error { color: var(--danger); }
+    .ghost {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid rgba(255,255,255,0.12);
+      padding: 0.5rem 0.75rem;
+      border-radius: 0.375rem;
+      cursor: pointer;
+      font-size: 0.8rem;
+    }
+    .ghost:hover { color: var(--text); }
     .log {
       margin-top: 1rem;
       background: rgba(0, 0, 0, 0.25);
       border-radius: 0.5rem;
       padding: 0.75rem;
-      max-height: 12rem;
+      max-height: 16rem;
       overflow-y: auto;
-      font-family: ui-monospace, "SF Mono", Menlo, monospace;
-      font-size: 0.8rem;
-      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.4;
     }
-    .log-entry { margin: 0.15rem 0; }
-    .log-entry.error { color: var(--danger); }
+    .log:empty::after {
+      content: "Your conversation will appear here.";
+      color: var(--muted); font-size: 0.82rem;
+    }
+    .msg { margin: 0.35rem 0; }
+    .msg .who { font-weight: 700; }
+    .msg.user .who { color: var(--user); }
+    .msg.agent .who { color: var(--agent); }
+    .msg.sys { color: var(--muted); font-size: 0.8rem; font-style: italic; }
   </style>
 </head>
 <body>
   <main>
     <h1>OpenNVR Camera Agent</h1>
     <p class="lede">
-      Click <strong>Start</strong>, then speak. The agent listens via
-      Silero VAD — no need to hold a button. Ask things like
-      <em>"What's on the front porch?"</em> or
-      <em>"Did anyone come to the door in the last hour?"</em>
+      Tap <strong>Speak</strong>, ask a question, then tap again to send.
+      Try <em>"What do you see on camera one?"</em> or
+      <em>"How many people are at the front door?"</em>
     </p>
+
+    <button id="talk" class="talk" type="button">🎤 Speak</button>
+
     <div class="row">
-      <button id="start" type="button">Start</button>
-      <button id="stop" type="button" class="danger" disabled>Stop</button>
-      <div class="status" id="status">Idle. Click Start.</div>
+      <div class="status" id="status">Ready. Tap Speak to begin.</div>
+      <button id="reset" class="ghost" type="button">Reset</button>
     </div>
+
     <div class="log" id="log"></div>
   </main>
 
   <script>
-    // ── Minimal raw-PCM WebSocket client ────────────────────────────
-    //
-    // Pairs with examples/camera-agent/serializer.py (RawPcmSerializer).
-    // Both directions of the WebSocket carry bare int16 little-endian
-    // PCM samples — inbound at 16 kHz (Silero VAD's expected rate),
-    // outbound at the Piper TTS sample rate (typically 22 kHz). No
-    // framing, no protobuf, no JS dep — just bytes.
-    //
-    // Production UIs that want transcripts / control frames /
-    // metrics on the wire should swap to Pipecat's
-    // ProtobufFrameSerializer on the server and bundle
-    // @pipecat-ai/client-js in the browser.
-
-    const startBtn = document.getElementById("start");
-    const stopBtn = document.getElementById("stop");
+    const talkBtn  = document.getElementById("talk");
+    const resetBtn = document.getElementById("reset");
     const statusEl = document.getElementById("status");
-    const logEl = document.getElementById("log");
+    const logEl    = document.getElementById("log");
 
-    let ws = null;
-    let audioCtx = null;
     let mediaStream = null;
-    let workletNode = null;
-    let playbackQueue = [];
+    let recorder    = null;
+    let chunks      = [];
+    let recording   = false;
+    let busy        = false;
 
-    function setStatus(text, active = false) {
+    function setStatus(text, kind = "") {
       statusEl.textContent = text;
-      statusEl.classList.toggle("active", active);
+      statusEl.className = "status" + (kind ? " " + kind : "");
     }
 
-    function log(msg, kind = "info") {
-      const entry = document.createElement("div");
-      entry.className = `log-entry ${kind}`;
-      const now = new Date().toLocaleTimeString();
-      entry.textContent = `[${now}] ${msg}`;
-      logEl.appendChild(entry);
+    function addMsg(text, who) {
+      // who: "user" | "agent" | "sys"
+      const div = document.createElement("div");
+      div.className = "msg " + who;
+      if (who === "sys") {
+        div.textContent = text;
+      } else {
+        const label = who === "user" ? "you" : "agent";
+        div.innerHTML = `<span class="who">${label}:</span> `;
+        div.appendChild(document.createTextNode(text));
+      }
+      logEl.appendChild(div);
       logEl.scrollTop = logEl.scrollHeight;
     }
 
-    async function start() {
-      startBtn.disabled = true;
+    // Pick a MIME type the browser actually supports. ffmpeg on the server
+    // decodes any of these, so we just take the first that works.
+    function pickMimeType() {
+      const candidates = [
+        "audio/webm;codecs=opus",
+        "audio/webm",
+        "audio/ogg;codecs=opus",
+        "audio/mp4",
+      ];
+      for (const t of candidates) {
+        if (window.MediaRecorder && MediaRecorder.isTypeSupported(t)) return t;
+      }
+      return ""; // let the browser choose its default
+    }
+
+    async function ensureMic() {
+      if (mediaStream) return mediaStream;
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      return mediaStream;
+    }
+
+    async function startRecording() {
       try {
-        mediaStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            channelCount: 1,
-            sampleRate: 16000,
-            echoCancellation: true,
-            noiseSuppression: true,
-          },
-        });
+        await ensureMic();
       } catch (err) {
-        log(`Microphone access denied: ${err}`, "error");
-        setStatus("Microphone access denied.");
-        startBtn.disabled = false;
+        setStatus("Microphone access denied.", "error");
+        addMsg("Microphone access denied: " + err, "sys");
         return;
       }
+      const mimeType = pickMimeType();
+      chunks = [];
+      recorder = new MediaRecorder(mediaStream, mimeType ? { mimeType } : undefined);
+      recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+      recorder.onstop = onRecordingStopped;
+      recorder.start();
+      recording = true;
+      talkBtn.textContent = "⏹ Stop & send";
+      talkBtn.classList.add("recording");
+      setStatus("Listening… tap to send.", "active");
+    }
 
-      const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
-      ws = new WebSocket(wsUrl);
-      ws.binaryType = "arraybuffer";
+    function stopRecording() {
+      if (!recorder || recorder.state === "inactive") return;
+      recording = false;
+      talkBtn.textContent = "🎤 Speak";
+      talkBtn.classList.remove("recording");
+      setStatus("Thinking…");
+      busy = true;
+      talkBtn.disabled = true;
+      recorder.stop();
+    }
 
-      ws.onopen = async () => {
-        setStatus("Connected. Listening — just speak.", true);
-        stopBtn.disabled = false;
-        log("WebSocket open");
-
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)({
-          sampleRate: 16000,
+    async function onRecordingStopped() {
+      const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+      if (!blob.size) {
+        setStatus("No audio captured. Try again.", "error");
+        busy = false; talkBtn.disabled = false;
+        return;
+      }
+      try {
+        const resp = await fetch("/converse", {
+          method: "POST",
+          headers: { "Content-Type": "application/octet-stream" },
+          body: blob,
         });
-        const source = audioCtx.createMediaStreamSource(mediaStream);
-
-        // ScriptProcessor is deprecated but works everywhere without
-        // an AudioWorklet build step. For v0.1 demo simplicity, fine.
-        const proc = audioCtx.createScriptProcessor(4096, 1, 1);
-        proc.onaudioprocess = (ev) => {
-          if (!ws || ws.readyState !== WebSocket.OPEN) return;
-          const f32 = ev.inputBuffer.getChannelData(0);
-          const i16 = floatToPcm16(f32);
-          ws.send(i16.buffer);
-        };
-        source.connect(proc);
-        proc.connect(audioCtx.destination);
-        workletNode = proc;
-      };
-
-      ws.onmessage = (ev) => {
-        if (typeof ev.data === "string") {
-          // Server-side transcript / status JSON messages.
-          try {
-            const msg = JSON.parse(ev.data);
-            if (msg.type === "transcript") {
-              log(`${msg.role === "user" ? "you" : "agent"}: ${msg.text}`);
-            }
-          } catch {
-            log(ev.data);
-          }
-        } else {
-          // Binary audio chunk — append to playback queue.
-          enqueuePlayback(new Int16Array(ev.data));
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          throw new Error(err.error || ("HTTP " + resp.status));
         }
-      };
-
-      ws.onerror = () => log("WebSocket error", "error");
-      ws.onclose = () => {
-        setStatus("Disconnected.");
-        log("WebSocket closed");
-        cleanup();
-      };
-    }
-
-    function stop() {
-      setStatus("Stopping…");
-      if (ws && ws.readyState === WebSocket.OPEN) ws.close();
-      cleanup();
-    }
-
-    function cleanup() {
-      if (workletNode) { workletNode.disconnect(); workletNode = null; }
-      if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; }
-      if (mediaStream) {
-        mediaStream.getTracks().forEach((t) => t.stop());
-        mediaStream = null;
+        const data = await resp.json();
+        if (!data.transcript) {
+          setStatus("Didn't catch that — tap Speak and try again.", "error");
+          addMsg("(no speech detected)", "sys");
+          return;
+        }
+        addMsg(data.transcript, "user");
+        if (data.reply) addMsg(data.reply, "agent");
+        if (data.audio_b64) {
+          await playWav(data.audio_b64);
+        }
+        setStatus("Ready. Tap Speak to ask another.", "active");
+      } catch (err) {
+        setStatus("Error: " + err.message, "error");
+        addMsg("Request failed: " + err.message, "sys");
+      } finally {
+        busy = false;
+        talkBtn.disabled = false;
       }
-      ws = null;
-      startBtn.disabled = false;
-      stopBtn.disabled = true;
     }
 
-    function floatToPcm16(f32) {
-      const out = new Int16Array(f32.length);
-      for (let i = 0; i < f32.length; i++) {
-        const s = Math.max(-1, Math.min(1, f32[i]));
-        out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-      }
-      return out;
+    function playWav(b64) {
+      return new Promise((resolve) => {
+        const audio = new Audio("data:audio/wav;base64," + b64);
+        audio.onended = resolve;
+        audio.onerror = resolve;
+        audio.play().catch(resolve);
+      });
     }
 
-    // ── Playback (very small, single-shot per chunk) ────────────────
-    let playbackCtx = null;
-    let playbackTime = 0;
-    function enqueuePlayback(pcm16) {
-      if (!playbackCtx) {
-        playbackCtx = new (window.AudioContext || window.webkitAudioContext)({
-          sampleRate: 22050,  // Piper default
-        });
-        playbackTime = playbackCtx.currentTime;
-      }
-      const buf = playbackCtx.createBuffer(1, pcm16.length, playbackCtx.sampleRate);
-      const ch = buf.getChannelData(0);
-      for (let i = 0; i < pcm16.length; i++) {
-        ch[i] = pcm16[i] / 0x8000;
-      }
-      const node = playbackCtx.createBufferSource();
-      node.buffer = buf;
-      node.connect(playbackCtx.destination);
-      const startAt = Math.max(playbackCtx.currentTime, playbackTime);
-      node.start(startAt);
-      playbackTime = startAt + buf.duration;
-    }
+    talkBtn.addEventListener("click", () => {
+      if (busy) return;
+      if (recording) stopRecording();
+      else startRecording();
+    });
 
-    startBtn.addEventListener("click", start);
-    stopBtn.addEventListener("click", stop);
+    resetBtn.addEventListener("click", async () => {
+      try {
+        await fetch("/reset", { method: "POST" });
+        logEl.innerHTML = "";
+        addMsg("Conversation reset.", "sys");
+        setStatus("Ready. Tap Speak to begin.");
+      } catch { /* ignore */ }
+    });
   </script>
 </body>
 </html>

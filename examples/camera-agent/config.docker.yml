@@ -29,12 +29,27 @@ ollama_token: ${INTERNAL_API_KEY}
 piper_url: http://ai-adapter:9100
 piper_token: ${INTERNAL_API_KEY}
 
-# Vision tools — routed through KAI-C. Names match what KAI-C
-# registers via its ADAPTER_REGISTRY. The Tier 0 compose registers
-# yolov8 as ``default``; v0.1.1 will register all three by name.
-detection_adapter: yolov8
+# Vision tools — routed through KAI-C by the registered adapter NAME.
+# The Tier 0 stack registers ONLY the YOLOv8 object detector, under the
+# name ``default`` — so detect_objects must target ``default``.
+# BLIP (caption) and InsightFace (recognition) are NOT registered in the
+# Tier 0 KAI-C, so describe_camera / recognize_faces will report they're
+# unavailable until those adapters are registered. (They still point at
+# their intended names so they light up automatically once registered.)
+detection_adapter: default
 recognition_adapter: insightface
 caption_adapter: blip
+
+# Tools advertised to the LLM. Tier 0 only registers the YOLOv8 object
+# detector, so the demo exposes just the two tools that actually work:
+# detect_objects (counts people/cars/…) and describe_camera (which falls
+# back to the detector when no caption adapter is present). This keeps the
+# prompt short (faster CPU prefill) and stops the model calling face
+# recognition / footage search whose adapters aren't deployed. Add names
+# here once you register BLIP / InsightFace / the footage index.
+enabled_tools:
+  - detect_objects
+  - describe_camera
 
 # LLM tuning. llama3.2:3b is the docker-compose.camera-agent.yml
 # default — fits comfortably in 3 GB of RAM at ~5-15 tok/s on CPU.
@@ -55,19 +70,30 @@ event_ring_size: 256
 nats_inference_url: nats://nats:4222
 nats_inference_token: ${INTERNAL_API_KEY}
 
+# Load cameras from OpenNVR. OpenNVR returns internal MediaMTX frame-source
+# URLs, so camera-agent reuses the stream OpenNVR already manages instead of
+# storing camera RTSP credentials in this example config.
+opennvr_cameras_url: http://opennvr-core:8000/api/v1/internal/camera-agent/cameras
+opennvr_api_key: ${INTERNAL_API_KEY}
+
 host: ${CAMERA_AGENT_LISTEN_HOST}
 port: 9100
 
-# Empty cameras list to start — operators add their own once the
-# stack is up. The demo page still works without cameras (it just
-# can't ground answers in live frames), so this lets the install
-# complete cleanly even before any RTSP source is configured.
+# Optional manual fallback. Leave empty in Docker so camera-agent uses the
+# OpenNVR-configured cameras from opennvr_cameras_url above.
 cameras: []
 
 system_prompt: |
-  You are a helpful, concise voice assistant for a home with security
-  cameras. The user asks questions about what's happening on those
-  cameras. Always use your tools to ground answers in live camera
-  data — don't guess. Respond in 1-2 short sentences because your
-  reply is spoken aloud. If the user's question can't be answered
-  from the cameras, say so briefly.
+  You are a concise voice assistant for a home security camera system.
+  You have NO knowledge of what any camera currently shows — the ONLY
+  way to know is to call a tool.
+
+  RULES:
+  - For ANY question about what a camera sees, what is happening, who or
+    what is present, or how many of something, you MUST call detect_objects
+    or describe_camera BEFORE answering.
+  - NEVER invent, guess, or describe what is on a camera from imagination.
+    If you have not called a tool this turn, you do not know.
+  - Base your answer ONLY on the tool result, in 1-2 short spoken sentences.
+  - If a tool says a camera cannot be reached, tell the user that camera
+    appears to be offline.

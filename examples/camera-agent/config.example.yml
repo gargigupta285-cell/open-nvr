@@ -74,6 +74,22 @@ event_ring_size: 256
 # indexer writes to.
 # footage_index_path: /data/footage_index.sqlite3
 
+# Optional: auto-discover cameras from a running OpenNVR instance.
+# When set and the `cameras` list below is empty, the agent calls
+# GET <opennvr_cameras_url> (auth: X-Internal-Api-Key) and builds
+# its camera roster from the response. This lets you add / remove
+# cameras in OpenNVR without editing this config — the agent
+# picks up the current list on every restart.
+#
+# Use the same INTERNAL_API_KEY you configured in OpenNVR's .env.
+# The endpoint returns MediaMTX tap URLs when INFERENCE_USE_MEDIAMTX_TAP
+# is true (default), otherwise falls back to the stored RTSP URL —
+# so you never need to put camera passwords in this file.
+#
+# Example (OpenNVR running on the same machine):
+# opennvr_cameras_url: http://127.0.0.1:8000/api/v1/internal/camera-agent/cameras
+# opennvr_api_key: REPLACE_WITH_INTERNAL_API_KEY
+
 # HTTP listen address for the agent. Public if you put it behind
 # your reverse proxy; localhost only by default.
 host: 127.0.0.1

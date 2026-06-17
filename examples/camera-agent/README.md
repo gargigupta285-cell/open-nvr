@@ -187,6 +187,8 @@ See `config.example.yml` for the full set. Key knobs:
 | `event_ring_size` | `256` | Per-camera ring buffer size for the `recent_events` tool. |
 | `nats_inference_url` | unset | Set this to enable `recent_events` against your inference bus. Without it the tool returns "no events". |
 | `cameras[].role` | `"(no role configured)"` | One-sentence role description per camera — gets baked into the system prompt so the LLM knows what each camera watches. |
+| `opennvr_cameras_url` | unset | When set and `cameras` is empty, fetches the camera roster from a running OpenNVR instance (`GET /api/v1/internal/camera-agent/cameras`). This means you never duplicate RTSP credentials in this file — OpenNVR owns the camera connection and returns MediaMTX tap URLs. |
+| `opennvr_api_key` | unset | API key for the `opennvr_cameras_url` endpoint. Must match `INTERNAL_API_KEY` in OpenNVR's `.env`. Falls back to `kaic_api_key` if unset. |
 
 ## Tests
 

@@ -26,9 +26,10 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import subprocess
 from abc import ABC, abstractmethod
 from typing import Protocol
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import httpx
 
@@ -130,6 +131,86 @@ class HttpSnapshotSource:
         return response.content
 
 
+class RtspFrameSource:
+    """Grab a single JPEG frame from an RTSP stream via ffmpeg.
+
+    IP cameras speak RTSP, not HTTP snapshots, so this shells out to
+    ffmpeg to pull exactly one frame on demand and encode it as JPEG.
+    ``-rtsp_transport tcp`` avoids the UDP packet loss that corrupts
+    frames on busy networks. The whole thing is bounded by a timeout so
+    an unreachable camera can't hang the tool call forever.
+
+    Requires the ``ffmpeg`` binary on PATH (installed in the
+    camera-agent Docker image).
+    """
+
+    def __init__(
+        self,
+        *,
+        camera_id: str,
+        url: str,
+        timeout_seconds: float = 15.0,
+    ) -> None:
+        parsed = urlparse(url)
+        if parsed.scheme != "rtsp":
+            raise FrameSourceError(
+                f"rtsp source: expected rtsp:// URL, got {parsed.scheme!r}"
+            )
+        self.camera_id = camera_id
+        self._url = url
+        self._timeout = timeout_seconds
+
+    def fetch(self) -> bytes:
+        cmd = [
+            "ffmpeg",
+            "-nostdin",
+            "-loglevel", "error",
+            "-rtsp_transport", "tcp",
+            "-i", self._url,
+            "-frames:v", "1",   # exactly one frame
+            "-q:v", "3",        # good JPEG quality
+            "-f", "image2",
+            "pipe:1",           # write the JPEG to stdout
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=self._timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise FrameSourceError(
+                f"rtsp grab for {self.camera_id} timed out after "
+                f"{self._timeout}s ({_redact(self._url)})"
+            ) from exc
+        except FileNotFoundError as exc:
+            raise FrameSourceError(
+                "rtsp source needs the 'ffmpeg' binary on PATH but it "
+                f"wasn't found: {exc}"
+            ) from exc
+        if proc.returncode != 0 or not proc.stdout:
+            err = (proc.stderr or b"").decode("utf-8", "replace").strip()[:300]
+            raise FrameSourceError(
+                f"rtsp grab for {self.camera_id} failed "
+                f"({_redact(self._url)}): {err or 'no frame produced'}"
+            )
+        return proc.stdout
+
+
+def _redact(url: str) -> str:
+    """Strip credentials from an RTSP URL before logging it."""
+    try:
+        parts = urlsplit(url)
+        if parts.username or parts.password:
+            host = parts.hostname or ""
+            if parts.port:
+                host = f"{host}:{parts.port}"
+            return urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
+    except Exception:
+        pass
+    return url
+
+
 # ── Factory ────────────────────────────────────────────────────────
 
 
@@ -151,10 +232,7 @@ def build_frame_source(*, camera_id: str, url: str) -> FrameSource:
             "camera's snapshot URL directly for now."
         )
     if scheme == "rtsp":
-        raise FrameSourceError(
-            "rtsp:// scheme requires the ffmpeg-based RTSP pipeline that lands in "
-            "a planned follow-up. For now use the camera's HTTP snapshot endpoint instead."
-        )
+        return RtspFrameSource(camera_id=camera_id, url=url)
     raise FrameSourceError(
         f"unsupported frame source scheme {scheme!r}; expected file/http/https."
     )

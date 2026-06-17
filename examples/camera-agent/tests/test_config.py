@@ -56,10 +56,13 @@ def test_load_requires_kaic_api_key(tmp_path):
         load_config(cfg)
 
 
-def test_load_requires_at_least_one_camera(tmp_path):
+def test_load_allows_empty_camera_list(tmp_path):
+    # An empty camera list is intentionally allowed: the Docker install
+    # ships ``cameras: []`` so the stack comes up before any RTSP source
+    # is wired, and the agent still serves the demo + voice loop.
     cfg = _write(tmp_path, "kaic_url: http://x\nkaic_api_key: y\ncameras: []\n")
-    with pytest.raises(SystemExit, match="at least one camera"):
-        load_config(cfg)
+    loaded = load_config(cfg)
+    assert loaded.cameras == []
 
 
 def test_load_rejects_camera_without_id_or_url(tmp_path):
@@ -127,3 +130,143 @@ def test_system_prompt_includes_camera_roster(tmp_path):
     assert "front-porch" in prompt and "main entrance" in prompt
     assert "back-door" in prompt and "garden facing" in prompt
     assert "exactly as listed" in prompt
+
+
+# ── opennvr_cameras_url auto-discovery ────────────────────────────
+
+
+class TestLoadOpenNvrCameras:
+    """Tests for the HTTP-based camera discovery path.
+
+    We patch ``httpx.get`` so no real network calls are made.
+    """
+
+    def _make_response(self, cameras: list[dict], status: int = 200):
+        """Return a minimal httpx.Response-shaped mock."""
+        import json
+        from unittest.mock import MagicMock
+
+        mock = MagicMock()
+        mock.status_code = status
+        mock.json.return_value = {"cameras": cameras}
+        mock.raise_for_status.return_value = None
+        if status >= 400:
+            import httpx
+            mock.raise_for_status.side_effect = httpx.HTTPStatusError(
+                message="error",
+                request=MagicMock(),
+                response=mock,
+            )
+        return mock
+
+    def test_cameras_loaded_from_opennvr_when_list_empty(self, tmp_path, monkeypatch):
+        """When cameras: [] and opennvr_cameras_url is set, the agent
+        should call the endpoint and populate the camera list."""
+        import httpx
+        from unittest.mock import patch
+
+        opennvr_camera = {
+            "camera_id": "cam1",
+            "frame_url": "rtsp://mediamtx:8554/cam-1",
+            "role": "Front door; location: hallway",
+        }
+
+        with patch("httpx.get", return_value=self._make_response([opennvr_camera])):
+            cfg_text = (
+                "kaic_url: http://x\n"
+                "kaic_api_key: y\n"
+                "cameras: []\n"
+                "opennvr_cameras_url: http://opennvr-core:8000/api/v1/internal/camera-agent/cameras\n"
+                "opennvr_api_key: y\n"
+            )
+            parsed = load_config(_write(tmp_path, cfg_text))
+
+        assert len(parsed.cameras) == 1
+        assert parsed.cameras[0].camera_id == "cam1"
+        assert "rtsp://mediamtx" in parsed.cameras[0].frame_url
+        assert "Front door" in parsed.cameras[0].role
+
+    def test_static_cameras_take_priority_over_opennvr_url(self, tmp_path, monkeypatch):
+        """If cameras are explicitly listed they should be used and the
+        OpenNVR endpoint should NOT be called."""
+        from unittest.mock import patch, MagicMock
+
+        fake_get = MagicMock()
+        f = _seed_frame(tmp_path, "f.jpg")
+        with patch("httpx.get", fake_get):
+            cfg_text = (
+                "kaic_url: http://x\n"
+                "kaic_api_key: y\n"
+                f"cameras:\n  - {{camera_id: cam-local, frame_url: 'file://{f}', role: local}}\n"
+                "opennvr_cameras_url: http://opennvr-core:8000/api/v1/internal/camera-agent/cameras\n"
+                "opennvr_api_key: y\n"
+            )
+            parsed = load_config(_write(tmp_path, cfg_text))
+
+        fake_get.assert_not_called()
+        assert len(parsed.cameras) == 1
+        assert parsed.cameras[0].camera_id == "cam-local"
+
+    def test_graceful_failure_on_network_error(self, tmp_path):
+        """If the OpenNVR endpoint is unreachable, the agent should start
+        with an empty camera list rather than crashing."""
+        import httpx
+        from unittest.mock import patch
+
+        with patch("httpx.get", side_effect=httpx.ConnectError("unreachable")):
+            cfg_text = (
+                "kaic_url: http://x\n"
+                "kaic_api_key: y\n"
+                "cameras: []\n"
+                "opennvr_cameras_url: http://opennvr-core:8000/api/v1/internal/camera-agent/cameras\n"
+                "opennvr_api_key: y\n"
+            )
+            parsed = load_config(_write(tmp_path, cfg_text))
+
+        # Should not raise; cameras list is empty but agent still starts.
+        assert parsed.cameras == []
+
+    def test_graceful_failure_on_bad_response_shape(self, tmp_path):
+        """If the endpoint returns JSON without a 'cameras' key,
+        the agent should start with an empty camera list."""
+        from unittest.mock import patch, MagicMock
+
+        bad_response = MagicMock()
+        bad_response.status_code = 200
+        bad_response.json.return_value = {"error": "unexpected"}
+        bad_response.raise_for_status.return_value = None
+
+        with patch("httpx.get", return_value=bad_response):
+            cfg_text = (
+                "kaic_url: http://x\n"
+                "kaic_api_key: y\n"
+                "cameras: []\n"
+                "opennvr_cameras_url: http://opennvr-core:8000/api/v1/internal/camera-agent/cameras\n"
+                "opennvr_api_key: y\n"
+            )
+            parsed = load_config(_write(tmp_path, cfg_text))
+
+        assert parsed.cameras == []
+
+    def test_entries_without_camera_id_or_frame_url_are_skipped(self, tmp_path):
+        """Incomplete entries in the OpenNVR response (missing required
+        fields) should be silently skipped rather than crashing."""
+        from unittest.mock import patch
+
+        cameras = [
+            {"camera_id": "cam1", "frame_url": "rtsp://mediamtx:8554/cam-1", "role": "good"},
+            {"camera_id": "cam2"},        # missing frame_url — should be skipped
+            {"frame_url": "rtsp://x"},    # missing camera_id — should be skipped
+        ]
+        with patch("httpx.get", return_value=self._make_response(cameras)):
+            cfg_text = (
+                "kaic_url: http://x\n"
+                "kaic_api_key: y\n"
+                "cameras: []\n"
+                "opennvr_cameras_url: http://opennvr-core:8000/api/v1/internal/camera-agent/cameras\n"
+                "opennvr_api_key: y\n"
+            )
+            parsed = load_config(_write(tmp_path, cfg_text))
+
+        assert len(parsed.cameras) == 1
+        assert parsed.cameras[0].camera_id == "cam1"

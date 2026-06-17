@@ -20,15 +20,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         # Pipecat's silero extra pulls torch; the slim base needs
         # libgomp for the matmul kernels Silero uses on CPU.
         libgomp1 \
+        # ffmpeg lets the agent grab a JPEG frame from an rtsp:// camera
+        # (RtspFrameSource in frame_sources.py).
+        ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # Pin Pipecat carefully — its API has shifted between minor versions.
-# If you bump these, re-run the example's test suite and the demo
-# page locally before committing.
-RUN pip install --no-cache-dir \
-        "pipecat-ai[silero,websocket]>=0.0.55,<1.0" \
+# The upper bound MUST stay <0.0.60: 0.0.10x removed FrameSerializerType
+# and reworked the InputAudioRawFrame constructor, both of which
+# serializer.py / the RawPcmSerializer depend on. Keep this in lock-step
+# with pyproject.toml. If you bump these, re-run the example's test suite
+# and the demo page locally before committing.
+# --timeout/--retries make the install resilient to slow or flaky PyPI
+# reads (pipecat's silero extra pulls torch, a large download); pip's
+# default 15s read timeout otherwise fails the whole build on a transient
+# stall.
+RUN pip install --no-cache-dir --timeout 120 --retries 10 \
+        "pipecat-ai[silero,websocket]>=0.0.55,<0.0.60" \
         "httpx>=0.27,<1.0" \
         "fastapi>=0.110,<1.0" \
         "uvicorn>=0.27,<1.0" \
@@ -41,8 +51,10 @@ COPY examples/camera-agent/adapter_clients.py ./adapter_clients.py
 COPY examples/camera-agent/camera_agent.py    ./camera_agent.py
 COPY examples/camera-agent/context.py         ./context.py
 COPY examples/camera-agent/frame_sources.py   ./frame_sources.py
+COPY examples/camera-agent/serializer.py      ./serializer.py
 COPY examples/camera-agent/services.py        ./services.py
 COPY examples/camera-agent/tools.py           ./tools.py
+COPY examples/camera-agent/footage_index.py   ./footage_index.py
 COPY examples/camera-agent/config.example.yml ./config.example.yml
 COPY examples/camera-agent/demo               ./demo
 
