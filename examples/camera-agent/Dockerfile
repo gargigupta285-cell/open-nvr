@@ -33,18 +33,29 @@ WORKDIR /app
 # serializer.py / the RawPcmSerializer depend on. Keep this in lock-step
 # with pyproject.toml. If you bump these, re-run the example's test suite
 # and the demo page locally before committing.
-# --timeout/--retries make the install resilient to slow or flaky PyPI
-# reads (pipecat's silero extra pulls torch, a large download); pip's
-# default 15s read timeout otherwise fails the whole build on a transient
-# stall.
-RUN pip install --no-cache-dir --timeout 120 --retries 10 \
-        "pipecat-ai[silero,websocket]>=0.0.55,<0.0.60" \
-        "httpx>=0.27,<1.0" \
-        "fastapi>=0.110,<1.0" \
-        "uvicorn>=0.27,<1.0" \
-        "PyYAML>=6.0,<7.0" \
-        "nats-py>=2.6" \
-        "Pillow>=10.0"
+# Resilient install for slow / flaky PyPI links (pipecat's silero extra pulls
+# torch — a large download). Three layers of resilience:
+#   * --mount=type=cache keeps the pip wheel cache across build attempts, so a
+#     re-run after a network stall only re-fetches what's still missing (this is
+#     why --no-cache-dir is intentionally dropped).
+#   * a retry loop re-runs the whole install up to 5× so a transient read
+#     timeout self-recovers instead of failing the build.
+#   * --timeout 300 tolerates slow reads before giving up.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    for i in 1 2 3 4 5; do \
+        echo "pip install attempt $i/5..."; \
+        pip install --timeout 300 --retries 10 \
+            "pipecat-ai[silero,websocket]>=0.0.55,<0.0.60" \
+            "httpx>=0.27,<1.0" \
+            "fastapi>=0.110,<1.0" \
+            "uvicorn>=0.27,<1.0" \
+            "PyYAML>=6.0,<7.0" \
+            "nats-py>=2.6" \
+            "Pillow>=10.0" \
+        && break; \
+        if [ "$i" = 5 ]; then echo "pip install failed after 5 attempts" >&2; exit 1; fi; \
+        echo "attempt $i failed; retrying in 15s..."; sleep 15; \
+    done
 
 COPY examples/camera-agent/__init__.py        ./__init__.py
 COPY examples/camera-agent/adapter_clients.py ./adapter_clients.py

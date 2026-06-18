@@ -109,16 +109,20 @@ services:
       retries: 5
 
   # ──────────────────────────────────────────────────────────────
-  # Ollama model pull — one-shot. Run explicitly with:
-  #   docker compose ... run --rm ollama-model-pull
-  # before the first ``up`` so the LLM is ready when the agent
-  # starts. Default model: llama3.2:3b (~2 GB). Override via the
-  # OLLAMA_MODEL env var in .env.
+  # Ollama model pull — one-shot. Runs AUTOMATICALLY on ``up`` because
+  # camera-agent depends_on it (service_completed_successfully), so the
+  # model is guaranteed present before the agent starts — no manual step.
+  # (You can still run it on its own: ``docker compose ... run --rm
+  # ollama-model-pull``.) Model = OLLAMA_MODEL in .env (default qwen2.5:1.5b).
   # ──────────────────────────────────────────────────────────────
   ollama-model-pull:
     profiles: [camera-agent]
     image: ollama/ollama:0.5.4
     container_name: opennvr_ollama_pull
+    # One-shot: pull the model, then exit 0. `restart: no` keeps it a true
+    # one-shot so camera-agent's `service_completed_successfully` dependency
+    # below can gate on it finishing (model present before the agent starts).
+    restart: "no"
     depends_on:
       ollama:
         condition: service_healthy
@@ -202,6 +206,12 @@ services:
         condition: service_healthy
       ollama:
         condition: service_healthy
+      # Wait for the LLM model to be fully pulled before starting, so the
+      # startup pre-warm finds the model present (instead of 500 "model not
+      # found") and the FIRST question is fast. Without this the agent races
+      # the model download.
+      ollama-model-pull:
+        condition: service_completed_successfully
       opennvr-core:
         condition: service_healthy
     ports:
