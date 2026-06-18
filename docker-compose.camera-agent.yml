@@ -75,11 +75,16 @@ services:
     networks:
       - opennvr_internal
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9100/health"]
-      interval: 30s
+      # /ready (not /health) gates on the model WEIGHTS being present on
+      # disk, not just the HTTP server being up. Weights pre-download in
+      # the background at boot, so dependents (camera-agent) must wait for
+      # /ready or the first inference races the download and the agent
+      # reports the camera offline until a restart.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9100/ready"]
+      interval: 15s
       timeout: 5s
-      start_period: 120s  # heavy adapter — give it cold-start time
-      retries: 5
+      start_period: 300s  # heavy adapter + background weight download
+      retries: 20
 
   # ──────────────────────────────────────────────────────────────
   # Ollama — local LLM runtime. We use the official upstream image

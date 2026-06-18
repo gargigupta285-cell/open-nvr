@@ -133,7 +133,7 @@ async def test_detect_objects_no_detections():
     ctx = _ctx_with_camera()
     tools = _build_tools(ctx, detection_response={"result": {"detections": []}})
     result = await tools.detect_objects({"camera_id": "front-porch"})
-    assert "No objects detected" in result
+    assert "no objects" in result.lower()
 
 
 @pytest.mark.asyncio
@@ -265,7 +265,8 @@ def test_tool_definitions_bake_camera_ids_into_enum():
     defs = build_tool_definitions(["front-porch", "back-door"])
     describe = next(d for d in defs if d["function"]["name"] == "describe_camera")
     enum = describe["function"]["parameters"]["properties"]["camera_id"]["enum"]
-    assert set(enum) == {"front-porch", "back-door"}
+    # Configured cameras plus the "all" selector — still can't invent names.
+    assert set(enum) == {"front-porch", "back-door", "all"}
 
 
 def test_tool_definitions_recent_events_offers_any_wildcard():

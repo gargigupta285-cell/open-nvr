@@ -11,6 +11,7 @@ passwords or requiring an operator login token.
 from __future__ import annotations
 
 import logging
+import secrets
 from urllib.parse import quote as urlquote
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
@@ -32,7 +33,8 @@ def _require_internal_key(
 ) -> None:
     supplied = x_internal_api_key or x_internal_api_key_alt
     expected = settings.internal_api_key
-    if not expected or supplied != expected:
+    # Constant-time compare to avoid leaking the key via response timing.
+    if not expected or not supplied or not secrets.compare_digest(str(supplied), str(expected)):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid internal api key",

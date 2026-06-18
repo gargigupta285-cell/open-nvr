@@ -49,24 +49,33 @@ def build_tool_definitions(
     face recognition / footage search whose adapters aren't registered.
     """
     camera_enum = list(cameras) or ["__no_cameras_configured__"]
+    # Cameras can be a single id, "all", or several at once via camera_ids.
+    camera_enum_all = camera_enum + ["all"]
+    _camera_prop = {
+        "type": "string",
+        "enum": camera_enum_all,
+        "description": "A camera id, or 'all' for every camera.",
+    }
+    _camera_ids_prop = {
+        "type": "array",
+        "items": {"type": "string", "enum": camera_enum_all},
+        "description": "Optional: several cameras at once, e.g. ['cam1','cam2']. Use instead of camera_id for multiple.",
+    }
     all_tools = [
         {
             "type": "function",
             "function": {
                 "name": "describe_camera",
                 "description": (
-                    "Describe what's currently visible on a camera (scene "
-                    "caption). Use for 'what's on the porch?' / 'what do "
-                    "you see?'."
+                    "Describe what's currently visible on one camera, several "
+                    "cameras, or all of them. Use for 'what's on the porch?' / "
+                    "'what do you see on all cameras?'."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "camera_id": {
-                            "type": "string",
-                            "enum": camera_enum,
-                            "description": "Which camera to look at.",
-                        },
+                        "camera_id": _camera_prop,
+                        "camera_ids": _camera_ids_prop,
                     },
                     "required": ["camera_id"],
                 },
@@ -78,16 +87,14 @@ def build_tool_definitions(
                 "name": "detect_objects",
                 "description": (
                     "Detect and count objects (people, cars, packages, "
-                    "animals) on a camera. Use for 'is there a package?' / "
-                    "'how many cars?'."
+                    "animals) on one camera, several, or all of them. Use for "
+                    "'is there a package?' / 'how many people across all cameras?'."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "camera_id": {
-                            "type": "string",
-                            "enum": camera_enum,
-                        },
+                        "camera_id": _camera_prop,
+                        "camera_ids": _camera_ids_prop,
                     },
                     "required": ["camera_id"],
                 },
@@ -98,16 +105,15 @@ def build_tool_definitions(
             "function": {
                 "name": "recognize_faces",
                 "description": (
-                    "Recognize faces on a camera; returns a name if known, "
-                    "else 'unknown'. Use for 'who's at the door?'."
+                    "Recognize faces on one camera, several, or all of them; "
+                    "returns a name if known, else 'unknown'. Use for 'who's "
+                    "at the door?'."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "camera_id": {
-                            "type": "string",
-                            "enum": camera_enum,
-                        },
+                        "camera_id": _camera_prop,
+                        "camera_ids": _camera_ids_prop,
                     },
                     "required": ["camera_id"],
                 },
@@ -209,24 +215,27 @@ class CameraTools:
         # Optional read-only FootageIndex (footage_index.FootageIndex).
         # When None or unavailable, search_footage reports that cleanly.
         self._footage_index = footage_index
+        # Cameras touched by the most recent tool call — read by /converse
+        # so the UI can show which camera(s) Ram is working on.
+        self.last_cameras_used: list[str] = []
 
     # ── describe_camera ────────────────────────────────────────────
 
     async def describe_camera(self, args: dict[str, Any]) -> str:
-        camera_id = self._require_camera(args)
-        if isinstance(camera_id, str) and camera_id.startswith("ERROR:"):
-            return camera_id
+        cams = self._resolve_cameras(args)
+        if isinstance(cams, str):  # ERROR
+            return cams
+        clauses = [await self._describe_one(c) for c in cams]
+        return self._join_clauses(clauses)
+
+    async def _describe_one(self, camera_id: str) -> str:
         try:
             frame = await self._ctx.get_frame(camera_id)
         except LookupError:
-            return f"Camera {camera_id} is not configured."
+            return f"{camera_id} is not configured"
         except FrameSourceError as exc:
-            # Keep the full ffmpeg/RTSP error in the logs, but hand the LLM a
-            # short, clean message — dumping the multi-line error (with the
-            # signed JWT in the URL) as a tool result balloons the next
-            # prompt and adds tens of seconds of CPU prefill.
             logger.info("%s: frame fetch failed (camera offline?): %s", camera_id, exc)
-            return f"Camera {camera_id} appears to be offline; no live image is available."
+            return f"{camera_id} appears to be offline"
         # Prefer a real scene caption when the caption adapter is
         # available. Send the task explicitly for symmetry with
         # recognize_faces and so the wire shape is legible in audit logs.
@@ -237,7 +246,7 @@ class CameraTools:
             )
             caption = ((response.get("result") or {}).get("caption") or "").strip()
             if caption:
-                return f"On {camera_id}: {caption}"
+                return f"{camera_id}: {caption}"
         except Exception:
             # No caption adapter registered (e.g. the Tier-0 stack ships
             # only the object detector). Fall back to describing the scene
@@ -256,16 +265,13 @@ class CameraTools:
             response = await self._detect.infer(frame_jpeg=frame)
         except Exception:
             logger.exception("describe_camera: detection fallback failed")
-            return (
-                f"The {camera_id} camera is online, but scene description "
-                "isn't available right now."
-            )
+            return f"{camera_id}: scene description unavailable right now"
         summary = self._summarize_detections(
             (response.get("result") or {}).get("detections") or []
         )
         if not summary:
-            return f"On {camera_id}: nothing notable is visible right now."
-        return f"On {camera_id}: I can see {summary}."
+            return f"{camera_id}: nothing notable visible"
+        return f"{camera_id}: I can see {summary}"
 
     # Irregular plurals worth getting right for the COCO labels the
     # detector emits most; everything else just takes a trailing 's'.
@@ -353,63 +359,55 @@ class CameraTools:
     # ── detect_objects ─────────────────────────────────────────────
 
     async def detect_objects(self, args: dict[str, Any]) -> str:
-        camera_id = self._require_camera(args)
-        if isinstance(camera_id, str) and camera_id.startswith("ERROR:"):
-            return camera_id
+        cams = self._resolve_cameras(args)
+        if isinstance(cams, str):  # ERROR
+            return cams
+        clauses = [await self._detect_one(c) for c in cams]
+        return self._join_clauses(clauses)
+
+    async def _detect_one(self, camera_id: str) -> str:
         try:
             frame = await self._ctx.get_frame(camera_id)
         except LookupError:
-            return f"Camera {camera_id} is not configured."
+            return f"{camera_id} is not configured"
         except FrameSourceError as exc:
-            # Keep the full ffmpeg/RTSP error in the logs, but hand the LLM a
-            # short, clean message — dumping the multi-line error (with the
-            # signed JWT in the URL) as a tool result balloons the next
-            # prompt and adds tens of seconds of CPU prefill.
             logger.info("%s: frame fetch failed (camera offline?): %s", camera_id, exc)
-            return f"Camera {camera_id} appears to be offline; no live image is available."
+            return f"{camera_id} appears to be offline"
         try:
             response = await self._detect.infer(frame_jpeg=frame)
         except Exception:
-            logger.exception("detect_objects: detector call failed")
-            return "Object detector failed."
+            logger.exception("detect_objects: detector call failed for %s", camera_id)
+            return f"{camera_id}: detector unavailable"
         detections = ((response.get("result") or {}).get("detections")) or []
         if not detections:
-            return f"No objects detected on {camera_id}."
-        summary = self._summarize_detections(detections)
-        return f"On {camera_id}: " + summary + "."
+            return f"{camera_id}: no objects"
+        return f"{camera_id}: {self._summarize_detections(detections)}"
 
     # ── recognize_faces ────────────────────────────────────────────
 
     async def recognize_faces(self, args: dict[str, Any]) -> str:
-        camera_id = self._require_camera(args)
-        if isinstance(camera_id, str) and camera_id.startswith("ERROR:"):
-            return camera_id
+        cams = self._resolve_cameras(args)
+        if isinstance(cams, str):  # ERROR
+            return cams
+        clauses = [await self._recognize_one(c) for c in cams]
+        return self._join_clauses(clauses)
+
+    async def _recognize_one(self, camera_id: str) -> str:
         try:
             frame = await self._ctx.get_frame(camera_id)
         except LookupError:
-            return f"Camera {camera_id} is not configured."
+            return f"{camera_id} is not configured"
         except FrameSourceError as exc:
-            # Keep the full ffmpeg/RTSP error in the logs, but hand the LLM a
-            # short, clean message — dumping the multi-line error (with the
-            # signed JWT in the URL) as a tool result balloons the next
-            # prompt and adds tens of seconds of CPU prefill.
             logger.info("%s: frame fetch failed (camera offline?): %s", camera_id, exc)
-            return f"Camera {camera_id} appears to be offline; no live image is available."
+            return f"{camera_id} appears to be offline"
         try:
             response = await self._recognise.infer(
                 frame_jpeg=frame,
                 extra={"task": "face_recognition"},
             )
         except Exception:
-            # No recognition adapter registered (Tier-0 ships only the
-            # object detector). Degrade gracefully instead of surfacing a
-            # raw failure the LLM would read aloud as a "404 error".
             logger.info("recognize_faces: recognition adapter unavailable")
-            return (
-                "Face recognition isn't enabled on this system, so I can't "
-                "identify people by name. I can still tell you whether "
-                "someone is present."
-            )
+            return f"{camera_id}: face recognition isn't enabled"
         result = response.get("result") or {}
         if result.get("recognized"):
             name = result.get("name") or result.get("person_id") or "someone"
@@ -418,13 +416,10 @@ class CameraTools:
             sim_phrase = f", similarity {similarity:.2f}" if isinstance(
                 similarity, (int, float)
             ) else ""
-            return (
-                f"On {camera_id}: recognised {name} "
-                f"({category}{sim_phrase})."
-            )
+            return f"{camera_id}: recognised {name} ({category}{sim_phrase})"
         if "face_bbox" in result and result.get("face_bbox"):
-            return f"On {camera_id}: a face is visible but it's not registered."
-        return f"On {camera_id}: no face detected."
+            return f"{camera_id}: a face is visible but not registered"
+        return f"{camera_id}: no face detected"
 
     # ── recent_events ──────────────────────────────────────────────
 
@@ -543,3 +538,60 @@ class CameraTools:
                 f"{sorted(c.camera_id for c in self._ctx.cameras)}."
             )
         return camera_id
+
+    # Values that mean "every configured camera".
+    _ALL_TOKENS = frozenset({"all", "__all__", "all_cameras", "every", "everything"})
+
+    def _resolve_cameras(self, args: dict[str, Any]) -> "list[str] | str":
+        """Resolve a tool call's camera selector to a concrete list.
+
+        Accepts ``camera_ids`` (a list), or ``camera_id`` as a single id,
+        ``"all"`` (every camera), or a comma-separated string. Returns the
+        ordered, de-duplicated list, or an ``ERROR:`` string the LLM can
+        relay. Records the result in ``last_cameras_used`` for the UI."""
+        known = [c.camera_id for c in self._ctx.cameras]
+        if not known:
+            return "ERROR: no cameras are configured."
+
+        raw = args.get("camera_ids")
+        if raw is None:
+            cid = args.get("camera_id")
+            if isinstance(cid, str) and cid.strip().lower() in self._ALL_TOKENS:
+                self.last_cameras_used = list(known)
+                return list(known)
+            if isinstance(cid, str) and "," in cid:
+                raw = [p.strip() for p in cid.split(",") if p.strip()]
+            elif isinstance(cid, str) and cid:
+                raw = [cid]
+            else:
+                return "ERROR: camera_id (or camera_ids) is required."
+
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return "ERROR: camera_ids must be a list of camera names."
+
+        resolved: list[str] = []
+        for item in raw:
+            name = str(item).strip()
+            if name.lower() in self._ALL_TOKENS:
+                resolved = list(known)
+                break
+            if not self._ctx.known_camera(name):
+                return (
+                    f"ERROR: camera {name!r} is not configured. Available: "
+                    f"{known} (or 'all')."
+                )
+            if name not in resolved:
+                resolved.append(name)
+        if not resolved:
+            return "ERROR: no valid cameras in the request."
+        self.last_cameras_used = list(resolved)
+        return resolved
+
+    @staticmethod
+    def _join_clauses(clauses: list[str]) -> str:
+        """Combine per-camera result clauses into one speakable string."""
+        if len(clauses) == 1:
+            return "On " + clauses[0] + "."
+        return "Across " + str(len(clauses)) + " cameras — " + "; ".join(clauses) + "."

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import re
 import subprocess
 from abc import ABC, abstractmethod
 from typing import Protocol
@@ -189,7 +190,9 @@ class RtspFrameSource:
                 f"wasn't found: {exc}"
             ) from exc
         if proc.returncode != 0 or not proc.stdout:
-            err = (proc.stderr or b"").decode("utf-8", "replace").strip()[:300]
+            # ffmpeg echoes the input URL (with credentials) in its stderr,
+            # so scrub userinfo before it lands in our error message / logs.
+            err = _scrub_creds((proc.stderr or b"").decode("utf-8", "replace").strip())[:300]
             raise FrameSourceError(
                 f"rtsp grab for {self.camera_id} failed "
                 f"({_redact(self._url)}): {err or 'no frame produced'}"
@@ -197,15 +200,23 @@ class RtspFrameSource:
         return proc.stdout
 
 
+def _scrub_creds(text: str) -> str:
+    """Remove URL userinfo (``user:pass@``) from arbitrary text such as
+    ffmpeg stderr, which echoes the input URL including credentials."""
+    return re.sub(r"://[^/\s@]+@", "://", text)
+
+
 def _redact(url: str) -> str:
-    """Strip credentials from an RTSP URL before logging it."""
+    """Strip credentials AND query secrets (e.g. ``?jwt=...`` on MediaMTX tap
+    URLs) from an RTSP URL before logging it."""
     try:
         parts = urlsplit(url)
-        if parts.username or parts.password:
+        if parts.username or parts.password or parts.query:
             host = parts.hostname or ""
             if parts.port:
                 host = f"{host}:{parts.port}"
-            return urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
+            query = "REDACTED" if parts.query else ""
+            return urlunsplit((parts.scheme, host, parts.path, query, parts.fragment))
     except Exception:
         pass
     return url

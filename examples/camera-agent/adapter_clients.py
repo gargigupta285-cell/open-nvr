@@ -25,6 +25,7 @@ what isn't until v0.2.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from typing import Any
@@ -77,10 +78,19 @@ class KaicAdapterClient(_ReusableClientMixin):
         api_key: str,
         adapter_name: str,
         timeout_seconds: float = 120.0,
+        retries: int = 2,
+        retry_backoff_s: float = 1.5,
     ) -> None:
         self._url = f"{kaic_url.rstrip('/')}/api/v1/infer/{adapter_name}"
         self._api_key = api_key
         self._timeout = timeout_seconds
+        # Brief retry bridges the adapter cold-start window: right after
+        # boot the model may still be loading / its weights still
+        # downloading, so the first inference can 5xx or drop the
+        # connection. Retrying a couple of times avoids surfacing that to
+        # the user as "camera offline" until someone restarts the adapter.
+        self._retries = max(0, retries)
+        self._retry_backoff_s = retry_backoff_s
 
     async def infer(
         self,
@@ -100,9 +110,24 @@ class KaicAdapterClient(_ReusableClientMixin):
         }
         if extra:
             body.update(extra)
-        resp = await self._client().post(self._url, json=body, headers=headers)
-        resp.raise_for_status()
-        return resp.json()
+
+        last_exc: Exception | None = None
+        for attempt in range(self._retries + 1):
+            try:
+                resp = await self._client().post(self._url, json=body, headers=headers)
+                resp.raise_for_status()
+                return resp.json()
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                if attempt < self._retries:
+                    logger.warning(
+                        "KAI-C infer attempt %d/%d failed (%s); retrying in %.1fs "
+                        "(adapter may still be warming up)",
+                        attempt + 1, self._retries + 1, exc, self._retry_backoff_s,
+                    )
+                    await asyncio.sleep(self._retry_backoff_s)
+        assert last_exc is not None
+        raise last_exc
 
 
 # ── Adapter-direct clients (streaming voice path) ──────────────────

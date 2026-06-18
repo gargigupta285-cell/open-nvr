@@ -36,7 +36,7 @@ import logging
 import re
 import signal
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -109,6 +109,12 @@ class AppConfig:
     opennvr_cameras_url: str | None = None
     opennvr_api_key: str | None = None
 
+    # Optional emergency contacts for alarms, keyed by alarm target/name
+    # (e.g. {"fire": "+1-555-0100"}). The actual call-out is a documented
+    # future integration (see ALARMS.md); for now an armed alarm with a
+    # matching contact records "would alert <number>" when it fires.
+    emergency_contacts: dict[str, str] | None = None
+
     # HTTP listen address.
     host: str = "127.0.0.1"
     port: int = 9100
@@ -132,6 +138,555 @@ _DEFAULT_SYSTEM_PROMPT = (
     "- If a tool says a camera cannot be reached, tell the user that camera "
     "appears to be offline."
 )
+
+# Ram — the agent's persona. The name is fixed; the greeting is what Ram
+# says when the user first enables the conversation (shown as text and
+# spoken via Piper).
+AGENT_NAME = "Ram"
+GREETING = (
+    "Hi, I'm Ram, your OpenNVR camera agent. I keep an eye on all your "
+    "cameras and run the checks you ask for. I can tell you what's happening "
+    "right now, look back at what happened earlier, and take on longer "
+    "searches in the background while we keep talking. Ask me anything about "
+    "your cameras."
+)
+
+
+# ── Background task system (in-memory) ─────────────────────────────────
+
+
+@dataclass
+class AgentTask:
+    """A long-running request Ram is working on in the background."""
+
+    id: int
+    query: str
+    status: str = "queued"  # queued | running | done | error
+    result: str | None = None
+    created_at: float = 0.0
+    finished_at: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "query": self.query,
+            "status": self.status,
+            "result": self.result,
+            "created_at": self.created_at,
+            "finished_at": self.finished_at,
+        }
+
+
+class TaskManager:
+    """Runs Ram's longer jobs as background asyncio tasks so the
+    conversation never blocks. In-memory only — tasks reset on restart.
+
+    Each task runs a full tool-calling turn for its query (with the
+    create_background_task tool removed, so a task can't spawn more
+    tasks), and stores the final answer. The UI polls ``list()`` and
+    surfaces completions back into the chat."""
+
+    def __init__(self, runtime: "CameraAgentRuntime", *, max_tasks: int = 50) -> None:
+        self._runtime = runtime
+        self._tasks: dict[int, AgentTask] = {}
+        self._order: list[int] = []
+        self._next_id = 1
+        self._max = max_tasks
+
+    def create(self, query: str) -> AgentTask:
+        import time
+
+        task = AgentTask(id=self._next_id, query=query.strip(), created_at=time.time())
+        self._next_id += 1
+        self._tasks[task.id] = task
+        self._order.append(task.id)
+        # Trim oldest beyond the cap.
+        while len(self._order) > self._max:
+            old = self._order.pop(0)
+            self._tasks.pop(old, None)
+        asyncio.create_task(self._run(task), name=f"agent-task-{task.id}")
+        logger.info("task #%d queued: %r", task.id, task.query)
+        return task
+
+    async def _run(self, task: AgentTask) -> None:
+        import time
+
+        task.status = "running"
+        try:
+            task.result = await _run_conversation_turn(
+                self._runtime, [], task.query,
+                tool_definitions=self._runtime.background_tool_definitions,
+            )
+            task.status = "done"
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("task #%d failed", task.id)
+            task.result = f"I hit an error working on that: {exc}"
+            task.status = "error"
+        finally:
+            task.finished_at = time.time()
+            logger.info("task #%d %s", task.id, task.status)
+
+    def get(self, task_id: int) -> AgentTask | None:
+        return self._tasks.get(task_id)
+
+    def list(self) -> list[dict[str, Any]]:
+        return [self._tasks[i].to_dict() for i in self._order if i in self._tasks]
+
+
+# ── Standing monitors (watch / count) ─────────────────────────────────
+
+
+@dataclass
+class Monitor:
+    """A standing watch Ram keeps on one or more cameras.
+
+    kind="notify": alert when ``target`` appears.
+    kind="count":  keep a live + peak count of ``target`` per camera
+                   (periodic snapshot counts — not turnstile/line-crossing).
+    """
+
+    id: int
+    kind: str            # "notify" | "count"
+    camera_ids: list[str]
+    target: str
+    description: str
+    interval_s: float
+    active: bool = True
+    created_at: float = 0.0
+    current: dict[str, int] = field(default_factory=dict)
+    peak: dict[str, int] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id, "kind": self.kind, "camera_ids": self.camera_ids,
+            "target": self.target, "description": self.description,
+            "interval_s": self.interval_s, "active": self.active,
+            "created_at": self.created_at,
+            "current": self.current, "peak": self.peak,
+        }
+
+
+class MonitorManager:
+    """Runs Ram's standing watches: every ``interval_s`` it grabs a frame
+    from each watched camera, runs detection, and counts the target. Notify
+    monitors raise a (cooldown-limited) notification when the target is
+    present; count monitors track live + peak counts. In-memory only."""
+
+    def __init__(self, runtime: "CameraAgentRuntime", *, default_interval: float = 8.0,
+                 notify_cooldown: float = 30.0, max_monitors: int = 20) -> None:
+        self._runtime = runtime
+        self._monitors: dict[int, Monitor] = {}
+        self._order: list[int] = []
+        self._tasks: dict[int, asyncio.Task] = {}
+        self._next_id = 1
+        self._default_interval = default_interval
+        self._cooldown = notify_cooldown
+        self._max = max_monitors
+        self._last_notified: dict[tuple[int, str], float] = {}
+        self._notifications: list[dict[str, Any]] = []
+        self._next_note_id = 1
+
+    def create(self, *, kind: str, camera_ids: list[str], target: str,
+               description: str = "", interval_s: float | None = None) -> Monitor:
+        import time
+
+        mon = Monitor(
+            id=self._next_id, kind=kind, camera_ids=list(camera_ids),
+            target=target.strip().lower(), description=description.strip(),
+            interval_s=float(interval_s or self._default_interval),
+            created_at=time.time(),
+        )
+        self._next_id += 1
+        self._monitors[mon.id] = mon
+        self._order.append(mon.id)
+        while len(self._order) > self._max:
+            old = self._order.pop(0)
+            self.stop(old)
+            self._monitors.pop(old, None)
+        self._tasks[mon.id] = asyncio.create_task(self._loop(mon), name=f"monitor-{mon.id}")
+        logger.info("monitor #%d (%s %r on %s) started", mon.id, kind, target, camera_ids)
+        return mon
+
+    def stop(self, monitor_id: int) -> bool:
+        mon = self._monitors.get(monitor_id)
+        if not mon:
+            return False
+        mon.active = False
+        t = self._tasks.pop(monitor_id, None)
+        if t:
+            t.cancel()
+        return True
+
+    def stop_all(self) -> None:
+        for mid in list(self._monitors):
+            self.stop(mid)
+
+    def list(self) -> list[dict[str, Any]]:
+        return [self._monitors[i].to_dict() for i in self._order if i in self._monitors]
+
+    def notifications(self) -> list[dict[str, Any]]:
+        return list(self._notifications[-50:])
+
+    def _count_target(self, detections: list[dict[str, Any]], target: str) -> int:
+        deduped = self._runtime.tools._dedup_detections(detections[:64])
+        return sum(
+            1 for d in deduped
+            if str(d.get("label") or d.get("class") or "").strip().lower() == target
+        )
+
+    async def _loop(self, mon: Monitor) -> None:
+        try:
+            while mon.active and not self._runtime._stop_event.is_set():
+                for cam in mon.camera_ids:
+                    if not mon.active:
+                        break
+                    await self._poll(mon, cam)
+                await asyncio.sleep(mon.interval_s)
+        except asyncio.CancelledError:  # pragma: no cover
+            pass
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("monitor #%d loop crashed", mon.id)
+
+    async def _poll(self, mon: Monitor, cam: str) -> None:
+        import time
+
+        try:
+            frame = await self._runtime.context.get_frame(cam)
+            resp = await self._runtime.detection_client.infer(frame_jpeg=frame)
+        except Exception as exc:
+            logger.info("monitor #%d: poll of %s failed (%s)", mon.id, cam, exc)
+            return
+        detections = (resp.get("result") or {}).get("detections") or []
+        count = self._count_target(detections, mon.target)
+        mon.current[cam] = count
+        mon.peak[cam] = max(mon.peak.get(cam, 0), count)
+        if mon.kind == "notify" and count > 0:
+            key = (mon.id, cam)
+            now = time.time()
+            if now - self._last_notified.get(key, 0.0) >= self._cooldown:
+                self._last_notified[key] = now
+                noun = mon.target if count == 1 else f"{count} {mon.target}s"
+                self._notifications.append({
+                    "id": self._next_note_id,
+                    "monitor_id": mon.id,
+                    "text": f"Heads up — I see {noun} on {cam}.",
+                    "ts": now,
+                })
+                self._next_note_id += 1
+                logger.info("monitor #%d notified: %s on %s", mon.id, mon.target, cam)
+
+
+def _create_monitor_tool(camera_enum_all: list[str]) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "create_monitor",
+            "description": (
+                "Set up a STANDING watch on one or more cameras (or 'all'). "
+                "kind='notify' alerts the user whenever the target appears; "
+                "kind='count' keeps a live count. Use for ongoing requests "
+                "like 'notify me when you see a person on cam1', 'count people "
+                "on gate 2', 'watch all cameras for a car'. NOT for one-off "
+                "'what do you see right now' questions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["notify", "count"]},
+                    "target": {"type": "string",
+                               "description": "What to watch for, e.g. 'person', 'car', 'dog'."},
+                    "camera_id": {"type": "string", "enum": camera_enum_all,
+                                  "description": "A camera id, or 'all'."},
+                    "camera_ids": {"type": "array", "items": {"type": "string", "enum": camera_enum_all},
+                                   "description": "Optional: several cameras at once."},
+                },
+                "required": ["kind", "target", "camera_id"],
+            },
+        },
+    }
+
+
+def _stop_monitor_tool() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "stop_monitor",
+            "description": "Stop a standing monitor by its numeric id.",
+            "parameters": {
+                "type": "object",
+                "properties": {"monitor_id": {"type": "integer"}},
+                "required": ["monitor_id"],
+            },
+        },
+    }
+
+
+# ── Alarms (condition → ring) ──────────────────────────────────────────
+
+
+def _parse_hhmm(value: Any) -> int | None:
+    """Parse 'HH:MM' (24h) to minutes-since-midnight, else None."""
+    if not value:
+        return None
+    try:
+        h, m = str(value).strip().split(":")
+        h, m = int(h), int(m)
+        if 0 <= h < 24 and 0 <= m < 60:
+            return h * 60 + m
+    except (ValueError, AttributeError):
+        pass
+    return None
+
+
+@dataclass
+class Alarm:
+    """A high-severity rule: when ``target`` appears on a watched camera
+    (optionally only within a time window), the alarm RINGS until a human
+    acknowledges it. Optionally tied to an emergency contact (the actual
+    call-out is a documented future integration — see ALARMS.md)."""
+
+    id: int
+    name: str
+    target: str
+    camera_ids: list[str]
+    after_min: int | None = None
+    before_min: int | None = None
+    emergency_contact: str | None = None
+    active: bool = True
+    triggered: bool = False
+    created_at: float = 0.0
+    last_triggered: float | None = None
+    trigger_count: int = 0
+    last_ack: float = 0.0
+
+    def window_label(self) -> str:
+        def fmt(m):
+            return f"{m // 60:02d}:{m % 60:02d}"
+        if self.after_min is not None and self.before_min is not None:
+            return f"between {fmt(self.after_min)} and {fmt(self.before_min)}"
+        if self.after_min is not None:
+            return f"after {fmt(self.after_min)}"
+        if self.before_min is not None:
+            return f"before {fmt(self.before_min)}"
+        return "any time"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id, "name": self.name, "target": self.target,
+            "camera_ids": self.camera_ids, "window": self.window_label(),
+            "active": self.active, "triggered": self.triggered,
+            "trigger_count": self.trigger_count,
+            "emergency_contact_configured": bool(self.emergency_contact),
+            "created_at": self.created_at, "last_triggered": self.last_triggered,
+        }
+
+
+class AlarmManager:
+    """Polls watched cameras and rings when an alarm's condition is met.
+    Mirrors MonitorManager but raises sticky, acknowledgeable alarm events
+    (the UI plays a siren while any alarm is ``triggered``). In-memory only."""
+
+    def __init__(self, runtime: "CameraAgentRuntime", *, interval: float = 5.0,
+                 rearm_cooldown: float = 20.0, max_alarms: int = 20) -> None:
+        self._runtime = runtime
+        self._alarms: dict[int, Alarm] = {}
+        self._order: list[int] = []
+        self._tasks: dict[int, asyncio.Task] = {}
+        self._events: list[dict[str, Any]] = []
+        self._next_id = 1
+        self._next_event_id = 1
+        self._interval = interval
+        self._rearm = rearm_cooldown
+        self._max = max_alarms
+
+    def create(self, *, name: str, target: str, camera_ids: list[str],
+               after_min: int | None = None, before_min: int | None = None,
+               emergency_contact: str | None = None) -> Alarm:
+        import time
+
+        alarm = Alarm(
+            id=self._next_id, name=name.strip() or "Alarm",
+            target=target.strip().lower(), camera_ids=list(camera_ids),
+            after_min=after_min, before_min=before_min,
+            emergency_contact=emergency_contact, created_at=time.time(),
+        )
+        self._next_id += 1
+        self._alarms[alarm.id] = alarm
+        self._order.append(alarm.id)
+        while len(self._order) > self._max:
+            old = self._order.pop(0)
+            self.stop(old)
+            self._alarms.pop(old, None)
+        self._tasks[alarm.id] = asyncio.create_task(self._loop(alarm), name=f"alarm-{alarm.id}")
+        logger.info("alarm #%d %r (%s on %s, %s) armed", alarm.id, alarm.name,
+                    alarm.target, camera_ids, alarm.window_label())
+        return alarm
+
+    def stop(self, alarm_id: int) -> bool:
+        alarm = self._alarms.get(alarm_id)
+        if not alarm:
+            return False
+        alarm.active = False
+        alarm.triggered = False
+        t = self._tasks.pop(alarm_id, None)
+        if t:
+            t.cancel()
+        return True
+
+    def acknowledge(self, alarm_id: int | None = None) -> int:
+        """Silence one alarm (or all when id is None). Returns how many."""
+        import time
+
+        n = 0
+        for aid, alarm in self._alarms.items():
+            if alarm_id in (None, aid) and alarm.triggered:
+                alarm.triggered = False
+                alarm.last_ack = time.time()
+                n += 1
+        return n
+
+    def stop_all(self) -> None:
+        for aid in list(self._alarms):
+            self.stop(aid)
+
+    def list(self) -> list[dict[str, Any]]:
+        return [self._alarms[i].to_dict() for i in self._order if i in self._alarms]
+
+    def events(self) -> list[dict[str, Any]]:
+        return list(self._events[-50:])
+
+    def _in_window(self, alarm: Alarm) -> bool:
+        if alarm.after_min is None and alarm.before_min is None:
+            return True
+        import datetime
+
+        now = datetime.datetime.now().time()
+        mins = now.hour * 60 + now.minute
+        a, b = alarm.after_min, alarm.before_min
+        if a is not None and b is not None:
+            return (a <= mins < b) if a <= b else (mins >= a or mins < b)
+        if a is not None:
+            return mins >= a
+        return mins < b
+
+    async def _loop(self, alarm: Alarm) -> None:
+        try:
+            while alarm.active and not self._runtime._stop_event.is_set():
+                if self._in_window(alarm):
+                    for cam in alarm.camera_ids:
+                        if not alarm.active:
+                            break
+                        await self._poll(alarm, cam)
+                await asyncio.sleep(self._interval)
+        except asyncio.CancelledError:  # pragma: no cover
+            pass
+        except Exception:  # pragma: no cover
+            logger.exception("alarm #%d loop crashed", alarm.id)
+
+    async def _poll(self, alarm: Alarm, cam: str) -> None:
+        import time
+
+        try:
+            frame = await self._runtime.context.get_frame(cam)
+            resp = await self._runtime.detection_client.infer(frame_jpeg=frame)
+        except Exception as exc:
+            logger.info("alarm #%d: poll of %s failed (%s)", alarm.id, cam, exc)
+            return
+        detections = (resp.get("result") or {}).get("detections") or []
+        present = self._runtime.monitors._count_target(detections, alarm.target) > 0
+        now = time.time()
+        if present and not alarm.triggered and (now - alarm.last_ack) >= self._rearm:
+            alarm.triggered = True
+            alarm.last_triggered = now
+            alarm.trigger_count += 1
+            text = f"{alarm.name}: {alarm.target} detected on {cam}"
+            if alarm.emergency_contact:
+                text += f" (would alert {alarm.emergency_contact})"
+            self._events.append({
+                "id": self._next_event_id, "alarm_id": alarm.id, "name": alarm.name,
+                "text": text, "camera": cam, "ts": now,
+                "emergency_contact": alarm.emergency_contact,
+            })
+            self._next_event_id += 1
+            logger.warning("ALARM #%d TRIGGERED: %s", alarm.id, text)
+
+
+def _create_alarm_tool(camera_enum_all: list[str]) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "create_alarm",
+            "description": (
+                "Arm a high-severity ALARM that RINGS when something appears, "
+                "optionally only within a time window. Use for 'sound a fire "
+                "alarm if you see fire', 'alarm if a person is seen after 6pm', "
+                "'alert me loudly if a car enters at night'. Different from a "
+                "monitor: an alarm rings until acknowledged."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Short alarm name, e.g. 'Fire', 'After-hours intrusion'."},
+                    "target": {"type": "string", "description": "What triggers it, e.g. 'fire', 'person', 'smoke'."},
+                    "camera_id": {"type": "string", "enum": camera_enum_all, "description": "A camera id, or 'all'."},
+                    "camera_ids": {"type": "array", "items": {"type": "string", "enum": camera_enum_all}},
+                    "after": {"type": "string", "description": "Only active after this 24h time 'HH:MM' (e.g. '18:00' for after 6pm)."},
+                    "before": {"type": "string", "description": "Only active before this 24h time 'HH:MM'."},
+                },
+                "required": ["name", "target", "camera_id"],
+            },
+        },
+    }
+
+
+def _stop_alarm_tool() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "stop_alarm",
+            "description": "Disarm an alarm by its numeric id, or acknowledge/silence a ringing one.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "alarm_id": {"type": "integer"},
+                    "action": {"type": "string", "enum": ["disarm", "silence"],
+                               "description": "'silence' stops the current ring but keeps the alarm armed; 'disarm' removes it."},
+                },
+                "required": ["alarm_id"],
+            },
+        },
+    }
+
+
+def _create_background_task_tool() -> dict[str, Any]:
+    """OpenAI/Ollama function schema for Ram's background-task tool."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "create_background_task",
+            "description": (
+                "Queue a long-running investigation that may take a while, "
+                "such as searching recorded footage for a past event. Use this "
+                "for questions about the RECORDED PAST (earlier, yesterday, a "
+                "specific past time). Returns immediately; the answer is "
+                "delivered to the user when the task finishes."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "Short natural-language description of what to look "
+                            "for, e.g. 'a person in a red shirt on the porch "
+                            "around 3am two days ago'."
+                        ),
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    }
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -218,6 +773,10 @@ def load_config(path: str | Path) -> AppConfig:
         footage_index_path=raw.get("footage_index_path"),
         opennvr_cameras_url=raw.get("opennvr_cameras_url"),
         opennvr_api_key=raw.get("opennvr_api_key"),
+        emergency_contacts=(
+            dict(raw["emergency_contacts"])
+            if isinstance(raw.get("emergency_contacts"), dict) else None
+        ),
         host=_str("host", "127.0.0.1"),
         port=_int("port", 9100),
         system_prompt=str(raw.get("system_prompt") or _DEFAULT_SYSTEM_PROMPT),
@@ -340,20 +899,124 @@ class CameraAgentRuntime:
             recognition_client=self.recognition_client,
             footage_index=self.footage_index,
         )
-        self.tool_definitions = build_tool_definitions(
+        # Tools the background task runner uses — the live camera/footage
+        # tools WITHOUT create_background_task (a task must not spawn tasks).
+        self.background_tool_definitions = build_tool_definitions(
             [cam.camera_id for cam in cfg.cameras],
             enabled=cfg.enabled_tools,
         )
+        # Foreground tools = background tools + the agent-control tools
+        # (offload long jobs, set up standing monitors) — none of which a
+        # background task is allowed to call.
+        _camera_enum_all = [cam.camera_id for cam in cfg.cameras] + ["all"]
+        self.tool_definitions = list(self.background_tool_definitions) + [
+            _create_background_task_tool(),
+            _create_monitor_tool(_camera_enum_all),
+            _stop_monitor_tool(),
+            _create_alarm_tool(_camera_enum_all),
+            _stop_alarm_tool(),
+        ]
         self.tool_handlers = {
             "describe_camera": self.tools.describe_camera,
             "detect_objects": self.tools.detect_objects,
             "recognize_faces": self.tools.recognize_faces,
             "search_footage": self.tools.search_footage,
             "recent_events": self.tools.recent_events,
+            "create_background_task": self._handle_create_task,
+            "create_monitor": self._handle_create_monitor,
+            "stop_monitor": self._handle_stop_monitor,
+            "create_alarm": self._handle_create_alarm,
+            "stop_alarm": self._handle_stop_alarm,
         }
 
+        self.tasks = TaskManager(self)
+        self.monitors = MonitorManager(self)
+        self.alarms = AlarmManager(self)
         self._stop_event = asyncio.Event()
         self._subscriber_task: asyncio.Task | None = None
+
+    def _emergency_contact_for(self, name: str, target: str) -> str | None:
+        contacts = self.cfg.emergency_contacts or {}
+        for key in (target.lower(), name.lower()):
+            if key in contacts:
+                return str(contacts[key])
+        return None
+
+    async def _handle_create_alarm(self, args: dict[str, Any]) -> str:
+        name = str(args.get("name") or "").strip() or "Alarm"
+        target = str(args.get("target") or "").strip().lower()
+        if not target:
+            return "What should set off the alarm (e.g. fire, a person)?"
+        cams = self.tools._resolve_cameras(args)
+        if isinstance(cams, str):  # ERROR:
+            return cams
+        after_min = _parse_hhmm(args.get("after"))
+        before_min = _parse_hhmm(args.get("before"))
+        contact = self._emergency_contact_for(name, target)
+        alarm = self.alarms.create(
+            name=name, target=target, camera_ids=cams,
+            after_min=after_min, before_min=before_min, emergency_contact=contact,
+        )
+        where = "all cameras" if set(cams) == {c.camera_id for c in self.cfg.cameras} else ", ".join(cams)
+        window = alarm.window_label()
+        when = "" if window == "any time" else f" ({window})"
+        extra = f" If it fires I'll flag the emergency contact ({contact})." if contact else ""
+        return (f"Armed alarm #{alarm.id} '{name}' — I'll sound it if I see "
+                f"{target} on {where}{when}.{extra}")
+
+    async def _handle_stop_alarm(self, args: dict[str, Any]) -> str:
+        try:
+            aid = int(args.get("alarm_id"))
+        except (TypeError, ValueError):
+            return "Which alarm? Tell me its number."
+        action = str(args.get("action") or "disarm").strip().lower()
+        if action == "silence":
+            return ("Silenced." if self.alarms.acknowledge(aid)
+                    else f"Alarm #{aid} isn't currently ringing.")
+        return (f"Disarmed alarm #{aid}." if self.alarms.stop(aid)
+                else f"I don't have an alarm #{aid}.")
+
+    async def _handle_create_monitor(self, args: dict[str, Any]) -> str:
+        kind = str(args.get("kind") or "").strip().lower()
+        if kind not in ("notify", "count"):
+            return "I can either 'notify' you when something appears or 'count' it — which would you like?"
+        target = str(args.get("target") or "").strip().lower()
+        if not target:
+            return "What should I watch for (e.g. a person, a car)?"
+        cams = self.tools._resolve_cameras(args)
+        if isinstance(cams, str):  # ERROR:
+            return cams
+        mon = self.monitors.create(
+            kind=kind, camera_ids=cams, target=target,
+            description=str(args.get("description") or "").strip(),
+        )
+        where = "all cameras" if set(cams) == {c.camera_id for c in self.cfg.cameras} else ", ".join(cams)
+        if kind == "notify":
+            return (f"Done — watch #{mon.id} is live. I'll let you know whenever "
+                    f"I see a {target} on {where}.")
+        return (f"Done — I'm now counting {target}s on {where} (watch #{mon.id}); "
+                f"you'll see a live tally in the panel.")
+
+    async def _handle_stop_monitor(self, args: dict[str, Any]) -> str:
+        try:
+            mid = int(args.get("monitor_id"))
+        except (TypeError, ValueError):
+            return "Which watch should I stop? Tell me its number."
+        return (f"Stopped watch #{mid}." if self.monitors.stop(mid)
+                else f"I don't have a watch #{mid} running.")
+
+    async def _handle_create_task(self, args: dict[str, Any]) -> str:
+        """Tool handler: queue a long-running job and acknowledge so the
+        conversation continues while it runs in the background."""
+        query = str(args.get("query") or args.get("description") or "").strip()
+        if not query:
+            return "I need a bit more detail about what to look for."
+        task = self.tasks.create(query)
+        return (
+            f"That one needs a closer look, so I've started it as background "
+            f"task #{task.id}. I'll tell you as soon as I have the answer — "
+            f"ask me anything else meanwhile."
+        )
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
@@ -387,6 +1050,17 @@ class CameraAgentRuntime:
             self._prewarm_llm(), name="camera-agent-llm-prewarm"
         )
 
+        # Pre-warm the vision detector so its model is loaded (and its
+        # weights downloaded) BEFORE the first real question. This is the
+        # fix for "camera offline at startup": the ai-adapter reports
+        # healthy before its model weights finish downloading, so the
+        # first detect would otherwise fail. We send a tiny synthetic
+        # frame and retry with backoff until the adapter answers.
+        # Best-effort: never blocks startup.
+        self._vision_warmup_task = asyncio.create_task(
+            self._prewarm_vision(), name="camera-agent-vision-prewarm"
+        )
+
     async def _prewarm_llm(self) -> None:
         try:
             logger.info(
@@ -414,8 +1088,42 @@ class CameraAgentRuntime:
                 exc,
             )
 
+    # A small valid white JPEG (32x32) — just enough to make the detector
+    # load its model; YOLOv8 returns no detections on it.
+    _WARMUP_JPEG = base64.b64decode(
+        "/9j/4AAQSkZJRgABAgAAAQABAAD//gARTGF2YzU4LjEzNC4xMDAA/9sAQwAIBAQEBAQFBQUF"
+        "BQUGBgYGBgYGBgYGBgYGBwcHCAgIBwcHBgYHBwgICAgJCQkICAgICQkKCgoMDAsLDg4OEREU"
+        "/8QASwABAQAAAAAAAAAAAAAAAAAAAAcBAQAAAAAAAAAAAAAAAAAAAAAQAQAAAAAAAAAAAAAA"
+        "AAAAAAARAQAAAAAAAAAAAAAAAAAAAAD/wAARCAAgACADASIAAhEAAxEA/9oADAMBAAIRAxEA"
+        "PwC/gAAAAAAA/9k="
+    )
+
+    async def _prewarm_vision(self, *, attempts: int = 10, backoff_s: float = 6.0) -> None:
+        """Force the detection adapter to load its model before the first
+        real question. Retries over a window so it bridges the background
+        weight download (the ai-adapter is 'healthy' before weights land)."""
+        for attempt in range(1, attempts + 1):
+            try:
+                await self.detection_client.infer(frame_jpeg=self._WARMUP_JPEG)
+                logger.info("camera-agent: vision detector warm (attempt %d).", attempt)
+                return
+            except Exception as exc:
+                logger.info(
+                    "camera-agent: vision pre-warm attempt %d/%d not ready (%s)",
+                    attempt, attempts, exc,
+                )
+                await asyncio.sleep(backoff_s)
+        logger.warning(
+            "camera-agent: vision detector did not warm up after %d attempts; "
+            "the first camera question may report the camera offline until the "
+            "adapter finishes loading its model.",
+            attempts,
+        )
+
     async def shutdown(self) -> None:
         self._stop_event.set()
+        self.monitors.stop_all()
+        self.alarms.stop_all()
         if self._subscriber_task is not None:
             try:
                 await asyncio.wait_for(self._subscriber_task, timeout=5.0)
@@ -438,17 +1146,37 @@ class CameraAgentRuntime:
     # ── System prompt construction ────────────────────────────────
 
     def build_system_prompt(self) -> str:
-        """Compose the system prompt the LLM sees: operator's base
-        prompt + a per-camera roster so the model can pick the right
-        ``camera_id`` from natural-language references."""
+        """Compose the system prompt the LLM sees: Ram's identity + the
+        operator's base prompt + a per-camera roster + task guidance."""
         roster = "\n".join(
             f"- {cam.camera_id}: {cam.role}" for cam in self.cfg.cameras
         )
         return (
+            f"Your name is {AGENT_NAME}. You are the OpenNVR camera agent. "
+            f"When you introduce yourself, use the name {AGENT_NAME}.\n\n"
             f"{self.cfg.system_prompt.strip()}\n\n"
             f"Cameras available to you:\n{roster}\n\n"
             f"Always pass one of the camera_id values exactly as listed "
-            f"when calling a tool."
+            f"when calling a tool.\n\n"
+            f"You can look at ONE camera, SEVERAL, or 'all' of them — pass "
+            f"camera_id='all' (or a camera_ids list) when the user asks about "
+            f"every camera or more than one.\n\n"
+            f"For STANDING requests — 'notify me when you see…', 'let me know "
+            f"if…', 'keep counting…', 'watch cam X for…' — call create_monitor "
+            f"(kind 'notify' or 'count') instead of a one-off detection, and "
+            f"confirm what you'll watch. Use stop_monitor to cancel one.\n\n"
+            f"For URGENT, ringing requests — 'sound an alarm if…', 'fire alarm', "
+            f"'alert me loudly if…', 'alarm if a person is seen after 6pm' — call "
+            f"create_alarm (not create_monitor). Extract any time window into "
+            f"'after'/'before' as 24h 'HH:MM' (e.g. 6pm → after '18:00'). An "
+            f"alarm rings until acknowledged; use stop_alarm to silence or "
+            f"disarm it.\n\n"
+            f"For questions about the RECORDED PAST (e.g. 'earlier today', "
+            f"'two days ago at 3am', 'last week') searching footage can take "
+            f"a while. For those, call create_background_task with a short "
+            f"description instead of answering immediately, tell the user you'll "
+            f"look into it and get back to them, and keep the conversation going. "
+            f"You'll deliver the result when the task finishes."
         )
 
 
@@ -551,6 +1279,131 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
     async def _demo() -> HTMLResponse:
         return HTMLResponse(_load_demo_html())
 
+    @app.get("/cameras")
+    async def _cameras() -> dict[str, Any]:
+        """Camera roster for the demo dropdown (id + role description)."""
+        return {
+            "cameras": [
+                {"camera_id": cam.camera_id, "role": cam.role}
+                for cam in runtime.cfg.cameras
+            ]
+        }
+
+    @app.get("/intro")
+    async def _intro() -> JSONResponse:
+        """Ram's greeting — text always; audio when Piper is reachable."""
+        audio_b64 = None
+        try:
+            audio = await runtime.piper.synthesize(GREETING)
+            if audio:
+                audio_b64 = base64.b64encode(audio).decode("ascii")
+        except Exception:
+            logger.info("intro: TTS unavailable; returning text only")
+        return JSONResponse({"name": AGENT_NAME, "text": GREETING, "audio_b64": audio_b64})
+
+    @app.get("/tasks")
+    async def _tasks() -> dict[str, Any]:
+        """Ram's background tasks (the UI polls this to surface results)."""
+        return {"tasks": runtime.tasks.list()}
+
+    @app.post("/tasks")
+    async def _create_task(request: Request) -> JSONResponse:
+        """Manually queue a background task (UI 'register a task' action)."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        query = str((body or {}).get("query") or "").strip()
+        if not query:
+            return JSONResponse({"error": "query is required"}, status_code=400)
+        task = runtime.tasks.create(query)
+        return JSONResponse(task.to_dict(), status_code=202)
+
+    @app.post("/say")
+    async def _say(request: Request) -> JSONResponse:
+        """Synthesize arbitrary text so the UI can speak things Ram produces
+        outside a /converse turn — e.g. announcing a finished background task
+        aloud. Text-only fallback when Piper is unreachable."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        text = str((body or {}).get("text") or "").strip()[:600]
+        if not text:
+            return JSONResponse({"error": "text is required"}, status_code=400)
+        audio_b64 = None
+        try:
+            audio = await runtime.piper.synthesize(text)
+            if audio:
+                audio_b64 = base64.b64encode(audio).decode("ascii")
+        except Exception:
+            logger.info("say: TTS unavailable; returning text-only")
+        return JSONResponse({"audio_b64": audio_b64})
+
+    @app.get("/monitors")
+    async def _monitors() -> dict[str, Any]:
+        """Standing monitors + any new notifications (UI polls this)."""
+        return {
+            "monitors": runtime.monitors.list(),
+            "notifications": runtime.monitors.notifications(),
+        }
+
+    @app.post("/monitors")
+    async def _create_monitor(request: Request) -> JSONResponse:
+        """Manually register a monitor (UI 'add watch' action)."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        msg = await runtime._handle_create_monitor(body or {})
+        if msg.startswith("ERROR:") or msg.endswith("?"):
+            return JSONResponse({"error": msg}, status_code=400)
+        return JSONResponse({"message": msg, "monitors": runtime.monitors.list()}, status_code=202)
+
+    @app.delete("/monitors/{monitor_id}")
+    async def _stop_monitor(monitor_id: int) -> JSONResponse:
+        ok = runtime.monitors.stop(monitor_id)
+        return JSONResponse({"stopped": ok}, status_code=200 if ok else 404)
+
+    @app.get("/alarms")
+    async def _alarms() -> dict[str, Any]:
+        """Armed alarms + recent trigger events (UI polls; rings while any
+        alarm is triggered)."""
+        alarms = runtime.alarms.list()
+        return {
+            "alarms": alarms,
+            "events": runtime.alarms.events(),
+            "ringing": any(a["triggered"] for a in alarms),
+        }
+
+    @app.post("/alarms")
+    async def _create_alarm(request: Request) -> JSONResponse:
+        """Arm an alarm (UI presets + 'add alarm' use this)."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        msg = await runtime._handle_create_alarm(body or {})
+        if msg.startswith("ERROR:") or msg.endswith("?"):
+            return JSONResponse({"error": msg}, status_code=400)
+        return JSONResponse({"message": msg, "alarms": runtime.alarms.list()}, status_code=202)
+
+    @app.post("/alarms/ack")
+    async def _ack_alarms(request: Request) -> JSONResponse:
+        """Acknowledge/silence a ringing alarm (or all). Keeps it armed."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        aid = body.get("alarm_id")
+        n = runtime.alarms.acknowledge(int(aid) if aid is not None else None)
+        return JSONResponse({"silenced": n})
+
+    @app.delete("/alarms/{alarm_id}")
+    async def _delete_alarm(alarm_id: int) -> JSONResponse:
+        ok = runtime.alarms.stop(alarm_id)
+        return JSONResponse({"stopped": ok}, status_code=200 if ok else 404)
+
     # Demo-local conversation memory (single user). Kept tiny and turn-text
     # only; reset via POST /reset. A multi-user UI would key this per session.
     demo_history: list[dict[str, str]] = []
@@ -563,12 +1416,21 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.post("/converse")
     async def _converse(request: Request) -> JSONResponse:
-        """Push-to-talk turn: audio blob in → {transcript, reply, audio_b64} out."""
+        """Voice turn: audio blob in → {transcript, reply, audio_b64} out.
+
+        Optional ``?camera=<id>`` query param is the UI-selected camera; it
+        becomes the default when the user doesn't name a camera out loud."""
         blob = await request.body()
         if not blob:
             return JSONResponse(
                 {"error": "empty audio"}, status_code=400
             )
+
+        # UI-selected camera hint (ignored if it isn't a configured camera).
+        configured = {cam.camera_id for cam in runtime.cfg.cameras}
+        camera_hint = request.query_params.get("camera") or None
+        if camera_hint not in configured:
+            camera_hint = None
 
         # 1) Normalise the recording to 16 kHz mono WAV (ffmpeg handles
         #    whatever container MediaRecorder produced).
@@ -591,8 +1453,11 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             return JSONResponse({"transcript": "", "reply": "", "audio_b64": None})
 
         # 3) LLM tool-calling loop.
+        runtime.tools.last_cameras_used = []
         try:
-            reply = await _run_conversation_turn(runtime, demo_history, transcript)
+            reply = await _run_conversation_turn(
+                runtime, demo_history, transcript, preferred_camera=camera_hint
+            )
         except Exception:
             logger.exception("converse: LLM turn failed")
             return JSONResponse({"error": "assistant failed"}, status_code=502)
@@ -612,9 +1477,10 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         except Exception:
             logger.exception("converse: TTS failed")  # text still returned
 
-        return JSONResponse(
-            {"transcript": transcript, "reply": reply, "audio_b64": audio_b64}
-        )
+        return JSONResponse({
+            "transcript": transcript, "reply": reply, "audio_b64": audio_b64,
+            "cameras_used": list(runtime.tools.last_cameras_used),
+        })
 
     @app.websocket("/ws")
     async def _ws(websocket: WebSocket) -> None:
@@ -759,9 +1625,10 @@ def _looks_like_camera_question(text: str) -> bool:
     return bool(_CAMERA_RE.search(text or ""))
 
 
-def _pick_camera(text: str, cameras: list[str]) -> str:
-    """Best-effort: which camera did the user mean? Falls back to the first
-    configured camera when unspecified."""
+def _pick_camera(text: str, cameras: list[str], preferred: str | None = None) -> str:
+    """Best-effort: which camera did the user mean? An explicit name in the
+    utterance wins; otherwise fall back to the UI-selected ``preferred``
+    camera, then to the first configured camera."""
     t = text.lower().replace("-", " ")
     compact = t.replace(" ", "")
     for cam in cameras:
@@ -775,6 +1642,8 @@ def _pick_camera(text: str, cameras: list[str]) -> str:
     for n in ("1", "2", "3", "4"):
         if re.search(rf"\b{n}\b", t) and f"cam{n}" in cameras:
             return f"cam{n}"
+    if preferred and preferred in cameras:
+        return preferred
     return cameras[0]
 
 
@@ -784,6 +1653,8 @@ async def _run_conversation_turn(
     user_text: str,
     *,
     max_iterations: int = 4,
+    preferred_camera: str | None = None,
+    tool_definitions: list[dict[str, Any]] | None = None,
 ) -> str:
     """Run the tool-calling LLM loop for one user utterance and return the
     final spoken reply. ``history`` holds prior user/assistant text turns
@@ -798,17 +1669,29 @@ async def _run_conversation_turn(
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": runtime.build_system_prompt()}
     ]
+    tools = tool_definitions if tool_definitions is not None else runtime.tool_definitions
+    cameras = [cam.camera_id for cam in runtime.cfg.cameras]
+    # UI-selected camera: when the user doesn't name one, bias the model
+    # toward the camera the operator picked in the dropdown.
+    if preferred_camera and preferred_camera in cameras:
+        messages.append({
+            "role": "system",
+            "content": (
+                f"The user is currently viewing camera '{preferred_camera}'. "
+                f"If they ask about a camera without naming one, assume they "
+                f"mean '{preferred_camera}'."
+            ),
+        })
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
 
-    cameras = [cam.camera_id for cam in runtime.cfg.cameras]
     final = ""
     grounded = False   # did any tool actually run this turn?
     forced = False     # have we already injected a forced detection?
     for iteration in range(max_iterations):
         response = await runtime.ollama.chat(
             messages=messages,
-            tools=runtime.tool_definitions,
+            tools=tools,
             temperature=runtime.cfg.llm_temperature,
             max_tokens=runtime.cfg.llm_max_tokens,
         )
@@ -851,7 +1734,7 @@ async def _run_conversation_turn(
         ):
             forced = True
             grounded = True
-            cam = _pick_camera(user_text, cameras)
+            cam = _pick_camera(user_text, cameras, preferred_camera)
             call = {
                 "id": "forced-0", "type": "function",
                 "function": {"name": "detect_objects",
