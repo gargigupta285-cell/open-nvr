@@ -3,577 +3,407 @@
   Copyright (c) 2026 OpenNVR
   SPDX-License-Identifier: AGPL-3.0-or-later
 
-  OpenNVR Camera Agent — "Ram" — front-end.
+  OpenNVR Camera Agent front-end (vanilla JS, no build step).
 
-  No build step, no framework, no JS dependencies — vanilla JS.
-
-  * Ram introduces himself (text + spoken via Piper) the moment you enable
-    the conversation.
-  * Hands-free: a small client-side VAD (Web Audio RMS) detects when you
-    start/stop speaking, captures that one utterance, and POSTs it to
-    /converse (ffmpeg → Whisper → tool-calling LLM → Piper → reply).
-  * Idle auto-stop: if nobody speaks for a while, Ram stops listening and an
-    "Enable talking" button appears to resume.
-  * Background tasks: long jobs (e.g. searching recorded footage) run async;
-    the task panel polls /tasks and Ram announces results when they're ready.
-  * An animated avatar reflects Ram's state: idle / listening / thinking /
-    speaking.
+  * The agent introduces itself (text + spoken via Piper) on enable. Its name
+    follows the configured voice (Shailaja / Sidhu) — fetched from /agent.
+  * Hands-free: client-side VAD detects each utterance and POSTs it to
+    /converse; idle auto-stops with an "Enable talking" button.
+  * Right rail: alarms, watches, and background tasks — each live-polled.
+  * Audio cues: a two-tone siren while any alarm rings, and a short chime when
+    a background task finishes or a watch notifies. All Web Audio, no assets.
+  * Camera selector supports one, several (checkboxes), or all cameras.
 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>OpenNVR Camera Agent — Ram</title>
+  <title>OpenNVR Camera Agent</title>
   <style>
     :root {
-      --bg: #0f1115; --panel: #1a1f2a; --text: #e6edf3; --muted: #8b98a9;
-      --accent: #4fd1c5; --accent-strong: #38b2ac; --danger: #e53e3e;
-      --user: #9ae6b4; --agent: #90cdf4; --ram: #4fd1c5;
+      --bg:#0f1115; --panel:#1a1f2a; --panel2:#11151d; --text:#e6edf3; --muted:#8b98a9;
+      --accent:#4fd1c5; --accent-strong:#38b2ac; --danger:#e53e3e;
+      --user:#9ae6b4; --agent:#90cdf4; --border:rgba(255,255,255,0.10);
     }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-      background: var(--bg); color: var(--text);
-      display: flex; justify-content: center; padding: 2rem 1rem;
-    }
-    main { width: 100%; max-width: 40rem; background: var(--panel);
-      border-radius: 0.75rem; padding: 1.5rem; box-shadow: 0 10px 40px rgba(0,0,0,0.4); }
-    .head { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem; }
-    h1 { margin: 0; font-size: 1.4rem; }
-    p.lede { margin: 0.1rem 0 1.25rem 0; color: var(--muted); font-size: 0.9rem; }
-
-    /* ── Ram avatar ─────────────────────────────────────────────── */
-    .ram { width: 64px; height: 64px; flex: 0 0 auto; position: relative; }
-    .ram svg { width: 100%; height: 100%; display: block; }
-    .ram .ring { transform-origin: center; transition: stroke 0.3s; }
-    .ram .iris { transform-origin: center; transition: r 0.2s, fill 0.3s; }
-    /* idle: gentle breathing */
-    .ram.idle .ring { stroke: var(--muted); animation: breathe 3.5s ease-in-out infinite; }
-    .ram.idle .iris { fill: var(--muted); }
-    /* listening: green, expanding pulse */
-    .ram.listening .ring { stroke: var(--accent); animation: pulse 1.4s ease-out infinite; }
-    .ram.listening .iris { fill: var(--accent); }
-    /* thinking: rotating dashed ring */
-    .ram.thinking .ring { stroke: #f6c453; stroke-dasharray: 14 10; animation: spin 1.1s linear infinite; }
-    .ram.thinking .iris { fill: #f6c453; }
-    /* speaking: bouncing scale */
-    .ram.speaking .ring { stroke: var(--agent); animation: bounce 0.7s ease-in-out infinite; }
-    .ram.speaking .iris { fill: var(--agent); }
-    @keyframes breathe { 0%,100% { opacity: .55; } 50% { opacity: 1; } }
-    @keyframes pulse { 0% { transform: scale(.85); opacity: 1; } 100% { transform: scale(1.15); opacity: .25; } }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    @keyframes bounce { 0%,100% { transform: scale(.92); } 50% { transform: scale(1.12); } }
-
-    .controls { display: flex; flex-direction: column; gap: 0.75rem; }
-    label.field { font-size: 0.8rem; color: var(--muted); display: block; margin-bottom: 0.3rem; }
-    select { width: 100%; background: #0f1320; color: var(--text);
-      border: 1px solid rgba(255,255,255,0.12); border-radius: 0.5rem; padding: 0.6rem 0.7rem; font-size: 0.95rem; }
-    .talk { width: 100%; background: var(--accent); color: #062321; border: none;
-      padding: 1.1rem 1.25rem; border-radius: 0.6rem; font-weight: 700; cursor: pointer;
-      font-size: 1.05rem; transition: background 0.15s, transform 0.05s; }
-    .talk:hover:not(:disabled) { background: var(--accent-strong); }
-    .talk:active:not(:disabled) { transform: scale(0.99); }
-    .talk:disabled { opacity: 0.5; cursor: progress; }
-    .talk.listening { background: var(--danger); color: #fff; }
-    .talk.listening::before { content: "● "; animation: blink 1s steps(2,start) infinite; }
-    @keyframes blink { to { visibility: hidden; } }
-    .row { display: flex; gap: 0.5rem; align-items: center; margin: 0.25rem 0; }
-    .status { padding: 0.5rem 0.75rem; border-radius: 0.375rem; background: rgba(255,255,255,0.04);
-      color: var(--muted); font-size: 0.85rem; flex: 1; }
-    .status.active { color: var(--accent); }
-    .status.error { color: var(--danger); }
-    .ghost { background: transparent; color: var(--muted); border: 1px solid rgba(255,255,255,0.12);
-      padding: 0.5rem 0.75rem; border-radius: 0.375rem; cursor: pointer; font-size: 0.8rem; }
-    .ghost:hover { color: var(--text); }
-    .log { margin-top: 1rem; background: rgba(0,0,0,0.25); border-radius: 0.5rem; padding: 0.75rem;
-      max-height: 15rem; overflow-y: auto; font-size: 0.9rem; line-height: 1.4; }
-    .log:empty::after { content: "Your conversation will appear here."; color: var(--muted); font-size: 0.82rem; }
-    .msg { margin: 0.35rem 0; }
-    .msg .who { font-weight: 700; }
-    .msg.user .who { color: var(--user); }
-    .msg.agent .who { color: var(--agent); }
-    .msg.sys { color: var(--muted); font-size: 0.8rem; font-style: italic; }
-
-    /* ── Task panel ─────────────────────────────────────────────── */
-    .tasks { margin-top: 1rem; }
-    .tasks h2 { font-size: 0.8rem; color: var(--muted); margin: 0 0 0.4rem 0; text-transform: uppercase; letter-spacing: 0.04em; }
-    .tasks:empty, .tasks.empty { display: none; }
-    .task { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.6rem;
-      background: rgba(255,255,255,0.03); border-radius: 0.4rem; margin: 0.25rem 0; font-size: 0.85rem; }
-    .task .badge { font-size: 0.95rem; }
-    .task.running .badge { animation: spin 1.1s linear infinite; display: inline-block; }
-    .task .q { flex: 1; color: var(--text); }
-    .task.done .q { color: var(--muted); }
-    .task .stop { background:transparent; border:none; color:var(--muted); cursor:pointer; font-size:0.95rem; }
-    .task .stop:hover { color: var(--danger); }
-    .task .count { color: var(--accent); font-variant-numeric: tabular-nums; }
-    .chip { font-size: 0.75rem; padding: 0.25rem 0.55rem; border-radius: 999px;
-      background: rgba(79,209,197,0.15); color: var(--accent); white-space: nowrap; }
-    .alarmbar { display:flex; align-items:center; gap:0.6rem; background:var(--danger);
-      color:#fff; padding:0.7rem 0.9rem; border-radius:0.6rem; margin-bottom:1rem;
-      font-weight:700; animation: alarmflash 0.9s ease-in-out infinite; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+      background:var(--bg); color:var(--text); padding:1.5rem 1rem; }
+    .wrap { max-width:60rem; margin:0 auto; }
+    .alarmbar { display:flex; align-items:center; gap:0.6rem; background:var(--danger); color:#fff;
+      padding:0.7rem 0.9rem; border-radius:0.6rem; margin-bottom:1rem; font-weight:700;
+      animation:alarmflash 0.9s ease-in-out infinite; }
     .alarmbar .ab-text { flex:1; }
-    .alarmbar .ab-btn { background:#fff; color:var(--danger); border:none;
-      padding:0.4rem 0.8rem; border-radius:0.4rem; font-weight:700; cursor:pointer; }
-    @keyframes alarmflash { 0%,100% { opacity:1; } 50% { opacity:0.7; } }
-    .presets { flex-wrap:wrap; }
-    .preset { font-size:0.8rem; }
-    #alarms .task .badge { color: var(--danger); }
-    #alarms .task.ringing { background: rgba(229,62,62,0.12); }
+    .alarmbar .ab-btn { background:#fff; color:var(--danger); border:none; padding:0.4rem 0.85rem;
+      border-radius:0.4rem; font-weight:700; cursor:pointer; }
+    @keyframes alarmflash { 0%,100%{opacity:1;} 50%{opacity:0.72;} }
+
+    .app { display:grid; grid-template-columns:1fr 19rem; gap:1rem; align-items:start; }
+    @media (max-width:760px) { .app { grid-template-columns:1fr; } }
+    .card { background:var(--panel); border-radius:0.75rem; padding:1.25rem; }
+    .head { display:flex; align-items:center; gap:1rem; margin-bottom:1rem; }
+    h1 { margin:0; font-size:1.35rem; }
+    p.lede { margin:0.15rem 0 0 0; color:var(--muted); font-size:0.88rem; }
+
+    .ram { width:60px; height:60px; flex:0 0 auto; }
+    .ram svg { width:100%; height:100%; display:block; }
+    .ram .ring,.ram .iris { transform-origin:center; transform-box:fill-box; }
+    .ram.idle .ring{stroke:var(--muted);animation:breathe 3.5s ease-in-out infinite}.ram.idle .iris{fill:var(--muted)}
+    .ram.listening .ring{stroke:var(--accent);animation:pulse 1.4s ease-out infinite}.ram.listening .iris{fill:var(--accent)}
+    .ram.thinking .ring{stroke:#f6c453;stroke-dasharray:14 10;animation:spin 1.1s linear infinite}.ram.thinking .iris{fill:#f6c453}
+    .ram.speaking .ring{stroke:var(--agent);animation:bounce 0.7s ease-in-out infinite}.ram.speaking .iris{fill:var(--agent)}
+    @keyframes breathe{0%,100%{opacity:.55}50%{opacity:1}}
+    @keyframes pulse{0%{transform:scale(.85);opacity:1}100%{transform:scale(1.15);opacity:.25}}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @keyframes bounce{0%,100%{transform:scale(.92)}50%{transform:scale(1.12)}}
+
+    label.field { font-size:0.75rem; color:var(--muted); display:block; margin-bottom:0.35rem; }
+    .cambox { border:1px solid var(--border); border-radius:0.5rem; padding:0.5rem 0.6rem; margin-bottom:0.75rem;
+      display:flex; flex-wrap:wrap; gap:0.4rem 0.9rem; max-height:6.5rem; overflow-y:auto; }
+    .cambox label { display:flex; align-items:center; gap:0.35rem; font-size:0.85rem; cursor:pointer; }
+    .cambox input { accent-color:var(--accent); }
+    .talk { width:100%; background:var(--accent); color:#062321; border:none; padding:1.05rem 1.25rem;
+      border-radius:0.6rem; font-weight:700; cursor:pointer; font-size:1.05rem; transition:background .15s,transform .05s; }
+    .talk:hover:not(:disabled){background:var(--accent-strong);} .talk:active:not(:disabled){transform:scale(.99);}
+    .talk:disabled{opacity:.5;cursor:progress;}
+    .talk.listening{background:var(--danger);color:#fff;} .talk.listening::before{content:"● ";animation:blink 1s steps(2,start) infinite;}
+    @keyframes blink{to{visibility:hidden;}}
+    .row { display:flex; gap:0.5rem; align-items:center; margin:0.6rem 0 0; }
+    .status { padding:0.5rem 0.7rem; border-radius:0.375rem; background:rgba(255,255,255,0.04); color:var(--muted); font-size:0.83rem; flex:1; }
+    .status.active{color:var(--accent);} .status.error{color:var(--danger);}
+    .chip { font-size:0.72rem; padding:0.22rem 0.5rem; border-radius:999px; background:rgba(79,209,197,0.15); color:var(--accent); white-space:nowrap; }
+    .ghost { background:transparent; color:var(--muted); border:1px solid var(--border); padding:0.45rem 0.7rem; border-radius:0.375rem; cursor:pointer; font-size:0.8rem; }
+    .ghost:hover{color:var(--text);}
+    .log { margin-top:1rem; background:rgba(0,0,0,0.25); border-radius:0.5rem; padding:0.75rem; height:18rem; overflow-y:auto; font-size:0.9rem; line-height:1.45; }
+    .log:empty::after { content:"Your conversation will appear here."; color:var(--muted); font-size:0.82rem; }
+    .msg{margin:0.35rem 0;} .msg .who{font-weight:700;} .msg.user .who{color:var(--user);} .msg.agent .who{color:var(--agent);}
+    .msg.sys{color:var(--muted); font-size:0.8rem; font-style:italic;}
+
+    .side .card { padding:0.85rem 0.9rem; margin-bottom:1rem; }
+    .side h2 { font-size:0.72rem; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; margin:0 0 .5rem 0; }
+    .side .empty-note { color:var(--muted); font-size:0.78rem; }
+    .item { display:flex; align-items:center; gap:.5rem; padding:.4rem .5rem; background:var(--panel2); border-radius:8px; margin:.3rem 0; font-size:0.83rem; }
+    .item .badge{width:18px;text-align:center;flex:0 0 auto;} .item.running .badge{animation:spin 1.1s linear infinite;display:inline-block;}
+    .item .q{flex:1;} .item.done .q{color:var(--muted);} .item .count{color:var(--accent);font-variant-numeric:tabular-nums;}
+    .item .stop{background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:0.95rem;} .item .stop:hover{color:var(--danger);}
+    .item.ringing{background:rgba(229,62,62,0.14);} #alarmCard .item .badge{color:var(--danger);}
+    .presets{display:flex;flex-wrap:wrap;gap:0.4rem;margin-top:0.4rem;}
+    .presets .ghost{font-size:0.78rem;}
+    .notifyrow{display:flex;align-items:center;gap:0.5rem;margin-top:0.5rem;}
+    .notifyrow .empty-note{flex:1;}
+    .notifyrow .ghost{font-size:0.72rem;padding:0.3rem 0.55rem;}
   </style>
 </head>
 <body>
-  <main>
+  <div class="wrap">
     <div class="alarmbar" id="alarmbar" hidden>
-      <span class="ab-icon">🚨</span>
-      <span class="ab-text" id="alarmText">Alarm</span>
+      <span>🚨</span><span class="ab-text" id="alarmText">Alarm</span>
       <button class="ab-btn" id="silence" type="button">Silence</button>
     </div>
-    <div class="head">
-      <div class="ram idle" id="ram" aria-label="Ram avatar">
-        <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-          <circle class="ring" cx="50" cy="50" r="40" fill="none" stroke-width="5"/>
-          <circle class="iris" cx="50" cy="50" r="16"/>
-        </svg>
+
+    <div class="app">
+      <div class="main-col">
+        <div class="card">
+          <div class="head">
+            <div class="ram idle" id="ram" aria-label="agent avatar">
+              <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+                <circle class="ring" cx="50" cy="50" r="40" fill="none" stroke-width="5"/>
+                <circle class="iris" cx="50" cy="50" r="16"/>
+              </svg>
+            </div>
+            <div>
+              <h1 id="title">Camera Agent</h1>
+              <p class="lede" id="lede">Tap <strong>Talk</strong>, then just speak — hands-free, answers aloud.</p>
+            </div>
+          </div>
+
+          <label class="field">Cameras</label>
+          <div class="cambox" id="cambox">
+            <label><input type="checkbox" id="cam-all" checked> All cameras</label>
+          </div>
+
+          <button id="talk" class="talk" type="button">🎤 Talk</button>
+          <div class="row">
+            <div class="status" id="status">Ready. Tap Talk.</div>
+            <span class="chip" id="working" hidden></span>
+            <button id="reset" class="ghost" type="button">Reset</button>
+          </div>
+
+          <div class="log" id="log"></div>
+        </div>
       </div>
-      <div>
-        <h1>Ram — OpenNVR Camera Agent</h1>
-        <p class="lede">Tap <strong>Talk to Ram</strong>, then just speak. Ram listens hands-free and answers aloud.</p>
+
+      <div class="side">
+        <div class="card" id="alarmCard">
+          <h2>Alarms</h2>
+          <div class="presets">
+            <button class="ghost preset" data-name="Fire" data-target="fire" type="button">🔥 Fire</button>
+            <button class="ghost preset" data-name="After-hours person" data-target="person" data-after="18:00" type="button">🌙 After-hours</button>
+          </div>
+          <div class="notifyrow" id="notifyRow" hidden>
+            <span id="notifyStatus" class="empty-note"></span>
+            <button class="ghost" id="notifyTest" type="button">Test</button>
+          </div>
+          <div id="alarmList"></div>
+        </div>
+        <div class="card">
+          <h2>Watching</h2>
+          <div id="monitorList"></div>
+        </div>
+        <div class="card">
+          <h2>Background tasks</h2>
+          <div id="taskList"></div>
+        </div>
+        <div class="card">
+          <h2>Scheduled reports</h2>
+          <div id="reportList"></div>
+        </div>
       </div>
     </div>
-
-    <div class="controls">
-      <div>
-        <label class="field" for="camera">Camera</label>
-        <select id="camera"><option value="">Auto (let Ram decide)</option></select>
-      </div>
-      <button id="talk" class="talk" type="button">🎤 Talk to Ram</button>
-    </div>
-
-    <div class="row">
-      <div class="status" id="status">Ready. Tap Talk to Ram.</div>
-      <span class="chip" id="working" hidden></span>
-      <button id="reset" class="ghost" type="button">Reset</button>
-    </div>
-
-    <div class="row presets">
-      <span class="field" style="margin:0 0.3rem 0 0">Quick alarms:</span>
-      <button class="ghost preset" data-name="Fire" data-target="fire" type="button">🔥 Fire</button>
-      <button class="ghost preset" data-name="After-hours person" data-target="person" data-after="18:00" type="button">🌙 After-hours person</button>
-    </div>
-
-    <div class="log" id="log"></div>
-    <div class="tasks empty" id="alarms"><h2>Alarms</h2><div id="alarmList"></div></div>
-    <div class="tasks empty" id="monitors"><h2>Watching</h2><div id="monitorList"></div></div>
-    <div class="tasks empty" id="tasks"><h2>Background tasks</h2><div id="taskList"></div></div>
-  </main>
+  </div>
 
   <script>
-    const talkBtn  = document.getElementById("talk");
-    const resetBtn = document.getElementById("reset");
-    const statusEl = document.getElementById("status");
-    const logEl    = document.getElementById("log");
-    const cameraEl = document.getElementById("camera");
-    const ramEl    = document.getElementById("ram");
-    const tasksEl  = document.getElementById("tasks");
-    const taskListEl = document.getElementById("taskList");
-    const workingEl = document.getElementById("working");
-    const monitorsEl = document.getElementById("monitors");
-    const monitorListEl = document.getElementById("monitorList");
-    const alarmbarEl = document.getElementById("alarmbar");
-    const alarmTextEl = document.getElementById("alarmText");
-    const silenceBtn = document.getElementById("silence");
-    const alarmsEl = document.getElementById("alarms");
-    const alarmListEl = document.getElementById("alarmList");
+    const $ = (id) => document.getElementById(id);
+    const talkBtn=$("talk"), resetBtn=$("reset"), statusEl=$("status"), logEl=$("log");
+    const camboxEl=$("cambox"), ramEl=$("ram"), workingEl=$("working");
+    const alarmbarEl=$("alarmbar"), alarmTextEl=$("alarmText"), silenceBtn=$("silence");
+    const alarmListEl=$("alarmList"), monitorListEl=$("monitorList"), taskListEl=$("taskList"), reportListEl=$("reportList");
+    const titleEl=$("title"), ledeEl=$("lede");
 
-    // VAD + idle tuning
-    const START_RMS = 0.025, SILENCE_RMS = 0.015, START_FRAMES = 3;
-    const SILENCE_MS = 900, MIN_UTTER_MS = 350, MAX_UTTER_MS = 15000, TICK_MS = 40;
-    const IDLE_MS = 25000;        // stop listening after this much quiet
-    const TASK_POLL_MS = 3000;    // how often to check background tasks
+    const START_RMS=0.025, SILENCE_RMS=0.015, START_FRAMES=3;
+    const SILENCE_MS=900, MIN_UTTER_MS=350, MAX_UTTER_MS=15000, TICK_MS=40;
+    const IDLE_MS=25000, POLL_MS=3000;
 
+    let agentName="the agent";
     let mediaStream=null, audioCtx=null, analyser=null, floatBuf=null;
     let recorder=null, chunks=[];
-    let sessionActive=false, capturing=false, speaking=false, busy=false;
+    let sessionActive=false, capturing=false, speaking=false, busy=false, alarmRinging=false;
     let loudFrames=0, captureStart=0, lastVoice=0, lastActivity=0;
-    let vadTimer=null, taskTimer=null, introPlayed=false;
-    const knownTasks = {};   // id -> last status we announced
-    const seenNotes = {};    // monitor notification id -> true (already announced)
-    const seenAlarmEvents = {};
-    let workingTimer = null, alarmTimer = null, alarmRinging = false;
-    let sirenOsc = null, sirenGain = null, sirenInt = null;
+    let vadTimer=null, pollTimer=null, alarmTimer=null, workingTimer=null, introPlayed=false;
+    const knownTasks={}, seenNotes={}, seenAlarmEvents={}, seenReports={};
+    let sirenOsc=null, sirenGain=null, sirenInt=null;
 
-    function startSiren() {
-      if (sirenOsc || !audioCtx) return;   // needs an enabled AudioContext
-      sirenOsc = audioCtx.createOscillator();
-      sirenGain = audioCtx.createGain();
-      sirenGain.gain.value = 0.0001;
-      sirenOsc.type = "square";
-      sirenOsc.connect(sirenGain); sirenGain.connect(audioCtx.destination);
-      sirenOsc.start();
-      let hi = false;
-      sirenInt = setInterval(() => {
-        hi = !hi;
-        sirenOsc.frequency.setValueAtTime(hi ? 880 : 620, audioCtx.currentTime);
-        sirenGain.gain.setValueAtTime(0.16, audioCtx.currentTime);
-      }, 500);
+    // ── audio: output ctx (for siren/chimes) + mic ctx share one AudioContext ──
+    function ensureOutputAudio() {
+      if (!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+      if (audioCtx.state === "suspended") audioCtx.resume();
     }
-    function stopSiren() {
-      if (sirenInt) { clearInterval(sirenInt); sirenInt = null; }
-      if (sirenOsc) { try { sirenOsc.stop(); } catch {} sirenOsc.disconnect(); sirenOsc = null; }
-      if (sirenGain) { sirenGain.disconnect(); sirenGain = null; }
-    }
-
-    function showWorking(cameras) {
-      if (workingTimer) { clearTimeout(workingTimer); workingTimer = null; }
-      if (!cameras || !cameras.length) { workingEl.hidden = true; return; }
-      const label = cameras.length > 2
-        ? `looked at ${cameras.length} cameras`
-        : "looked at " + cameras.join(", ");
-      workingEl.textContent = label; workingEl.hidden = false;
-      workingTimer = setTimeout(() => { workingEl.hidden = true; }, 6000);
-    }
-
-    function setAvatar(state) { ramEl.className = "ram " + state; }
-    function setStatus(text, kind="") { statusEl.textContent = text; statusEl.className = "status" + (kind?(" "+kind):""); }
-    function addMsg(text, who) {
-      const div = document.createElement("div");
-      div.className = "msg " + who;
-      if (who === "sys") { div.textContent = text; }
-      else {
-        const label = who === "user" ? "you" : "Ram";
-        div.innerHTML = `<span class="who">${label}:</span> `;
-        div.appendChild(document.createTextNode(text));
-      }
-      logEl.appendChild(div); logEl.scrollTop = logEl.scrollHeight;
-    }
-
-    async function loadCameras() {
-      try {
-        const r = await fetch("/cameras"); if (!r.ok) return;
-        for (const cam of ((await r.json()).cameras || [])) {
-          const o = document.createElement("option");
-          o.value = cam.camera_id;
-          const role = (cam.role || "").trim();
-          o.textContent = role && role !== "(no role configured)" ? `${cam.camera_id} — ${role.slice(0,48)}` : cam.camera_id;
-          cameraEl.appendChild(o);
-        }
-      } catch {}
-    }
-
-    function pickMimeType() {
-      for (const t of ["audio/webm;codecs=opus","audio/webm","audio/ogg;codecs=opus","audio/mp4"])
-        if (window.MediaRecorder && MediaRecorder.isTypeSupported(t)) return t;
-      return "";
-    }
-
-    async function ensureAudio() {
+    async function ensureMic() {
+      ensureOutputAudio();
       if (mediaStream) return;
       mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: { channelCount:1, echoCancellation:true, noiseSuppression:true, autoGainControl:true },
-      });
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      if (audioCtx.state === "suspended") await audioCtx.resume();
+        audio:{channelCount:1,echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
       const src = audioCtx.createMediaStreamSource(mediaStream);
-      analyser = audioCtx.createAnalyser(); analyser.fftSize = 1024;
-      floatBuf = new Float32Array(analyser.fftSize);
+      analyser = audioCtx.createAnalyser(); analyser.fftSize=1024; floatBuf=new Float32Array(analyser.fftSize);
       src.connect(analyser);
     }
+    function rms(){ analyser.getFloatTimeDomainData(floatBuf); let s=0; for(let i=0;i<floatBuf.length;i++)s+=floatBuf[i]*floatBuf[i]; return Math.sqrt(s/floatBuf.length); }
+    function playChime(kind="done") {
+      if (!audioCtx) return;
+      const now=audioCtx.currentTime, notes = kind==="done" ? [660,880] : [520];
+      notes.forEach((f,i)=>{ const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+        o.type="sine"; o.frequency.value=f; o.connect(g); g.connect(audioCtx.destination);
+        const t=now+i*0.16; g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.25,t+0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001,t+0.18); o.start(t); o.stop(t+0.2); });
+    }
+    function startSiren() {
+      ensureOutputAudio();
+      if (sirenOsc || !audioCtx) return;
+      sirenOsc=audioCtx.createOscillator(); sirenGain=audioCtx.createGain(); sirenGain.gain.value=0.0001;
+      sirenOsc.type="square"; sirenOsc.connect(sirenGain); sirenGain.connect(audioCtx.destination); sirenOsc.start();
+      let hi=false; sirenInt=setInterval(()=>{ hi=!hi;
+        sirenOsc.frequency.setValueAtTime(hi?880:620,audioCtx.currentTime);
+        sirenGain.gain.setValueAtTime(0.16,audioCtx.currentTime); },500);
+    }
+    function stopSiren() {
+      if(sirenInt){clearInterval(sirenInt);sirenInt=null;}
+      if(sirenOsc){try{sirenOsc.stop();}catch{}sirenOsc.disconnect();sirenOsc=null;}
+      if(sirenGain){sirenGain.disconnect();sirenGain=null;}
+    }
+    function playWav(b64){ return new Promise(r=>{const a=new Audio("data:audio/wav;base64,"+b64); a.onended=r; a.onerror=r; a.play().catch(r);}); }
 
-    function rms() {
-      analyser.getFloatTimeDomainData(floatBuf);
-      let s = 0; for (let i=0;i<floatBuf.length;i++) s += floatBuf[i]*floatBuf[i];
-      return Math.sqrt(s/floatBuf.length);
+    function setAvatar(s){ ramEl.className="ram "+s; }
+    function setStatus(t,k=""){ statusEl.textContent=t; statusEl.className="status"+(k?(" "+k):""); }
+    function addMsg(text,who){ const d=document.createElement("div"); d.className="msg "+who;
+      if(who==="sys"){d.textContent=text;} else { const label=who==="user"?"you":agentName;
+        d.innerHTML=`<span class="who">${label}:</span> `; d.appendChild(document.createTextNode(text)); }
+      logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight; }
+    function showWorking(cams){ if(workingTimer){clearTimeout(workingTimer);workingTimer=null;}
+      if(!cams||!cams.length){workingEl.hidden=true;return;}
+      workingEl.textContent = cams.length>2 ? `looked at ${cams.length} cameras` : "looked at "+cams.join(", ");
+      workingEl.hidden=false; workingTimer=setTimeout(()=>{workingEl.hidden=true;},6000); }
+
+    async function loadAgent(){ try{ const a=await (await fetch("/agent")).json();
+      if(a.name){ agentName=a.name; titleEl.textContent=agentName+" — OpenNVR Camera Agent";
+        ledeEl.innerHTML=`Tap <strong>Talk</strong>, then just speak. ${agentName} listens hands-free and answers aloud.`; } }catch{} }
+    async function loadCameras(){ try{ const r=await fetch("/cameras"); if(!r.ok)return;
+      for(const cam of ((await r.json()).cameras||[])){ const lab=document.createElement("label");
+        const role=(cam.role||"").trim(); const txt=role&&role!=="(no role configured)"?`${cam.camera_id} · ${role.slice(0,28)}`:cam.camera_id;
+        lab.innerHTML=`<input type="checkbox" class="cam-cb" value="${cam.camera_id}"> ${txt}`; camboxEl.appendChild(lab); }
+      const all=$("cam-all"), cbs=()=>[...document.querySelectorAll(".cam-cb")];
+      all.addEventListener("change",()=>{ if(all.checked) cbs().forEach(c=>{c.checked=false;}); });
+      camboxEl.addEventListener("change",(e)=>{ if(e.target.classList.contains("cam-cb")&&e.target.checked) all.checked=false;
+        if(!cbs().some(c=>c.checked)) all.checked=true; });
+    }catch{} }
+    function cameraParam(){ const all=$("cam-all"); if(all&&all.checked) return "all";
+      const picked=[...document.querySelectorAll(".cam-cb:checked")].map(c=>c.value); return picked.length?picked.join(","):"all"; }
+
+    function pickMimeType(){ for(const t of ["audio/webm;codecs=opus","audio/webm","audio/ogg;codecs=opus","audio/mp4"])
+      if(window.MediaRecorder&&MediaRecorder.isTypeSupported(t))return t; return ""; }
+
+    async function playIntro(){ setStatus(agentName+" is introducing…"); setAvatar("speaking");
+      try{ const d=await (await fetch("/intro")).json(); if(d.name) agentName=d.name;
+        if(d.text) addMsg(d.text,"agent"); if(d.audio_b64){ speaking=true; await playWav(d.audio_b64); speaking=false; } }
+      catch{ addMsg("Hi, I'm "+agentName+", your OpenNVR camera agent.","agent"); } }
+
+    // ── listening loop ──
+    function vadTick(){ if(!sessionActive||speaking||busy||alarmRinging)return;
+      const now=performance.now();
+      if(!capturing && (now-lastActivity>IDLE_MS)){ pauseForIdle(); return; }
+      const level=rms();
+      if(!capturing){ loudFrames=level>START_RMS?loudFrames+1:0; if(loudFrames>=START_FRAMES)startCapture(); return; }
+      if(level>SILENCE_RMS){ lastVoice=now; lastActivity=now; }
+      const dur=now-captureStart;
+      if((now-lastVoice>SILENCE_MS && dur>MIN_UTTER_MS)||dur>MAX_UTTER_MS) stopCapture();
+    }
+    function startCapture(){ const m=pickMimeType(); chunks=[];
+      recorder=new MediaRecorder(mediaStream, m?{mimeType:m}:undefined);
+      recorder.ondataavailable=(e)=>{if(e.data&&e.data.size)chunks.push(e.data);}; recorder.onstop=onUtterance;
+      recorder.start(); capturing=true; captureStart=lastVoice=lastActivity=performance.now();
+      setAvatar("listening"); setStatus("Listening…","active"); }
+    function stopCapture(){ if(!recorder||recorder.state==="inactive")return; capturing=false; loudFrames=0;
+      setAvatar("thinking"); setStatus("Thinking…"); recorder.stop(); }
+
+    async function onUtterance(){ const blob=new Blob(chunks,{type:recorder.mimeType||"audio/webm"});
+      if(blob.size<1200){ if(sessionActive){setAvatar("listening");setStatus("Listening…","active");} return; }
+      busy=true;
+      try{ const url="/converse?camera="+encodeURIComponent(cameraParam());
+        const resp=await fetch(url,{method:"POST",headers:{"Content-Type":"application/octet-stream"},body:blob});
+        if(!resp.ok){const e=await resp.json().catch(()=>({}));throw new Error(e.error||("HTTP "+resp.status));}
+        const data=await resp.json();
+        if(!data.transcript){ if(sessionActive){setAvatar("listening");setStatus("Didn't catch that — keep talking.","active");} return; }
+        addMsg(data.transcript,"user"); lastActivity=performance.now(); showWorking(data.cameras_used);
+        if(data.reply) addMsg(data.reply,"agent");
+        if(data.audio_b64){ speaking=true; setAvatar("speaking"); await playWav(data.audio_b64); speaking=false; }
+        if(sessionActive){ setAvatar("listening"); setStatus("Listening…","active"); }
+      }catch(err){ addMsg("Request failed: "+err.message,"sys"); if(sessionActive){setAvatar("listening");setStatus("Error: "+err.message,"error");} }
+      finally{ busy=false; lastActivity=performance.now(); }
     }
 
-    function playWav(b64) {
-      return new Promise((resolve) => {
-        const a = new Audio("data:audio/wav;base64," + b64);
-        a.onended = resolve; a.onerror = resolve; a.play().catch(resolve);
-      });
-    }
-
-    async function playIntro() {
-      setStatus("Ram is introducing himself…");
-      setAvatar("speaking");
-      try {
-        const r = await fetch("/intro");
-        const data = await r.json();
-        if (data.text) addMsg(data.text, "agent");
-        if (data.audio_b64) { speaking = true; await playWav(data.audio_b64); speaking = false; }
-      } catch { addMsg("Hi, I'm Ram, your OpenNVR camera agent.", "agent"); }
-    }
-
-    // ── listening loop ───────────────────────────────────────────
-    function vadTick() {
-      if (!sessionActive || speaking || busy || alarmRinging) return;
-      const now = performance.now();
-      // Idle auto-stop: nobody's been talking for a while.
-      if (!capturing && (now - lastActivity > IDLE_MS)) { pauseForIdle(); return; }
-      const level = rms();
-      if (!capturing) {
-        loudFrames = level > START_RMS ? loudFrames + 1 : 0;
-        if (loudFrames >= START_FRAMES) startCapture();
-        return;
-      }
-      if (level > SILENCE_RMS) { lastVoice = now; lastActivity = now; }
-      const dur = now - captureStart;
-      if ((now - lastVoice > SILENCE_MS && dur > MIN_UTTER_MS) || dur > MAX_UTTER_MS) stopCapture();
-    }
-
-    function startCapture() {
-      const mime = pickMimeType(); chunks = [];
-      recorder = new MediaRecorder(mediaStream, mime ? { mimeType: mime } : undefined);
-      recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
-      recorder.onstop = onUtterance;
-      recorder.start();
-      capturing = true; captureStart = lastVoice = lastActivity = performance.now();
-      setAvatar("listening"); setStatus("Listening…", "active");
-    }
-    function stopCapture() {
-      if (!recorder || recorder.state === "inactive") return;
-      capturing = false; loudFrames = 0;
-      setAvatar("thinking"); setStatus("Thinking…");
-      recorder.stop();
-    }
-
-    async function onUtterance() {
-      const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
-      if (blob.size < 1200) { if (sessionActive) { setAvatar("listening"); setStatus("Listening…","active"); } return; }
-      busy = true;
-      try {
-        const cam = cameraEl.value;
-        const url = "/converse" + (cam ? ("?camera=" + encodeURIComponent(cam)) : "");
-        const resp = await fetch(url, { method:"POST", headers:{"Content-Type":"application/octet-stream"}, body: blob });
-        if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error || ("HTTP "+resp.status)); }
-        const data = await resp.json();
-        if (!data.transcript) { if (sessionActive) { setAvatar("listening"); setStatus("Didn't catch that — keep talking.","active"); } return; }
-        addMsg(data.transcript, "user");
-        lastActivity = performance.now();
-        showWorking(data.cameras_used);
-        if (data.reply) addMsg(data.reply, "agent");
-        if (data.audio_b64) { speaking = true; setAvatar("speaking"); await playWav(data.audio_b64); speaking = false; }
-        if (sessionActive) { setAvatar("listening"); setStatus("Listening…","active"); }
-      } catch (err) {
-        addMsg("Request failed: " + err.message, "sys");
-        if (sessionActive) { setAvatar("listening"); setStatus("Error: "+err.message,"error"); }
-      } finally { busy = false; lastActivity = performance.now(); }
-    }
-
-    async function startSession() {
-      try { await ensureAudio(); }
-      catch (err) { setStatus("Microphone access denied.","error"); addMsg("Microphone access denied: "+err,"sys"); return; }
-      sessionActive = true; lastActivity = performance.now(); loudFrames = 0;
-      talkBtn.textContent = "⏹ Stop"; talkBtn.classList.add("listening");
-      if (!introPlayed) { introPlayed = true; await playIntro(); }
-      if (!sessionActive) return;   // user may have stopped during intro
+    async function startSession(){ ensureOutputAudio();
+      try{ await ensureMic(); }catch(err){ setStatus("Microphone access denied.","error"); addMsg("Microphone access denied: "+err,"sys"); return; }
+      sessionActive=true; lastActivity=performance.now(); loudFrames=0;
+      talkBtn.textContent="⏹ Stop"; talkBtn.classList.add("listening");
+      if(!introPlayed){ introPlayed=true; await playIntro(); }
+      if(!sessionActive) return;
       setAvatar("listening"); setStatus("Listening… just talk.","active");
-      if (!vadTimer) vadTimer = setInterval(vadTick, TICK_MS);
-      if (!taskTimer) taskTimer = setInterval(() => { pollTasks(); pollMonitors(); }, TASK_POLL_MS);
-      // Alarms keep polling/ringing even when listening pauses for idle.
-      if (!alarmTimer) alarmTimer = setInterval(pollAlarms, 2500);
+      if(!vadTimer) vadTimer=setInterval(vadTick,TICK_MS);
+      if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();},POLL_MS);
+      if(!alarmTimer) alarmTimer=setInterval(pollAlarms,2500);
     }
+    function stopSession(){ sessionActive=false; if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(capturing)stopCapture();
+      talkBtn.textContent="🎤 Talk"; talkBtn.classList.remove("listening"); setAvatar("idle"); setStatus("Stopped. Tap Talk to resume."); }
+    function pauseForIdle(){ sessionActive=false; if(vadTimer){clearInterval(vadTimer);vadTimer=null;}
+      talkBtn.textContent="🎙️ Enable talking"; talkBtn.classList.remove("listening"); setAvatar("idle");
+      setStatus("Paused — no conversation for a while. Tap Enable talking to resume.");
+      addMsg(agentName+" stopped listening after a quiet spell. Tap “Enable talking” to chat again.","sys"); }
 
-    function stopSession() {
-      sessionActive = false;
-      if (vadTimer) { clearInterval(vadTimer); vadTimer = null; }
-      if (capturing) stopCapture();
-      talkBtn.textContent = "🎤 Talk to Ram"; talkBtn.classList.remove("listening");
-      setAvatar("idle"); setStatus("Stopped. Tap Talk to Ram to resume.");
-    }
+    // ── tasks ──
+    async function pollTasks(){ let tasks; try{ tasks=(await (await fetch("/tasks")).json()).tasks||[]; }catch{ return; }
+      for(const t of tasks){ if((t.status==="done"||t.status==="error")&&knownTasks[t.id]!==t.status){
+        const msg=`Done with task #${t.id}: ${t.result||"no result"}`; addMsg(msg,"agent"); playChime("done"); await announce(msg); }
+        knownTasks[t.id]=t.status; }
+      renderTasks(tasks); }
+    function renderTasks(tasks){ const active=tasks.filter(t=>t.status==="queued"||t.status==="running");
+      const done=tasks.filter(t=>t.status==="done"||t.status==="error").slice(-3); const show=[...active,...done];
+      if(!show.length){ taskListEl.innerHTML='<div class="empty-note">No background tasks.</div>'; return; }
+      taskListEl.innerHTML="";
+      for(const t of show){ const running=t.status==="queued"||t.status==="running"; const d=document.createElement("div");
+        d.className="item "+(running?"running":"done"); d.innerHTML=`<span class="badge">${running?"⏳":(t.status==="error"?"⚠️":"✓")}</span>`;
+        const q=document.createElement("span"); q.className="q"; q.textContent=t.query+(running?" — working…":""); d.appendChild(q); taskListEl.appendChild(d); } }
 
-    function pauseForIdle() {
-      sessionActive = false;
-      if (vadTimer) { clearInterval(vadTimer); vadTimer = null; }
-      talkBtn.textContent = "🎙️ Enable talking"; talkBtn.classList.remove("listening");
-      setAvatar("idle"); setStatus("Paused — no conversation for a while. Tap Enable talking to resume.");
-      addMsg("Ram stopped listening after a quiet spell. Tap “Enable talking” to chat again.", "sys");
-    }
+    async function announce(text){ if(!text||busy||speaking)return;
+      try{ const d=await (await fetch("/say",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text})})).json();
+        if(d.audio_b64){ speaking=true; setAvatar("speaking"); await playWav(d.audio_b64); speaking=false; if(sessionActive)setAvatar("listening"); } }catch{} }
 
-    // ── background tasks ─────────────────────────────────────────
-    async function pollTasks() {
-      let tasks;
-      try { tasks = (await (await fetch("/tasks")).json()).tasks || []; }
-      catch { return; }
-      // announce completions (show text, then speak if Ram is free)
-      for (const t of tasks) {
-        if ((t.status === "done" || t.status === "error") && knownTasks[t.id] !== t.status) {
-          const msg = `Done with task #${t.id}: ${t.result || "no result"}`;
-          addMsg(msg, "agent");
-          await announce(msg);
-        }
-        knownTasks[t.id] = t.status;
-      }
-      renderTasks(tasks);
-    }
+    // ── monitors ──
+    async function pollMonitors(){ let data; try{ data=await (await fetch("/monitors")).json(); }catch{ return; }
+      for(const n of (data.notifications||[])){ if(!seenNotes[n.id]){ seenNotes[n.id]=true; addMsg(n.text,"agent"); playChime("notify"); await announce(n.text); } }
+      renderMonitors(data.monitors||[]); }
+    function renderMonitors(monitors){ const active=monitors.filter(m=>m.active);
+      if(!active.length){ monitorListEl.innerHTML='<div class="empty-note">No active watches.</div>'; return; }
+      monitorListEl.innerHTML="";
+      for(const m of active){ const d=document.createElement("div"); d.className="item";
+        d.innerHTML=`<span class="badge">${m.kind==="count"?"🔢":"👁"}</span>`; const q=document.createElement("span"); q.className="q";
+        const cams=m.camera_ids.join(", ");
+        if(m.kind==="count"){ const cur=Object.values(m.current||{}).reduce((a,b)=>a+b,0), peak=Object.values(m.peak||{}).reduce((a,b)=>Math.max(a,b),0);
+          q.innerHTML=`${m.target} on ${cams} — <span class="count">now ${cur}, peak ${peak}</span>`; }
+        else { q.textContent=`${cams} for ${m.target}`; }
+        d.appendChild(q); const s=document.createElement("button"); s.className="stop"; s.title="Stop"; s.textContent="✕";
+        s.addEventListener("click",()=>stopMonitor(m.id)); d.appendChild(s); monitorListEl.appendChild(d); } }
+    async function stopMonitor(id){ try{ await fetch("/monitors/"+id,{method:"DELETE"}); }catch{} pollMonitors(); }
 
-    async function announce(text) {
-      // Speak a task result aloud — but never talk over an in-flight turn
-      // or another announcement (speaking gates the VAD so Ram won't hear
-      // himself). Falls back to the on-screen text if TTS is unavailable.
-      if (!text || busy || speaking) return;
-      try {
-        const r = await fetch("/say", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text }),
-        });
-        const d = await r.json();
-        if (d.audio_b64) {
-          speaking = true; setAvatar("speaking");
-          await playWav(d.audio_b64);
-          speaking = false;
-          if (sessionActive) setAvatar("listening");
-        }
-      } catch {}
-    }
-    function renderTasks(tasks) {
-      const active = tasks.filter(t => t.status === "queued" || t.status === "running");
-      const recentDone = tasks.filter(t => t.status === "done" || t.status === "error").slice(-3);
-      const show = [...active, ...recentDone];
-      if (!show.length) { tasksEl.classList.add("empty"); taskListEl.innerHTML = ""; return; }
-      tasksEl.classList.remove("empty");
-      taskListEl.innerHTML = "";
-      for (const t of show) {
-        const running = t.status === "queued" || t.status === "running";
-        const div = document.createElement("div");
-        div.className = "task " + (running ? "running" : "done");
-        const badge = running ? "⏳" : (t.status === "error" ? "⚠️" : "✓");
-        div.innerHTML = `<span class="badge">${badge}</span>`;
-        const q = document.createElement("span"); q.className = "q";
-        q.textContent = t.query + (running ? " — working…" : "");
-        div.appendChild(q);
-        taskListEl.appendChild(div);
-      }
-    }
+    // ── scheduled reports ──
+    async function pollReports(){ let data; try{ data=await (await fetch("/reports")).json(); }catch{ return; }
+      for(const rep of (data.reports||[])){ if(!seenReports[rep.id]){ seenReports[rep.id]=true;
+        addMsg(`📋 ${rep.name}: ${rep.text}`,"agent"); playChime("done"); await announce(`${rep.name}. ${rep.text}`); } }
+      renderReports(data.schedules||[]); }
+    function renderReports(schedules){ const active=schedules.filter(s=>s.active);
+      if(!active.length){ reportListEl.innerHTML='<div class="empty-note">No scheduled reports.</div>'; return; }
+      reportListEl.innerHTML="";
+      for(const s of active){ const d=document.createElement("div"); d.className="item";
+        d.innerHTML='<span class="badge">📋</span>'; const q=document.createElement("span"); q.className="q";
+        q.textContent=`${s.name} · ${s.schedule}`; d.appendChild(q);
+        const x=document.createElement("button"); x.className="stop"; x.title="Cancel"; x.textContent="✕";
+        x.addEventListener("click",()=>stopReport(s.id)); d.appendChild(x); reportListEl.appendChild(d); } }
+    async function stopReport(id){ try{ await fetch("/reports/"+id,{method:"DELETE"}); }catch{} pollReports(); }
 
-    // ── standing monitors ────────────────────────────────────────
-    async function pollMonitors() {
-      let data;
-      try { data = await (await fetch("/monitors")).json(); }
-      catch { return; }
-      // speak/show new notifications from notify-monitors
-      for (const n of (data.notifications || [])) {
-        if (!seenNotes[n.id]) {
-          seenNotes[n.id] = true;
-          addMsg(n.text, "agent");
-          await announce(n.text);
-        }
-      }
-      renderMonitors(data.monitors || []);
-    }
-    function renderMonitors(monitors) {
-      const active = monitors.filter(m => m.active);
-      if (!active.length) { monitorsEl.classList.add("empty"); monitorListEl.innerHTML = ""; return; }
-      monitorsEl.classList.remove("empty");
-      monitorListEl.innerHTML = "";
-      for (const m of active) {
-        const div = document.createElement("div");
-        div.className = "task";
-        div.innerHTML = `<span class="badge">${m.kind === "count" ? "🔢" : "👁"}</span>`;
-        const q = document.createElement("span"); q.className = "q";
-        const cams = m.camera_ids.join(", ");
-        if (m.kind === "count") {
-          const cur = Object.values(m.current || {}).reduce((a,b)=>a+b,0);
-          const peak = Object.values(m.peak || {}).reduce((a,b)=>Math.max(a,b),0);
-          q.innerHTML = `Counting ${m.target} on ${cams} — <span class="count">now ${cur}, peak ${peak}</span>`;
-        } else {
-          q.textContent = `Watching ${cams} for ${m.target}`;
-        }
-        div.appendChild(q);
-        const stop = document.createElement("button");
-        stop.className = "stop"; stop.title = "Stop this watch"; stop.textContent = "✕";
-        stop.addEventListener("click", () => stopMonitor(m.id));
-        div.appendChild(stop);
-        monitorListEl.appendChild(div);
-      }
-    }
-    async function stopMonitor(id) {
-      try { await fetch("/monitors/" + id, { method: "DELETE" }); } catch {}
-      pollMonitors();
-    }
+    // ── alarms ──
+    async function pollAlarms(){ let data; try{ data=await (await fetch("/alarms")).json(); }catch{ return; }
+      for(const e of (data.events||[])){ if(!seenAlarmEvents[e.id]){ seenAlarmEvents[e.id]=true; addMsg("🚨 "+e.text,"agent"); } }
+      const names=(data.alarms||[]).filter(a=>a.triggered).map(a=>a.name);
+      if(data.ringing){ alarmRinging=true; alarmTextEl.textContent=names.length?("Alarm: "+names.join(", ")):"Alarm triggered";
+        alarmbarEl.hidden=false; setAvatar("speaking"); startSiren(); }
+      else { alarmRinging=false; alarmbarEl.hidden=true; stopSiren(); }
+      renderAlarms(data.alarms||[]); }
+    function renderAlarms(alarms){ const active=alarms.filter(a=>a.active);
+      if(!active.length){ alarmListEl.innerHTML='<div class="empty-note">No alarms armed.</div>'; return; }
+      alarmListEl.innerHTML="";
+      for(const a of active){ const d=document.createElement("div"); d.className="item"+(a.triggered?" ringing":"");
+        d.innerHTML=`<span class="badge">${a.triggered?"🚨":"🔔"}</span>`; const q=document.createElement("span"); q.className="q";
+        const when=a.window==="any time"?"":` · ${a.window}`; const contact=a.emergency_contact_configured?" · ☎":"";
+        q.textContent=`${a.name}: ${a.target} on ${a.camera_ids.join(", ")}${when}${contact}`; d.appendChild(q);
+        const s=document.createElement("button"); s.className="stop"; s.title="Disarm"; s.textContent="✕";
+        s.addEventListener("click",()=>disarmAlarm(a.id)); d.appendChild(s); alarmListEl.appendChild(d); } }
+    async function ackAlarms(){ ensureOutputAudio(); try{ await fetch("/alarms/ack",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});}catch{}
+      alarmRinging=false; alarmbarEl.hidden=true; stopSiren(); pollAlarms(); }
+    async function disarmAlarm(id){ try{ await fetch("/alarms/"+id,{method:"DELETE"});}catch{} pollAlarms(); }
+    async function addAlarm(body){ ensureOutputAudio();
+      try{ await fetch("/alarms",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}); addMsg(`Armed alarm: ${body.name}.`,"sys"); }catch{}
+      if(!alarmTimer) alarmTimer=setInterval(pollAlarms,2500); pollAlarms(); }
 
-    // ── alarms (ring until acknowledged) ─────────────────────────
-    async function pollAlarms() {
-      let data;
-      try { data = await (await fetch("/alarms")).json(); }
-      catch { return; }
-      for (const e of (data.events || [])) {
-        if (!seenAlarmEvents[e.id]) { seenAlarmEvents[e.id] = true; addMsg("🚨 " + e.text, "agent"); }
-      }
-      const ringing = !!data.ringing;
-      const names = (data.alarms || []).filter(a => a.triggered).map(a => a.name);
-      if (ringing) {
-        alarmRinging = true;
-        alarmTextEl.textContent = names.length ? ("Alarm: " + names.join(", ")) : "Alarm triggered";
-        alarmbarEl.hidden = false;
-        setAvatar("speaking");
-        startSiren();
-      } else {
-        alarmRinging = false;
-        alarmbarEl.hidden = true;
-        stopSiren();
-      }
-      renderAlarms(data.alarms || []);
-    }
-    function renderAlarms(alarms) {
-      const active = alarms.filter(a => a.active);
-      if (!active.length) { alarmsEl.classList.add("empty"); alarmListEl.innerHTML = ""; return; }
-      alarmsEl.classList.remove("empty");
-      alarmListEl.innerHTML = "";
-      for (const a of active) {
-        const div = document.createElement("div");
-        div.className = "task" + (a.triggered ? " ringing" : "");
-        div.innerHTML = `<span class="badge">${a.triggered ? "🚨" : "🔔"}</span>`;
-        const q = document.createElement("span"); q.className = "q";
-        const where = a.camera_ids.join(", ");
-        const when = a.window === "any time" ? "" : ` · ${a.window}`;
-        const contact = a.emergency_contact_configured ? " · ☎ contact set" : "";
-        q.textContent = `${a.name}: ${a.target} on ${where}${when}${contact}`;
-        div.appendChild(q);
-        const stop = document.createElement("button");
-        stop.className = "stop"; stop.title = "Disarm"; stop.textContent = "✕";
-        stop.addEventListener("click", () => disarmAlarm(a.id));
-        div.appendChild(stop);
-        alarmListEl.appendChild(div);
-      }
-    }
-    async function ackAlarms() {
-      try { await fetch("/alarms/ack", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); } catch {}
-      alarmRinging = false; alarmbarEl.hidden = true; stopSiren();
-      pollAlarms();
-    }
-    async function disarmAlarm(id) {
-      try { await fetch("/alarms/" + id, { method: "DELETE" }); } catch {}
-      pollAlarms();
-    }
-    async function addAlarm(body) {
-      try {
-        await fetch("/alarms", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-        addMsg(`Armed alarm: ${body.name}.`, "sys");
-      } catch {}
-      pollAlarms();
-    }
-
+    // ── wiring ──
     silenceBtn.addEventListener("click", ackAlarms);
-    document.querySelectorAll(".preset").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const cam = cameraEl.value || "all";
-        const body = { name: btn.dataset.name, target: btn.dataset.target, camera_id: cam };
-        if (btn.dataset.after) body.after = btn.dataset.after;
-        addAlarm(body);
-      });
+    document.querySelectorAll(".preset").forEach(btn=>btn.addEventListener("click",()=>{
+      const body={name:btn.dataset.name,target:btn.dataset.target,camera_id:cameraParam()};
+      if(btn.dataset.after) body.after=btn.dataset.after; addAlarm(body); }));
+    talkBtn.addEventListener("click",()=>{ ensureOutputAudio(); if(busy&&sessionActive)return; if(sessionActive)stopSession(); else startSession(); });
+    resetBtn.addEventListener("click",async()=>{ try{ await fetch("/reset",{method:"POST"}); logEl.innerHTML=""; addMsg("Conversation reset.","sys"); }catch{} });
+
+    async function loadNotify(){
+      try{ const s=await (await fetch("/notify")).json();
+        const row=$("notifyRow"), st=$("notifyStatus");
+        if(s.enabled){ st.textContent=`Alerts → ${s.channels} channel${s.channels===1?"":"s"}`; row.hidden=false; }
+        else { st.textContent="No external alert channels configured"; row.hidden=false; $("notifyTest").hidden=true; }
+      }catch{}
+    }
+    $("notifyTest").addEventListener("click", async ()=>{
+      try{ const r=await fetch("/notify/test",{method:"POST"}); const d=await r.json();
+        addMsg(r.ok?`Test sent to ${d.delivered}/${d.channels} channel(s).`:("Test failed: "+(d.error||"")), "sys"); }catch{}
     });
 
-    talkBtn.addEventListener("click", () => {
-      if (busy && sessionActive) return;
-      if (sessionActive) stopSession(); else startSession();
-    });
-    resetBtn.addEventListener("click", async () => {
-      try { await fetch("/reset", { method:"POST" }); logEl.innerHTML = ""; addMsg("Conversation reset.","sys"); } catch {}
-    });
-
-    loadCameras();
-    setAvatar("idle");
+    loadAgent(); loadCameras(); loadNotify(); setAvatar("idle");
+    renderTasks([]); renderMonitors([]); renderAlarms([]); renderReports([]);
+    alarmTimer = setInterval(pollAlarms, 2500);   // alarms ring even before Talk
   </script>
 </body>
 </html>

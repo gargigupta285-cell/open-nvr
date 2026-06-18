@@ -131,6 +131,8 @@ def test_converse_full_tool_turn(harness):
     assert data["reply"] == "I see one person."
     assert data["audio_b64"] == base64.b64encode(b"FAKEWAVBYTES").decode()
     assert state["detect_args"] == {"camera_id": "cam1"}
+    # per-phase timing breakdown is reported for the latency harness
+    assert set(data["timings_ms"]) >= {"transcode", "stt", "llm", "tts", "total"}
 
 
 # ── camera dropdown hint drives the forced-grounding default ───────────
@@ -182,5 +184,5 @@ def test_converse_empty_transcript_returns_blank(harness):
     state["set_chat"](chat)
 
     data = client.post("/converse", content=_wav_blob()).json()
-    assert data == {"transcript": "", "reply": "", "audio_b64": None}
+    assert data["transcript"] == "" and data["reply"] == "" and data["audio_b64"] is None
     assert called["chat"] is False

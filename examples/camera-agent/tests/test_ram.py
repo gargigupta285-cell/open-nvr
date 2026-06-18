@@ -25,14 +25,26 @@ def _runtime() -> CameraAgentRuntime:
 # ── persona ────────────────────────────────────────────────────────────
 
 
-def test_system_prompt_names_ram_and_describes_tasks():
+def test_system_prompt_names_agent_and_describes_tasks():
     prompt = _runtime().build_system_prompt()
-    assert "Ram" in prompt
+    assert "Shailaja" in prompt  # default voice_gender=female
     assert "create_background_task" in prompt
 
 
-def test_greeting_mentions_ram():
-    assert "Ram" in ca.GREETING and ca.AGENT_NAME == "Ram"
+def test_agent_name_follows_voice_gender():
+    assert ca.agent_name_for("female") == "Shailaja"
+    assert ca.agent_name_for("male") == "Sidhu"
+    assert ca.agent_name_for(None) == "Shailaja"
+    assert "Shailaja" in ca.greeting_for("Shailaja")
+
+
+def test_male_voice_names_sidhu():
+    cfg = AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+                    voice_gender="male",
+                    cameras=[CameraSpec(camera_id="cam1", frame_url="http://x/1.jpg", role="r")])
+    rt = CameraAgentRuntime(cfg)
+    assert rt.agent_name == "Sidhu"
+    assert "Sidhu" in rt.build_system_prompt()
 
 
 # ── tool wiring: create_background_task is foreground-only ─────────────
@@ -109,8 +121,8 @@ def test_intro_endpoint_returns_text_and_audio(monkeypatch):
     monkeypatch.setattr(rt.piper, "synthesize", fake_synth)
     client = TestClient(build_app(rt))
     data = client.get("/intro").json()
-    assert data["name"] == "Ram"
-    assert "Ram" in data["text"]
+    assert data["name"] == "Shailaja"
+    assert "Shailaja" in data["text"]
     assert data["audio_b64"] == base64.b64encode(b"WAVDATA").decode()
 
 
@@ -124,7 +136,7 @@ def test_intro_endpoint_text_only_when_tts_down(monkeypatch):
     client = TestClient(build_app(rt))
     data = client.get("/intro").json()
     assert data["audio_b64"] is None
-    assert "Ram" in data["text"]
+    assert "Shailaja" in data["text"]
 
 
 def test_tasks_endpoints(monkeypatch):
