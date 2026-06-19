@@ -2455,6 +2455,49 @@ def _looks_like_camera_question(text: str) -> bool:
     return bool(_CAMERA_RE.search(text or ""))
 
 
+# Presence/count questions about concrete objects ("is anyone there?",
+# "how many cars?", "any people?") must be answered by the object DETECTOR
+# (yolov8), NOT a scene caption — BLIP describes the scene ("a table with a
+# laptop") but can't reliably answer "is there a person?". Open "what's
+# there / describe it" questions, by contrast, are best served by the BLIP
+# caption. _pick_forced_tool routes the forced-grounding call accordingly.
+_DETECTION_WORDS: tuple[str, ...] = (
+    "person", "people", "anyone", "anybody", "someone", "somebody",
+    "nobody", "man", "woman", "kid", "child", "face", "count", "many",
+    "car", "cars", "truck", "vehicle", "bike", "bicycle", "motorcycle",
+    "dog", "cat", "animal", "package", "parcel", "delivery",
+)
+_DETECTION_RE = re.compile(r"\b(" + "|".join(_DETECTION_WORDS) + r")\b", re.IGNORECASE)
+
+
+def _pick_forced_tool(text: str) -> str:
+    """Choose the forced-grounding tool by question type: ``detect_objects``
+    (yolov8) for object presence/count asks, else ``describe_camera`` (BLIP
+    scene caption, which itself falls back to detection if BLIP is down)."""
+    return "detect_objects" if _DETECTION_RE.search(text or "") else "describe_camera"
+
+
+# Questions about the camera ROSTER / system config ("how many cameras are
+# configured?", "which cameras do you have?", "list the cameras") are about
+# the SYSTEM, not what's visible — the model answers them correctly from its
+# prompt context, so forced grounding must NOT override them with an
+# (irrelevant) scene detection. Distinguished from scene questions by
+# "camera/cam" being the noun being counted/listed, not an object inside a
+# camera's view ("how many PEOPLE on the camera" stays a scene question).
+_CONFIG_RE = re.compile(
+    r"\b(how many|number of|which|what|list(?:\s+\w+){0,3})\s+(cameras?|cams?)\b"
+    r"|\b(cameras?|cams?)\s+(are|do you|configured|connected|available|set up|online|exist)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_config_question(text: str) -> bool:
+    """True for questions about the camera roster/config (how many/which
+    cameras exist) rather than what's visible in one. Forced grounding skips
+    these so a correct context answer isn't clobbered by a scene detection."""
+    return bool(_CONFIG_RE.search(text or ""))
+
+
 def _pick_camera(text: str, cameras: list[str], preferred: str | None = None) -> str:
     """Best-effort: which camera did the user mean? An explicit name in the
     utterance wins; otherwise fall back to the UI-selected ``preferred``
@@ -2557,6 +2600,7 @@ async def _run_conversation_turn(
         # model still fabricated "camera 2 is ...".
         if (
             not grounded and not forced and cameras
+            and not _is_config_question(user_text)
             and (
                 _looks_like_camera_question(user_text)
                 or _looks_like_camera_question(content)
@@ -2565,9 +2609,17 @@ async def _run_conversation_turn(
             forced = True
             grounded = True
             cam = _pick_camera(user_text, cameras, preferred_camera)
+            # Route to the detector for presence/count questions and to the
+            # BLIP caption for open "what's there?" questions. Small models
+            # often refuse or fabricate instead of calling a tool, so this
+            # forced path is what most camera questions actually hit —
+            # picking the RIGHT tool here is what makes "is there a person?"
+            # get a detector answer ("no people") instead of an off-topic
+            # scene caption.
+            tool_name = _pick_forced_tool(user_text)
             call = {
                 "id": "forced-0", "type": "function",
-                "function": {"name": "detect_objects",
+                "function": {"name": tool_name,
                              "arguments": {"camera_id": cam}},
             }
             name, result = await _invoke_tool(runtime, call)

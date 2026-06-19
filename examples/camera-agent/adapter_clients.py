@@ -152,25 +152,34 @@ class WhisperClient(_ReusableClientMixin):
         self._timeout = timeout_seconds
 
     async def transcribe(self, audio_bytes: bytes) -> str:
-        headers = {
-            "Authorization": f"Bearer {self._token}",
-            "Content-Type": "application/json",
-        }
+        # Only send Authorization when a token is configured. Native
+        # Ollama needs no auth and ``ollama_token`` is empty; an empty
+        # ``Bearer `` value (trailing space, no token) is rejected by
+        # httpx as an illegal header (LocalProtocolError) before the
+        # request is even sent.
+        headers = {"Content-Type": "application/json"}
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        # FLAT body — the deployed standalone SDK whisper-adapter parses
+        # ``audio_b64`` and the params (task/language/vad_filter) at the
+        # TOP LEVEL of the JSON object (opennvr_adapter_sdk AUDIO body
+        # shape). The legacy combined ai-adapter took a {task, input:{...}}
+        # envelope; nesting under ``input`` here makes the SDK parser fail
+        # to find ``audio_b64`` and return 400 "JSON body must include
+        # 'audio_b64'".
         body = {
             "task": "audio_transcription",
-            "input": {
-                "audio_b64": base64.b64encode(audio_bytes).decode("ascii"),
-                "language": "en",
-                # vad_filter OFF: the agent already VAD-segments each
-                # utterance (Pipecat Silero + the force-stop logic in
-                # services.py) before it reaches here, so the clip is
-                # ALREADY trimmed speech. Running Whisper's own Silero VAD
-                # again was re-classifying the short, mic-quiet clips as
-                # non-speech and discarding the whole utterance ("returned
-                # no segments"). The hallucination-token filter in
-                # services.py handles the 'You'/'Thank you' noise case.
-                "vad_filter": False,
-            },
+            "audio_b64": base64.b64encode(audio_bytes).decode("ascii"),
+            "language": "en",
+            # vad_filter OFF: the agent already VAD-segments each
+            # utterance (Pipecat Silero + the force-stop logic in
+            # services.py) before it reaches here, so the clip is
+            # ALREADY trimmed speech. Running Whisper's own Silero VAD
+            # again was re-classifying the short, mic-quiet clips as
+            # non-speech and discarding the whole utterance ("returned
+            # no segments"). The hallucination-token filter in
+            # services.py handles the 'You'/'Thank you' noise case.
+            "vad_filter": False,
         }
         resp = await self._client().post(self._url, json=body, headers=headers)
         resp.raise_for_status()
@@ -231,7 +240,13 @@ class OllamaClient(_ReusableClientMixin):
         # first turn completes instead of being cut off.
         timeout_seconds: float = 300.0,
     ) -> None:
-        self._url = url.rstrip("/") + "/infer"
+        # Talk to Ollama's NATIVE chat API. The deployment points
+        # ``ollama_url`` at the raw ollama runtime (http://ollama:11434),
+        # which exposes /api/chat — NOT the SDK /infer envelope endpoint.
+        # The response/tool-call consumer (_run_conversation_turn /
+        # _invoke_tool) already expects the native shape: top-level
+        # ``message`` with ``content`` + ``tool_calls[].function.arguments``.
+        self._url = url.rstrip("/") + "/api/chat"
         self._token = token
         self._model = model
         self._timeout = timeout_seconds
@@ -244,25 +259,43 @@ class OllamaClient(_ReusableClientMixin):
         temperature: float = 0.4,
         max_tokens: int = 256,
     ) -> dict[str, Any]:
-        headers = {
-            "Authorization": f"Bearer {self._token}",
-            "Content-Type": "application/json",
-        }
-        # Combined /infer takes the SDK envelope {task, input:{...}}; the
-        # chat fields go inside ``input``. The response carries
-        # ``message`` (incl. ``tool_calls``) at the top level.
-        inner: dict[str, Any] = {
-            "messages": messages,
+        # Only send Authorization when a token is configured. Native
+        # Ollama needs no auth and ``ollama_token`` is empty; an empty
+        # ``Bearer `` value (trailing space, no token) is rejected by
+        # httpx as an illegal header (LocalProtocolError) before the
+        # request is even sent.
+        headers = {"Content-Type": "application/json"}
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        # Native Ollama /api/chat body. ``stream: false`` so we get one
+        # complete JSON object back (the response carries ``message`` with
+        # ``content`` and ``tool_calls`` at the top level). temperature /
+        # max_tokens live under ``options`` (num_predict) per the native
+        # API — they are NOT top-level chat fields.
+        body: dict[str, Any] = {
             "model": self._model,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens,
+                # num_ctx MUST exceed the full system+tools+history prompt.
+                # Ollama's default is 2048, but the tool-calling prompt runs
+                # ~2200 tokens, so it was being silently TRUNCATED every call
+                # (logged as "truncating input prompt"). Truncation (a) drops
+                # context and (b) shifts the prefix window so the prewarmed
+                # KV cache no longer matches — forcing a full ~2k-token CPU
+                # re-prefill (~110s) on EVERY call instead of reusing cache.
+                # 4096 holds the whole prompt so the prefix stays stable and
+                # the prewarm + iter0→iter1 cache reuse actually kick in.
+                "num_ctx": 4096,
+            },
         }
         if tools:
-            inner["tools"] = tools
-            # Explicit ``auto`` since 3B-class models otherwise
-            # sometimes ignore the tools list when uncertain.
-            inner["tool_choice"] = "auto"
-        body = {"task": "chat_completion", "input": inner}
+            # Native /api/chat decides tool use automatically; there is no
+            # ``tool_choice`` field (it would be ignored). Just advertise
+            # the tools.
+            body["tools"] = tools
         resp = await self._client().post(self._url, json=body, headers=headers)
         resp.raise_for_status()
         return resp.json()
@@ -284,10 +317,14 @@ class PiperClient(_ReusableClientMixin):
         self._timeout = timeout_seconds
 
     async def synthesize(self, text: str) -> bytes:
-        headers = {
-            "Authorization": f"Bearer {self._token}",
-            "Content-Type": "application/json",
-        }
+        # Only send Authorization when a token is configured. Native
+        # Ollama needs no auth and ``ollama_token`` is empty; an empty
+        # ``Bearer `` value (trailing space, no token) is rejected by
+        # httpx as an illegal header (LocalProtocolError) before the
+        # request is even sent.
+        headers = {"Content-Type": "application/json"}
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
         # task name varies across adapter generations — legacy used
         # ``speech_synthesis``; the contract §5.4 spec is ``text_to_speech``.
         # Send the modern name; legacy operators upgrade the adapter.
@@ -298,12 +335,17 @@ class PiperClient(_ReusableClientMixin):
         # filesystem mount to dereference the opennvr://audio/...
         # URI, so the inline body is the only way we get the audio
         # bytes back over plain HTTP.
-        # Combined /infer envelope. The adapter task is ``speech_synthesis``
-        # (not ``text_to_speech``); ``inline: true`` asks it to return the
-        # WAV bytes base64-encoded since we have no shared audio mount.
+        # FLAT body — the deployed standalone SDK piper-adapter reads
+        # ``text`` (and the ``inline`` flag) at the TOP LEVEL of the JSON
+        # body, not nested under an ``input`` envelope. The adapter task is
+        # ``speech_synthesis`` (not ``text_to_speech``); ``inline: true``
+        # asks it to return the WAV bytes base64-encoded since we have no
+        # shared audio mount. Nesting under ``input`` made the service see
+        # no top-level ``text`` and return 400 "Field 'text' is required".
         body = {
             "task": "speech_synthesis",
-            "input": {"text": text, "inline": True},
+            "text": text,
+            "inline": True,
         }
         client = self._client()
         resp = await client.post(self._url, json=body, headers=headers)

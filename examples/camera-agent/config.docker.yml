@@ -17,16 +17,14 @@
 kaic_url: http://opennvr-core:8100
 kaic_api_key: ${INTERNAL_API_KEY}
 
-# Streaming voice path — direct to the monolithic ai-adapter image
-# which serves Whisper STT + Piper TTS + the Ollama wrapper on
-# port 9100. v0.1.1 will split these into per-adapter images on
-# their canonical ports (9001 piper, 9003 whisper) and replace this
-# overlay's ``ai-adapter`` service with three lighter pulls.
-whisper_url: http://ai-adapter:9100
+# Streaming voice path. Whisper and Piper use their published
+# contract-v1 adapter images; Ollama is called directly on its native
+# HTTP API until a standalone ollama-adapter image is published.
+whisper_url: http://whisper-adapter:9003
 whisper_token: ${INTERNAL_API_KEY}
-ollama_url: http://ai-adapter:9100
-ollama_token: ${INTERNAL_API_KEY}
-piper_url: http://ai-adapter:9100
+ollama_url: http://ollama:11434
+ollama_token:
+piper_url: http://piper-adapter:9001
 piper_token: ${INTERNAL_API_KEY}
 
 # Vision tools — routed through KAI-C by the registered adapter NAME.
@@ -58,7 +56,10 @@ enabled_tools:
 # support tool calling — see https://ollama.com/blog/tool-support.
 llm_model: ${OLLAMA_MODEL}
 llm_temperature: 0.4
-llm_max_tokens: 256
+# Spoken replies are 1-2 short sentences (see system_prompt). 256 let the
+# model ramble for ~20s of CPU generation; 128 is plenty and noticeably
+# faster per turn.
+llm_max_tokens: 128
 
 frame_cache_ttl_seconds: 2.0
 event_ring_size: 256

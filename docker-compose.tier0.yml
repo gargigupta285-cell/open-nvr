@@ -8,11 +8,9 @@
 # weights download. Target wall time on a normal broadband link
 # (50 Mbps, fresh Docker): under 5 minutes on x86.
 #
-# On edge hardware (Raspberry Pi 5), the YOLOv8 ONNX export adds
-# 10–15 min to *first* boot only — see `yolov8-weights-init` below
-# for why. Subsequent boots are instant (ONNX cached on the
-# opennvr_yolov8_weights volume). The v0.1.1 GHCR weights image
-# will eliminate this for the default case.
+# The YOLOv8 ONNX weights are pulled from GHCR and copied into the
+# opennvr_yolov8_weights volume on first boot. Subsequent boots reuse
+# the cached volume.
 #
 # Quickstart:
 #     cp .env.example .env
@@ -263,8 +261,7 @@ services:
   # behind ISP filters), this container is just a thin copier. It
   # pulls a pre-baked image whose only contents are the ONNX file,
   # then `cp`s that file into the weights volume. Total time on
-  # first boot: ~5 seconds when the image is pullable from GHCR,
-  # ~10 minutes when Compose has to fall back to building locally.
+  # first boot: ~5 seconds when the image is pullable from GHCR.
   #
   # We can't bake the weights into the adapter image itself
   # because that image is a generic, vendor-neutral adapter — the
@@ -284,28 +281,12 @@ services:
     #     — published by .github/workflows/build-yolov8-weights.yml
     #     on each release tag. A 20-MB alpine image containing just
     #     /yolov8n.onnx. Pull is <5 sec.
-    #   * `build:` points at examples/yolov8-weights/Dockerfile —
-    #     compose falls back to building locally if the published
-    #     image isn't pullable (offline registry, fresh repo before
-    #     first release, etc.). First build is ~10 min (ultralytics
-    #     base ~3 GB pull + .pt export), subsequent up -d uses
-    #     Docker's layer cache.
     #
     # Custom / fine-tuned models: build the image yourself with your
     # .pt as a build context, push to your private registry, set
     # YOLOV8_WEIGHTS_IMAGE in .env. See examples/yolov8-weights/
     # README.md for the recipe.
     image: ${YOLOV8_WEIGHTS_IMAGE:-ghcr.io/open-nvr/yolov8-weights:v8.3.0}
-    build:
-      context: ./examples/yolov8-weights
-      dockerfile: Dockerfile
-    # Self-review M-1: be explicit about pull-then-build semantics
-    # rather than relying on what Compose Spec "probably" defaults to
-    # with image+build defined. `missing` = pull if not in local
-    # cache; if pull fails (image not yet published to GHCR, network
-    # blocks the registry, etc.) Compose falls back to the `build:`
-    # directive. This is the behavior we documented in the README,
-    # made explicit in YAML for any future code reader.
     pull_policy: missing
     container_name: opennvr_yolov8_weights_init
     restart: "no"
@@ -421,6 +402,12 @@ services:
       # adapters can extend ADAPTER_URL similarly OR set up a
       # multi-URL ADAPTER_REGISTRY override in a follow-up release.
       - ADAPTER_URL=http://yolov8-adapter:9002
+      # KAI-C sovereignty mode. Default local_only refuses any adapter that
+      # DECLARES external network egress — including the BLIP caption
+      # adapter, which advertises huggingface.co egress for its one-time
+      # weight download. Set AI_SOVEREIGNTY=cloud_allowed in .env to relax
+      # the egress checks (single-box demo posture). See kai-c/sovereignty.py.
+      - AI_SOVEREIGNTY=${AI_SOVEREIGNTY:-local_only}
       # Inference frame-capture reads from MediaMTX's plaintext
       # loopback path (rtsp://mediamtx:8554/cam-N) rather than
       # opening a second RTSP session directly to the camera. This
