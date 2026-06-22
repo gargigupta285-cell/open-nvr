@@ -403,10 +403,12 @@ services:
       # multi-URL ADAPTER_REGISTRY override in a follow-up release.
       - ADAPTER_URL=http://yolov8-adapter:9002
       # KAI-C sovereignty mode. Default local_only refuses any adapter that
-      # DECLARES external network egress — including the BLIP caption
-      # adapter, which advertises huggingface.co egress for its one-time
-      # weight download. Set AI_SOVEREIGNTY=cloud_allowed in .env to relax
-      # the egress checks (single-box demo posture). See kai-c/sovereignty.py.
+      # DECLARES external network egress. All bundled adapters — yolov8,
+      # whisper, piper, the ollama wrapper, and BLIP — ship their weights
+      # baked into their images (issue #79) and declare no egress, so they
+      # all register cleanly under the secure local_only default. Only set
+      # federated/cloud_allowed for genuinely off-box or vendor-managed
+      # inference. See kai-c/sovereignty.py.
       - AI_SOVEREIGNTY=${AI_SOVEREIGNTY:-local_only}
       # Inference frame-capture reads from MediaMTX's plaintext
       # loopback path (rtsp://mediamtx:8554/cam-N) rather than

@@ -93,9 +93,10 @@ services:
   #   {"name":"blip","url":"http://blip-adapter:9006"}
   # (config.docker.yml already routes caption_adapter -> "blip").
   #
-  # First /infer lazily downloads ~990 MB of BLIP weights from
-  # HuggingFace into the persisted hf-cache volume, so the FIRST
-  # caption is slow (one-time); later boots reuse the cache.
+  # The published blip-adapter image ships with the ~990 MB BLIP weights
+  # baked in (issue #79), so it captions offline under local_only — no
+  # first-run HuggingFace download and no need to relax sovereignty. The
+  # hf-cache volume below just persists the runtime cache across restarts.
   # ──────────────────────────────────────────────────────────────
   blip-adapter:
     profiles: [camera-agent]
