@@ -32,6 +32,7 @@ for arg in "$@"; do
   case "$arg" in
     --standard) PROFILE="camera-agent-standard"; EDITION="Watch (standard · +scene description · ~3-4 GB)";;
     --voice|--full) PROFILE="camera-agent"; EDITION="Sentinel (full · hands-free voice · ~6-12 GB)";;
+    --demo) PROFILE="camera-agent-demo"; EDITION="Demo (no camera · scripted scenes · instant)";;
     --lite|--spotter) PROFILE="camera-agent-lite";;
     --down|--stop) ACTION="down";;
     -h|--help)
@@ -39,6 +40,7 @@ for arg in "$@"; do
 OpenNVR Camera Agent — one-command quickstart (run from repo root)
 
   examples/camera-agent/quickstart.sh            Spotter (lite · text · ~1-2 GB)
+  examples/camera-agent/quickstart.sh --demo     Demo: no camera, scripted scenes (instant try / GIF)
   examples/camera-agent/quickstart.sh --standard Watch  (+ scene description · ~3-4 GB)
   examples/camera-agent/quickstart.sh --voice    Sentinel (full hands-free voice)
   examples/camera-agent/quickstart.sh --down     stop the agent
@@ -59,7 +61,7 @@ COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.camera-agent.yml
 
 if [ "$ACTION" = "down" ]; then
   say "Stopping the camera agent…"
-  "${COMPOSE[@]}" --profile camera-agent-lite --profile camera-agent-standard --profile camera-agent down
+  "${COMPOSE[@]}" --profile camera-agent-lite --profile camera-agent-standard --profile camera-agent-demo --profile camera-agent down
   ok "Stopped."
   exit 0
 fi

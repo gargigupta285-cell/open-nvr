@@ -130,6 +130,26 @@ class KaicAdapterClient(_ReusableClientMixin):
         raise last_exc
 
 
+class SyntheticDetectionClient:
+    """Demo detector: instead of calling KAI-C/YOLOv8, it reads the ground-truth
+    scene a ``SyntheticFrameSource`` embedded in the frame and returns matching
+    detections. Lets the whole agent run with no cameras/adapters so the demo is
+    deterministic and recordable. Clearly a DEMO path — not real inference."""
+
+    async def infer(
+        self,
+        *,
+        frame_jpeg: bytes,
+        extra: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
+    ) -> dict[str, Any]:
+        from frame_sources import synth_detections_from_frame
+        return {"result": {"detections": synth_detections_from_frame(frame_jpeg)}}
+
+    async def aclose(self) -> None:  # parity with KaicAdapterClient
+        return None
+
+
 # ── Adapter-direct clients (streaming voice path) ──────────────────
 
 

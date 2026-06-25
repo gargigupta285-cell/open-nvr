@@ -265,6 +265,115 @@ class DeviceFrameSource:
         return buf.tobytes()
 
 
+_SYNTH_OPEN = b"<SYNTH>"
+_SYNTH_CLOSE = b"</SYNTH>"
+_LABEL_ALIASES = {"people": "person", "persons": "person", "ppl": "person"}
+
+
+def parse_synth_spec(spec: str) -> dict[str, int]:
+    """``"people=2,cars=1"`` → ``{"person": 2, "car": 1}``. Labels are
+    normalised to the singular YOLO-style class the detector emits."""
+    out: dict[str, int] = {}
+    for part in (spec or "").split(","):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        label, _, count = part.partition("=")
+        label = label.strip().lower()
+        label = _LABEL_ALIASES.get(label, label)
+        if label.endswith("s") and label not in ("bus",):
+            label = label[:-1]  # cars → car
+        try:
+            n = int(count.strip())
+        except ValueError:
+            continue
+        if n > 0 and label:
+            out[label] = out.get(label, 0) + n
+    return out
+
+
+def synth_detections_from_frame(frame_jpeg: bytes) -> list[dict]:
+    """Read the ground-truth scene a SyntheticFrameSource embedded after the
+    JPEG and expand it into detector-shaped detections (non-overlapping boxes
+    so the de-dup keeps each). Returns [] for a frame with no marker."""
+    i = frame_jpeg.rfind(_SYNTH_OPEN)
+    j = frame_jpeg.rfind(_SYNTH_CLOSE)
+    if i == -1 or j == -1 or j < i:
+        return []
+    import json
+    try:
+        spec = json.loads(frame_jpeg[i + len(_SYNTH_OPEN):j].decode("utf-8"))
+    except Exception:
+        return []
+    labels: list[str] = []
+    for label, count in spec.items():
+        labels.extend([str(label)] * int(count))
+    total = len(labels) or 1
+    dets = []
+    for idx, label in enumerate(labels):
+        dets.append({
+            "label": label,
+            "confidence": 0.95,
+            "bbox": {"x": (idx + 1) / (total + 1), "y": 0.5, "w": 0.14, "h": 0.45},
+        })
+    return dets
+
+
+class SyntheticFrameSource:
+    """A camera that needs no hardware: it renders a deterministic JPEG of a
+    scripted scene and embeds that scene's ground truth after the image, so a
+    demo detector (``synthetic_detection``) returns exactly what's drawn. This
+    lets the whole agent + demo UI run with zero cameras/adapters — ideal for
+    recording the demo GIF or trying the agent on a bare machine.
+
+    URL form: ``synth:people=2,cars=1`` (or ``synth:`` for an empty scene).
+    Requires Pillow (imported lazily). Clearly a DEMO source — not real vision.
+    """
+
+    def __init__(self, *, camera_id: str, spec: str) -> None:
+        self.camera_id = camera_id
+        self._spec = parse_synth_spec(spec)
+        self._cached: bytes | None = None
+
+    def fetch(self) -> bytes:
+        if self._cached is not None:
+            return self._cached  # deterministic: same frame every call
+        try:
+            from PIL import Image, ImageDraw
+        except Exception as exc:  # pragma: no cover - import env specific
+            raise FrameSourceError(
+                "synthetic frame source needs Pillow (pip install pillow): "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        import io
+        import json as _json
+
+        W, H = 640, 480
+        img = Image.new("RGB", (W, H), (24, 28, 40))
+        draw = ImageDraw.Draw(img)
+        draw.text((12, 10), f"DEMO · {self.camera_id}", fill=(180, 190, 210))
+        colors = {"person": (90, 200, 160), "car": (230, 140, 90), "dog": (200, 200, 110)}
+        labels: list[str] = []
+        for label, count in self._spec.items():
+            labels.extend([label] * count)
+        total = len(labels) or 1
+        for idx, label in enumerate(labels):
+            cx = (idx + 1) / (total + 1) * W
+            bw, bh = 0.14 * W, 0.45 * H
+            x1, y1 = cx - bw / 2, H * 0.5 - bh / 2
+            col = colors.get(label, (150, 160, 200))
+            draw.rectangle([x1, y1, x1 + bw, y1 + bh], outline=col, width=4)
+            draw.text((x1 + 4, y1 - 14), label, fill=col)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        # Append the ground truth AFTER the JPEG's EOI — decoders ignore
+        # trailing bytes, so the image still displays, but the demo detector
+        # can read exactly what's in the scene.
+        payload = _SYNTH_OPEN + _json.dumps(self._spec).encode("utf-8") + _SYNTH_CLOSE
+        self._cached = buf.getvalue() + payload
+        return self._cached
+
+
 def _parse_device_spec(device: str):
     """``device:0`` → int 0; ``device:auto`` → int 0; ``device:/dev/video1`` →
     the path string (OpenCV accepts either)."""
@@ -350,6 +459,9 @@ def build_frame_source(*, camera_id: str, url: str) -> FrameSource:
     if scheme == "device":
         # ``device:0`` → urlparse puts "0" in .path; ``device:/dev/video0`` too.
         return DeviceFrameSource(camera_id=camera_id, device=parsed.path or parsed.netloc)
+    if scheme == "synth":
+        # ``synth:people=2,cars=1`` — a scripted, hardware-free demo camera.
+        return SyntheticFrameSource(camera_id=camera_id, spec=parsed.path or parsed.netloc)
     raise FrameSourceError(
         f"unsupported frame source scheme {scheme!r}; expected "
         "file/http/https/rtsp/device."

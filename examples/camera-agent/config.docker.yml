@@ -49,11 +49,13 @@ enabled_tools:
   - detect_objects
   - describe_camera
 
-# LLM tuning. llama3.2:3b is the docker-compose.camera-agent.yml
-# default — fits comfortably in 3 GB of RAM at ~5-15 tok/s on CPU.
-# Bump to llama3.1:8b-instruct for better tool-calling quality if
-# you have the RAM (~6 GB). Whichever model you pick, it MUST
-# support tool calling — see https://ollama.com/blog/tool-support.
+# LLM tuning. qwen2.5:1.5b is the docker-compose.camera-agent.yml
+# default — ~1.5 GB of RAM, snappy on CPU, and a solid small tool-caller
+# (keeps the full edition light, issue #82). For more reliable tool-calling
+# on a roomier box, set OLLAMA_MODEL=qwen2.5:3b (or llama3.1:8b-instruct,
+# ~6 GB) in your .env — that single var drives BOTH the model pull and this
+# config. Whichever model you pick, it MUST support tool calling — see
+# https://ollama.com/blog/tool-support.
 llm_model: ${OLLAMA_MODEL}
 llm_temperature: 0.4
 # Spoken replies are 1-2 short sentences (see system_prompt). 256 let the

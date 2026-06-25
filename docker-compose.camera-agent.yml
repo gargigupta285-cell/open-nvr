@@ -46,7 +46,7 @@ services:
       - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
       # English-only Whisper: faster on CPU and avoids the multilingual
       # model hallucinating foreign-language tokens on noisy/quiet audio.
-      - WHISPER_MODEL_SIZE=base.en
+      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-tiny.en}
     volumes:
       - opennvr_whisper_models:/app/model_weights/whisper
     networks:
@@ -121,8 +121,35 @@ services:
   # which is stable, well-maintained, and identical to what
   # developers run on their laptops today.
   # ──────────────────────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────
+  # Combined voice adapter (issue #82) — Whisper + Piper + BLIP in ONE
+  # container, each on its existing port with the same /infer contract.
+  # Used by the camera-agent-combined profile instead of the three
+  # separate adapter services. One image to pull, one container to run.
+  # ──────────────────────────────────────────────────────────────
+  voice-adapter:
+    profiles: [camera-agent-combined]
+    image: ghcr.io/open-nvr/voice-adapter:${ADAPTER_TAG:-latest}
+    container_name: opennvr_voice_adapter
+    restart: unless-stopped
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-tiny.en}
+    volumes:
+      - opennvr_whisper_models:/app/model_weights/whisper
+      - ../ai-adapter/model_weights/piper:/app/model_weights/piper:ro
+      - opennvr_blip_hf_cache:/root/.cache/huggingface
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx,sys; sys.exit(0 if all(httpx.get(f'http://127.0.0.1:{p}/health', timeout=2).status_code==200 for p in (9001,9003,9006)) else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 300s
+      retries: 20
+
   ollama:
-    profiles: [camera-agent, camera-agent-lite, camera-agent-standard]
+    profiles: [camera-agent, camera-agent-lite, camera-agent-standard, camera-agent-combined, camera-agent-demo]
     image: ollama/ollama:0.5.4
     container_name: opennvr_ollama
     restart: unless-stopped
@@ -151,7 +178,7 @@ services:
   # ollama-model-pull``.) Model = OLLAMA_MODEL in .env (default qwen2.5:1.5b).
   # ──────────────────────────────────────────────────────────────
   ollama-model-pull:
-    profiles: [camera-agent, camera-agent-lite, camera-agent-standard]
+    profiles: [camera-agent, camera-agent-lite, camera-agent-standard, camera-agent-combined, camera-agent-demo]
     image: ollama/ollama:0.5.4
     container_name: opennvr_ollama_pull
     # One-shot: pull the model, then exit 0. `restart: no` keeps it a true
@@ -166,12 +193,12 @@ services:
       - -c
       - |
         set -e
-        MODEL="$${OLLAMA_MODEL:-llama3.2:3b}"
+        MODEL="$${OLLAMA_MODEL:-qwen2.5:1.5b}"
         echo "Pulling Ollama model: $$MODEL"
         OLLAMA_HOST=http://ollama:11434 ollama pull "$$MODEL"
         echo "Model ready."
     environment:
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:3b}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
     volumes:
       - opennvr_ollama_models:/root/.ollama
     networks:
@@ -221,7 +248,7 @@ services:
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:3b}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
     volumes:
       - ./examples/camera-agent:/template:ro
       - opennvr_camera_agent_config:/generated
@@ -351,7 +378,7 @@ services:
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:3b}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
     volumes:
       - ./examples/camera-agent:/template:ro
       - opennvr_camera_agent_config_standard:/generated
@@ -383,6 +410,99 @@ services:
     networks:
       - opennvr_internal
 
+  # ──────────────────────────────────────────────────────────────
+  # FULL (Sentinel) edition on the COMBINED voice adapter (issue #82).
+  # Same hands-free voice agent as ``camera-agent``, but the three voice
+  # adapters run in one ``voice-adapter`` container.
+  #   docker compose -f docker-compose.tier0.yml \
+  #                  -f docker-compose.camera-agent.yml \
+  #                  --profile camera-agent-combined up -d
+  # ──────────────────────────────────────────────────────────────
+  camera-agent-config-init-combined:
+    profiles: [camera-agent-combined]
+    image: alpine:3.20
+    container_name: opennvr_camera_agent_config_init_combined
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        sed_esc() { printf '%s' "$$1" | sed -e 's/\\/\\\\/g; s/&/\\&/g; s/\//\\\//g'; }
+        ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
+        lhost=$$(sed_esc "$${CAMERA_AGENT_LISTEN_HOST}")
+        omodel=$$(sed_esc "$${OLLAMA_MODEL}")
+        sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
+            -e "s/[$$][{]CAMERA_AGENT_LISTEN_HOST[}]/$$lhost/g" \
+            -e "s/[$$][{]OLLAMA_MODEL[}]/$$omodel/g" \
+            < /template/config.docker.combined.yml > /generated/config.yml
+        echo "Wrote combined /generated/config.yml from template."
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
+    volumes:
+      - ./examples/camera-agent:/template:ro
+      - opennvr_camera_agent_config_combined:/generated
+
+  camera-agent-combined:
+    profiles: [camera-agent-combined]
+    build:
+      context: .
+      dockerfile: examples/camera-agent/Dockerfile
+    image: opennvr/camera-agent:local-build
+    container_name: opennvr_camera_agent_combined
+    restart: unless-stopped
+    depends_on:
+      camera-agent-config-init-combined:
+        condition: service_completed_successfully
+      voice-adapter:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      ollama-model-pull:
+        condition: service_completed_successfully
+      opennvr-core:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:9100:9100"
+    volumes:
+      - opennvr_camera_agent_config_combined:/app/config:ro
+    command:
+      - --config
+      - /app/config/config.yml
+    networks:
+      - opennvr_internal
+
+  # ──────────────────────────────────────────────────────────────
+  # DEMO edition — no camera, no vision adapters (issue #82 / launch).
+  # Scripted synth: cameras + synthetic_detection answer deterministically,
+  # so you can try it (or record the demo GIF) instantly. Only Ollama + this
+  # agent do AI work. Config is mounted directly (no secrets, no init).
+  #   examples/camera-agent/quickstart.sh --demo
+  # ──────────────────────────────────────────────────────────────
+  camera-agent-demo:
+    profiles: [camera-agent-demo]
+    build:
+      context: .
+      dockerfile: examples/camera-agent/Dockerfile
+    image: opennvr/camera-agent:local-build
+    container_name: opennvr_camera_agent_demo
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+      ollama-model-pull:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:9100:9100"  # demo UI (text chat)
+    volumes:
+      - ./examples/camera-agent/config.docker.demo.yml:/app/config/config.yml:ro
+    command:
+      - --config
+      - /app/config/config.yml
+    networks:
+      - opennvr_internal
+
 volumes:
   # Ollama model store — persisted so the LLM survives ``compose
   # down``. ``ollama-model-pull`` writes here once; subsequent
@@ -404,3 +524,5 @@ volumes:
   opennvr_camera_agent_config_lite:
   # Generated standard config.yml for the camera-agent-standard profile.
   opennvr_camera_agent_config_standard:
+  # Generated combined config.yml for the camera-agent-combined profile.
+  opennvr_camera_agent_config_combined:

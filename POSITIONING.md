@@ -107,8 +107,8 @@ We know the friction. The roadmap is about *removing doors*, not adding rooms:
    (open-nvr / ai-adapter / kai-c) — the single biggest reason people bounce.
    Consolidate the getting-started path so `clone → up` just works.
 2. **Lighter default.** Spotter is the default; the heavy voice stack is opt-in.
-   Next: collapse the three voice adapter containers (each ships its own ~2 GB
-   PyTorch) into the one combined image the repo already builds.
+   Next: collapse the three separate voice adapter containers (BLIP is the heavy
+   one — it carries PyTorch; whisper and piper are lean) into one combined image.
 3. **Bring-your-own-AI, frictionless.** The OpenAI-compatible client already
    lets any provider be the brain; make it a one-line setting in the UI.
 4. **Home Assistant / NVR integrations** so it slots into setups people already

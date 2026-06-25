@@ -118,6 +118,14 @@ examples/camera-agent/quickstart.sh        # Spotter (lite): type a question
 
 Then open <http://localhost:9100/demo> and type *"how many people are at the door?"*. No camera yet? Click **"Use this machine's camera"** to run against your laptop webcam (or any USB/Pi/onboard device) with zero provisioning.
 
+**No camera at all? Try it instantly in demo mode:**
+
+```bash
+examples/camera-agent/quickstart.sh --demo   # scripted scenes, no camera, no vision models
+```
+
+This runs the agent against deterministic scripted scenes — ask *"how many people are at the front door?"* and it answers *"2 people"* every time. Perfect for a first look or recording a demo. (Edit the scene counts in `examples/camera-agent/config.docker.demo.yml`; it's a scripted demo of the UX, real detection is one flag away.)
+
 Step up an edition when you want more — one flag each:
 
 ```bash

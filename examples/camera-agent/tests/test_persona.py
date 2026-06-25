@@ -1,7 +1,8 @@
 # Copyright (c) 2026 OpenNVR
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Tests for Ram's persona, the spoken intro, and the background task system."""
+"""Tests for the agent persona (Sidhu / Shailaja), the spoken intro, and the
+background task system."""
 from __future__ import annotations
 
 import asyncio
@@ -27,14 +28,14 @@ def _runtime() -> CameraAgentRuntime:
 
 def test_system_prompt_names_agent_and_describes_tasks():
     prompt = _runtime().build_system_prompt()
-    assert "Shailaja" in prompt  # default voice_gender=female
+    assert "Sidhu" in prompt  # default voice_gender=male
     assert "create_background_task" in prompt
 
 
 def test_agent_name_follows_voice_gender():
     assert ca.agent_name_for("female") == "Shailaja"
     assert ca.agent_name_for("male") == "Sidhu"
-    assert ca.agent_name_for(None) == "Shailaja"
+    assert ca.agent_name_for(None) == "Sidhu"  # default voice_gender=male
     assert "Shailaja" in ca.greeting_for("Shailaja")
 
 
@@ -121,8 +122,8 @@ def test_intro_endpoint_returns_text_and_audio(monkeypatch):
     monkeypatch.setattr(rt.piper, "synthesize", fake_synth)
     client = TestClient(build_app(rt))
     data = client.get("/intro").json()
-    assert data["name"] == "Shailaja"
-    assert "Shailaja" in data["text"]
+    assert data["name"] == "Sidhu"
+    assert "Sidhu" in data["text"]
     assert data["audio_b64"] == base64.b64encode(b"WAVDATA").decode()
 
 
@@ -136,7 +137,7 @@ def test_intro_endpoint_text_only_when_tts_down(monkeypatch):
     client = TestClient(build_app(rt))
     data = client.get("/intro").json()
     assert data["audio_b64"] is None
-    assert "Shailaja" in data["text"]
+    assert "Sidhu" in data["text"]
 
 
 def test_tasks_endpoints(monkeypatch):

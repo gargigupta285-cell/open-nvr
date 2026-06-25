@@ -88,16 +88,19 @@ Status vs the issue: #1 & #3 (heavy stack / RAM) now have a real fix via the
 lite profile; #5 (reliability) and the cloud-comparison ask are addressed by the
 cloud profile; #2 (image bloat) and #4 (sovereignty dev mode) remain.
 
-## Container topology — the duplicate-torch finding
-Running the full agent starts ~10 containers; three of them (`whisper-adapter`,
-`piper-adapter`, `blip-adapter`) are **separate images each bundling its own
-~2 GB PyTorch** — a big share of the RAM and GHCR bloat. But `ai-adapter`
-already builds **one combined image serving all three (+ vision) on one port**
-(`app/main.py`, `uv sync --extra all`). Direction:
-- **Combined "voice adapter"** for the full edition → 3 containers → 1, no
-  duplicate torch. *Staged:* per-adapter images expose `/infer` while the
-  combined image routes by task, so this needs a real `docker build` + contract
-  check before flipping the default (can't verify in-sandbox).
+## Container topology — corrected finding
+Running the full agent starts ~10 containers; three (`whisper-adapter`,
+`piper-adapter`, `blip-adapter`) are separate images. Correction to an earlier
+claim: it is **not** "torch ×3" — whisper uses faster-whisper (CTranslate2, no
+torch), piper uses piper-tts/onnxruntime (no torch); **only BLIP carries torch**
+(~2 GB + ~990 MB weights). So the cost is container/image *sprawl* (3 to pull,
+start, health-check), with BLIP heavy on its own. Direction:
+- **Combined "voice adapter"** image runs the three per-adapter apps
+  (`adapters.whisper/piper/blip.main`) in one container on their existing ports
+  — a true contract match (same `/infer`), unlike the monolithic `app/main.py`
+  (port 9100, task-routed). Win = 3 images/containers → 1; RAM savings are modest
+  (models dominate). Needs a real `docker build` + bring-up, so it ships as an
+  opt-in profile, not a default swap.
 - **Shared model-cache volume** so weights download once and mount across
   adapters, `#79` offline pin preserved.
 - Spotter/Watch don't start the voice adapters at all, so they sidestep it.

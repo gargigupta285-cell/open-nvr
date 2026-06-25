@@ -49,6 +49,7 @@ from adapter_clients import (
     OllamaClient,
     OpenAILLMClient,
     PiperClient,
+    SyntheticDetectionClient,
     WhisperClient,
 )
 from context import CameraContext, CameraSpec, run_event_subscriber
@@ -129,10 +130,10 @@ class AppConfig:
     # matching contact records "would alert <number>" when it fires.
     emergency_contacts: dict[str, str] | None = None
 
-    # Persona voice: "female" → Shailaja, "male" → Sidhu. Selects the agent's
-    # name + pronouns; the actual spoken voice is the Piper voice configured in
-    # the ai-adapter (see README/ALARMS notes).
-    voice_gender: str = "female"
+    # Persona voice: "male" → Sidhu (default), "female" → Shailaja. Selects the
+    # agent's name + pronouns; the actual spoken voice is the Piper voice
+    # configured in the ai-adapter (see README/ALARMS notes).
+    voice_gender: str = "male"
 
     # External notifications: webhook URLs alarms/watches fan out to so alerts
     # reach you when the browser tab is closed (Slack/Discord/n8n/Home
@@ -169,6 +170,11 @@ class AppConfig:
     auto_discover_cameras: bool = False
     auto_discover_all: bool = False
 
+    # Demo mode: serve scripted ``synth:`` cameras and read detections from
+    # their embedded ground truth instead of calling KAI-C/YOLO. Lets the whole
+    # agent run with no cameras/adapters — for recording the demo or a quick try.
+    synthetic_detection: bool = False
+
 
 _DEFAULT_SYSTEM_PROMPT = (
     "You are a concise voice assistant for a home security camera system. "
@@ -189,7 +195,7 @@ _DEFAULT_SYSTEM_PROMPT = (
 # spoken voice is whichever Piper voice the ai-adapter serves; ``voice_gender``
 # here selects the matching persona NAME (and pronouns) the agent uses.
 AGENT_NAMES = {"female": "Shailaja", "male": "Sidhu"}
-DEFAULT_VOICE_GENDER = "female"
+DEFAULT_VOICE_GENDER = "male"
 
 
 def agent_name_for(voice_gender: str | None) -> str:
@@ -212,7 +218,7 @@ def greeting_for(name: str) -> str:
 
 @dataclass
 class AgentTask:
-    """A long-running request Ram is working on in the background."""
+    """A long-running request Sidhu is working on in the background."""
 
     id: int
     query: str
@@ -233,7 +239,7 @@ class AgentTask:
 
 
 class TaskManager:
-    """Runs Ram's longer jobs as background asyncio tasks so the
+    """Runs Sidhu's longer jobs as background asyncio tasks so the
     conversation never blocks. In-memory only — tasks reset on restart.
 
     Each task runs a full tool-calling turn for its query (with the
@@ -297,7 +303,7 @@ class TaskManager:
 
 @dataclass
 class Monitor:
-    """A standing watch Ram keeps on one or more cameras.
+    """A standing watch Sidhu keeps on one or more cameras.
 
     kind="notify": alert when ``target`` appears.
     kind="count":  keep a live + peak count of ``target`` per camera
@@ -374,7 +380,7 @@ class LineCounter:
 
 
 class MonitorManager:
-    """Runs Ram's standing watches: every ``interval_s`` it grabs a frame
+    """Runs Sidhu's standing watches: every ``interval_s`` it grabs a frame
     from each watched camera, runs detection, and counts the target. Notify
     monitors raise a (cooldown-limited) notification when the target is
     present; count monitors track live + peak counts. In-memory only."""
@@ -1244,7 +1250,7 @@ def _forget_face_tool() -> dict[str, Any]:
 
 
 def _create_background_task_tool() -> dict[str, Any]:
-    """OpenAI/Ollama function schema for Ram's background-task tool."""
+    """OpenAI/Ollama function schema for Sidhu's background-task tool."""
     return {
         "type": "function",
         "function": {
@@ -1398,6 +1404,7 @@ def load_config(path: str | Path) -> AppConfig:
         cameras=cameras,
         auto_discover_cameras=bool(raw.get("auto_discover_cameras", False)),
         auto_discover_all=bool(raw.get("auto_discover_all", False)),
+        synthetic_detection=bool(raw.get("synthetic_detection", False)),
     )
 
 
@@ -1487,11 +1494,16 @@ class CameraAgentRuntime:
             api_key=cfg.kaic_api_key,
             adapter_name=cfg.caption_adapter,
         )
-        self.detection_client = KaicAdapterClient(
-            kaic_url=cfg.kaic_url,
-            api_key=cfg.kaic_api_key,
-            adapter_name=cfg.detection_adapter,
-        )
+        if cfg.synthetic_detection:
+            # Demo mode: no KAI-C/YOLO — detections come from the synthetic
+            # frames' embedded ground truth so the demo is deterministic.
+            self.detection_client = SyntheticDetectionClient()
+        else:
+            self.detection_client = KaicAdapterClient(
+                kaic_url=cfg.kaic_url,
+                api_key=cfg.kaic_api_key,
+                adapter_name=cfg.detection_adapter,
+            )
         self.recognition_client = KaicAdapterClient(
             kaic_url=cfg.kaic_url,
             api_key=cfg.kaic_api_key,
@@ -1951,7 +1963,7 @@ class CameraAgentRuntime:
     # ── System prompt construction ────────────────────────────────
 
     def build_system_prompt(self) -> str:
-        """Compose the system prompt the LLM sees: Ram's identity + the
+        """Compose the system prompt the LLM sees: Sidhu's identity + the
         operator's base prompt + a per-camera roster + task guidance."""
         roster = "\n".join(
             f"- {cam.camera_id}: {cam.role}" for cam in self.cfg.cameras
@@ -2159,7 +2171,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.get("/tasks")
     async def _tasks() -> dict[str, Any]:
-        """Ram's background tasks (the UI polls this to surface results)."""
+        """Sidhu's background tasks (the UI polls this to surface results)."""
         return {"tasks": runtime.tasks.list()}
 
     @app.post("/tasks")
@@ -2177,7 +2189,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.post("/say")
     async def _say(request: Request) -> JSONResponse:
-        """Synthesize arbitrary text so the UI can speak things Ram produces
+        """Synthesize arbitrary text so the UI can speak things Sidhu produces
         outside a /converse turn — e.g. announcing a finished background task
         aloud. Text-only fallback when Piper is unreachable."""
         try:
@@ -2385,7 +2397,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
         # UI-selected camera hint: one id, a comma list, or "all". Use the
         # first concrete configured camera as the grounding default; "all"
-        # or empty leaves it to Ram.
+        # or empty leaves it to Sidhu.
         configured = {cam.camera_id for cam in runtime.cfg.cameras}
         raw_hint = request.query_params.get("camera") or ""
         camera_hint = None

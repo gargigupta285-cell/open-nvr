@@ -107,37 +107,70 @@ OpenCV on the host; it's imported lazily so nothing else depends on it.)
 
 ## Container topology — the other half of "too heavy"
 
-Running the agent today starts ~10 containers, and three of them —
-`whisper-adapter`, `piper-adapter`, `blip-adapter` — are **separate images that
-each bundle their own ~2 GB copy of PyTorch**. That triplication is a large
-share of both the RAM and the GHCR image bloat called out in issue #82.
+Running the full agent today starts ~10 containers, and three of them —
+`whisper-adapter`, `piper-adapter`, `blip-adapter` — run as separate images. To
+be accurate about where the weight actually is: **whisper** uses faster-whisper
+(CTranslate2, *no* torch) and **piper** uses piper-tts + onnxruntime (*no*
+torch); only **`blip-adapter` carries a full PyTorch + Transformers stack**
+(~2 GB of torch plus its ~990 MB baked weights). So the cost isn't "torch ×3" —
+it's three separate containers to pull, start, and health-check, one of which
+(BLIP) is genuinely heavy on its own.
 
-The fix already exists in the repo: the `ai-adapter` project builds **one
-combined image that serves whisper, piper, blip and the vision models on a
-single port** (`app/main.py`, `uv sync --extra all`). The direction, therefore:
+The fix: a **combined "voice adapter" image** that runs all three adapter apps
+(`adapters.whisper/piper/blip.main`) in **one container** on their existing
+ports. This is a true contract match — same per-adapter `/infer` endpoints the
+camera-agent already calls — so it's low-risk, unlike the monolithic
+`app/main.py` (port 9100, task-routed) which is a *different* contract. What it
+buys, honestly:
 
-- **Sentinel runs one combined "voice adapter" container** instead of three,
-  collapsing 3 → 1 and removing the duplicate torch installs. (Needs a real
-  `docker build` + a route-contract check before flipping the default — the
-  per-adapter images expose `/infer` while the combined image routes by task —
-  so this is staged, not silently switched.)
-- **A shared model-cache volume** so weights are pulled once and mounted across
-  adapters rather than re-downloaded per container — fast pulls with the `#79`
-  offline pin (`TRANSFORMERS_OFFLINE=1`) preserved, so a cold cache fails closed
-  instead of phoning home.
-- **Spotter and Watch sidestep the problem entirely** — they don't start the
-  voice adapters at all.
+- **One image instead of three; one container instead of three.** Fewer things
+  to pull, start, and restart — the real, immediate win.
+- **Modest RAM savings** (one Python base, shared libs), but be honest: the RAM
+  of the full edition is dominated by the *models* — the Ollama LLM (2–6 GB) and
+  BLIP+torch (~3 GB) — not by container overhead. **Merging containers does not
+  halve RAM.**
+- **The big RAM lever is the editions and model choices, not the merge.** Spotter
+  and Watch don't start the voice adapters at all; a smaller LLM and
+  faster-whisper `tiny.en` cut the most. That's where "~12 GB → ~6–8 GB" actually
+  comes from.
 
-Modularity is still correct for production scale-out (independent GPU placement,
-swap-a-model, fault isolation), so the per-adapter images stay available as the
-advanced/at-scale option; the combined container is the right *default* for the
-single-box experience that 95% of first-runs are.
+Needs a real `docker build` + a live bring-up to verify (can't build in-sandbox),
+so the combined service ships as an opt-in profile, not a silent default swap.
+Modularity stays correct for production scale-out (independent GPU placement,
+swap-a-model, fault isolation), so the per-adapter images remain the advanced
+option.
+
+## Honest RAM accounting (why "~12 GB → ~6–8 GB")
+
+The full edition's memory is the *models*, not container overhead. The defaults
+now favour the light end (override per box via `.env`):
+
+| Component | Old default | New default | Resident RAM |
+|-----------|-------------|-------------|--------------|
+| LLM (Ollama, kept warm) | `llama3.2:3b` | **`qwen2.5:1.5b`** | ~3.5 GB → **~1.5–2 GB** |
+| STT (Whisper) | `base.en` | **`tiny.en`** | ~1 GB → **~0.3–0.5 GB** |
+| Captions (BLIP + torch) | on | on (full only) | ~2.5–3 GB |
+| TTS (Piper) | on | on (full only) | ~0.1 GB |
+| Detector (YOLOv8n) + core | on | on | ~1–1.5 GB |
+
+So a default **full** edition lands around **~6–8 GB** instead of ~11–12 GB,
+and **Spotter/Watch** (no Whisper/Piper/BLIP) sit at ~1–4 GB. The single var
+`OLLAMA_MODEL` drives both the model pull and the agent config, and
+`WHISPER_MODEL_SIZE` swaps the STT model — bump them to `qwen2.5:3b` / `base.en`
+for more reliable tool-calling and transcription when you have the headroom.
+
+This is the real RAM lever (the combined-image merge above is operational
+simplicity, not memory). Be honest in conversation about the trade: a 1.5B model
+on CPU is snappy but will occasionally miss a tool call on a busy prompt — the
+forced-grounding guard catches the worst of it, and the cloud/`qwen2.5:3b` tiers
+are there when reliability matters more than footprint.
 
 ## How this maps to the issue #82 complaints
 
 Heavy stack / ~12 GB RAM → **Spotter & Watch** make the light path real and the
-default. Bloated GHCR images / duplicate torch → **combined voice adapter +
-shared cache** (staged). Sovereignty blocking dev → **Sentinel Cloud** is the
+default, and the heavy hitters are the LLM + BLIP, so a smaller LLM and dropping
+BLIP where it isn't needed is the lever. Container/image sprawl → **combined
+voice adapter** (3 images → 1; staged behind a profile). Sovereignty blocking dev → **Sentinel Cloud** is the
 labelled, audited escape hatch; `local_only` stays the secure default. Small-LLM
 unreliability → **Qwen2.5 picks + cloud brain tier**. Cloud comparison →
 **Sentinel Cloud** is the apples-to-apples profile, with the sovereign Sentinel
