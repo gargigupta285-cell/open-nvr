@@ -301,6 +301,58 @@ class OllamaClient(_ReusableClientMixin):
         return resp.json()
 
 
+class OpenAILLMClient(_ReusableClientMixin):
+    """Cloud/hybrid LLM brain via any OpenAI-compatible chat API — OpenAI,
+    Groq, Together, OpenRouter, or a local OpenAI-API server (vLLM, llama.cpp,
+    LM Studio, Ollama's /v1). Used when ``llm_provider: openai`` so the agent
+    gets stronger, lower-latency tool-calling without loading a local LLM
+    (issue #82). Normalises the response to the same ``{"message": {...}}``
+    shape the turn loop expects."""
+
+    def __init__(self, *, base_url: str, api_key: str | None, model: str,
+                 timeout_seconds: float = 120.0) -> None:
+        url = base_url.rstrip("/")
+        if url.endswith("/chat/completions"):
+            self._url = url
+        elif url.endswith("/v1"):
+            self._url = url + "/chat/completions"
+        else:
+            self._url = url + "/v1/chat/completions"
+        self._api_key = api_key
+        self._model = model
+        self._timeout = timeout_seconds
+
+    async def chat(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float = 0.4,
+        max_tokens: int = 256,
+    ) -> dict[str, Any]:
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        body: dict[str, Any] = {
+            "model": self._model, "messages": messages,
+            "temperature": temperature, "max_tokens": max_tokens,
+        }
+        if tools:
+            body["tools"] = tools
+            body["tool_choice"] = "auto"
+        resp = await self._client().post(self._url, json=body, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+        choices = data.get("choices") or []
+        message = (choices[0].get("message") if choices else None) or {
+            "role": "assistant", "content": ""
+        }
+        # OpenAI omits content when only tool_calls are returned; normalise to "".
+        if message.get("content") is None:
+            message["content"] = ""
+        return {"message": message}
+
+
 class PiperClient(_ReusableClientMixin):
     """Direct call to the Piper adapter's ``/infer`` endpoint. Returns
     raw audio bytes (WAV format from Piper by default)."""

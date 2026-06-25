@@ -106,19 +106,22 @@ Skipping `./start.sh up` and using bare `docker compose up -d` works too (Docker
 
 ## Talk to your cameras
 
-The camera-agent layers a voice loop on top of the core stack — ask out loud, hear the answer back, all on your hardware. Two commands once Tier 0 is running:
+The camera-agent lets you *ask* your cameras questions — all on your hardware. Start light with **one command** (text chat, detection only, ~1–2 GB RAM, no GPU):
 
 ```bash
-# 1. Pull the local LLM (~2 GB, one-time)
-docker compose -f docker-compose.yml -f docker-compose.camera-agent.yml \
-  --profile camera-agent run --rm ollama-model-pull
-
-# 2. Bring up the agent
-docker compose -f docker-compose.yml -f docker-compose.camera-agent.yml \
-  --profile camera-agent up -d
+examples/camera-agent/quickstart.sh        # Spotter (lite): type a question
 ```
 
-Then open <http://localhost:9100/demo>, click Start, and speak.
+Then open <http://localhost:9100/demo> and type *"how many people are at the door?"*. No camera yet? Click **"Use this machine's camera"** to run against your laptop webcam (or any USB/Pi/onboard device) with zero provisioning.
+
+Step up an edition when you want more — one flag each:
+
+```bash
+examples/camera-agent/quickstart.sh --standard  # Watch: + scene description & visual Q&A
+examples/camera-agent/quickstart.sh --voice     # Sentinel: full hands-free voice + persona
+```
+
+What each edition runs and which models it uses is laid out in [`examples/camera-agent/EDITIONS_AND_MODELS.md`](examples/camera-agent/EDITIONS_AND_MODELS.md). Prefer to drive Compose yourself? `docker compose -f docker-compose.yml -f docker-compose.camera-agent.yml --profile camera-agent-lite up -d` does the same as the lite quickstart.
 
 **What you can ask:**
 

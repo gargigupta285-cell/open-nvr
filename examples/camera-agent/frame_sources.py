@@ -200,6 +200,109 @@ class RtspFrameSource:
         return proc.stdout
 
 
+class DeviceFrameSource:
+    """Grab a JPEG from a **local capture device** — a laptop webcam, a USB
+    camera, a Pi camera, or any ``/dev/videoN`` node the host exposes. This is
+    what lets the agent run on *whatever hardware it's already on* (a dev
+    laptop, a drone, a robot) with zero camera provisioning: if the machine has
+    a camera, the agent uses it.
+
+    Accepts ``device:0`` / ``device:1`` (capture index), ``device:/dev/video0``
+    (explicit node), or ``device:auto`` (→ index 0). The device is opened
+    **lazily on first fetch** so constructing the source never touches hardware
+    (safe in tests / headless boots). Requires OpenCV (``opencv-python``);
+    it's imported lazily so the rest of the module works without it.
+    """
+
+    def __init__(self, *, camera_id: str, device: str) -> None:
+        self.camera_id = camera_id
+        self._spec = _parse_device_spec(device)
+        self._cap = None  # opened lazily
+
+    def _open(self):
+        try:
+            import cv2  # lazy: only the device source needs OpenCV
+        except Exception as exc:  # pragma: no cover - import env specific
+            raise FrameSourceError(
+                "device frame source needs OpenCV (opencv-python) but it could "
+                f"not be imported: {type(exc).__name__}: {exc}"
+            ) from exc
+        cap = cv2.VideoCapture(self._spec)
+        if cap is None or not cap.isOpened():
+            raise FrameSourceError(
+                f"device frame source: could not open capture device "
+                f"{self._spec!r} for camera {self.camera_id!r}. Is a camera "
+                "connected and not in use by another app?"
+            )
+        return cap
+
+    def fetch(self) -> bytes:
+        try:
+            import cv2
+        except Exception as exc:  # pragma: no cover - import env specific
+            raise FrameSourceError(
+                f"device frame source needs OpenCV: {exc}"
+            ) from exc
+        if self._cap is None:
+            self._cap = self._open()
+        ok, frame = self._cap.read()
+        if not ok or frame is None:
+            # Drop the handle so the next cycle re-opens (USB camera unplugged,
+            # drone stream blipped, etc.) rather than wedging on a dead device.
+            try:
+                self._cap.release()
+            except Exception:
+                pass
+            self._cap = None
+            raise FrameSourceError(
+                f"device frame source: read failed for camera {self.camera_id!r}"
+            )
+        ok, buf = cv2.imencode(".jpg", frame)
+        if not ok:
+            raise FrameSourceError(
+                f"device frame source: JPEG encode failed for {self.camera_id!r}"
+            )
+        return buf.tobytes()
+
+
+def _parse_device_spec(device: str):
+    """``device:0`` → int 0; ``device:auto`` → int 0; ``device:/dev/video1`` →
+    the path string (OpenCV accepts either)."""
+    d = (device or "").strip()
+    if d == "" or d.lower() == "auto":
+        return 0
+    if d.isdigit():
+        return int(d)
+    return d
+
+
+def _list_video_devices() -> list[str]:
+    """Linux ``/dev/video*`` nodes, sorted. Split out so tests can monkeypatch
+    it without real hardware."""
+    import glob
+    return sorted(glob.glob("/dev/video*"))
+
+
+def discover_local_cameras(*, all_devices: bool = False) -> list[tuple[str, str]]:
+    """Discover camera(s) physically attached to *this* machine and return
+    ``(camera_id, frame_url)`` pairs ready for the config.
+
+    Default returns a single onboard camera (the lowest ``/dev/video*`` node,
+    or capture index 0 when nothing is enumerable — e.g. macOS/Windows or a
+    webcam OpenCV opens by index). Set ``all_devices=True`` to expose every
+    enumerated node (on Linux one physical camera can appear as several nodes,
+    so the single-camera default is the saner one for a quick start)."""
+    try:
+        nodes = _list_video_devices()
+    except Exception:  # pragma: no cover - platform specific
+        nodes = []
+    if not nodes:
+        return [("local0", "device:0")]
+    if all_devices:
+        return [(f"local{i}", f"device:{node}") for i, node in enumerate(nodes)]
+    return [("local0", f"device:{nodes[0]}")]
+
+
 def _scrub_creds(text: str) -> str:
     """Remove URL userinfo (``user:pass@``) from arbitrary text such as
     ffmpeg stderr, which echoes the input URL including credentials."""
@@ -244,6 +347,10 @@ def build_frame_source(*, camera_id: str, url: str) -> FrameSource:
         )
     if scheme == "rtsp":
         return RtspFrameSource(camera_id=camera_id, url=url)
+    if scheme == "device":
+        # ``device:0`` → urlparse puts "0" in .path; ``device:/dev/video0`` too.
+        return DeviceFrameSource(camera_id=camera_id, device=parsed.path or parsed.netloc)
     raise FrameSourceError(
-        f"unsupported frame source scheme {scheme!r}; expected file/http/https."
+        f"unsupported frame source scheme {scheme!r}; expected "
+        "file/http/https/rtsp/device."
     )

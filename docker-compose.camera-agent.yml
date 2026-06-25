@@ -99,7 +99,7 @@ services:
   # hf-cache volume below just persists the runtime cache across restarts.
   # ──────────────────────────────────────────────────────────────
   blip-adapter:
-    profiles: [camera-agent]
+    profiles: [camera-agent, camera-agent-standard]
     image: ghcr.io/open-nvr/blip-adapter:${ADAPTER_TAG:-latest}
     container_name: opennvr_blip_adapter
     restart: unless-stopped
@@ -122,7 +122,7 @@ services:
   # developers run on their laptops today.
   # ──────────────────────────────────────────────────────────────
   ollama:
-    profiles: [camera-agent]
+    profiles: [camera-agent, camera-agent-lite, camera-agent-standard]
     image: ollama/ollama:0.5.4
     container_name: opennvr_ollama
     restart: unless-stopped
@@ -151,7 +151,7 @@ services:
   # ollama-model-pull``.) Model = OLLAMA_MODEL in .env (default qwen2.5:1.5b).
   # ──────────────────────────────────────────────────────────────
   ollama-model-pull:
-    profiles: [camera-agent]
+    profiles: [camera-agent, camera-agent-lite, camera-agent-standard]
     image: ollama/ollama:0.5.4
     container_name: opennvr_ollama_pull
     # One-shot: pull the model, then exit 0. `restart: no` keeps it a true
@@ -261,6 +261,128 @@ services:
     networks:
       - opennvr_internal
 
+  # ──────────────────────────────────────────────────────────────
+  # LITE profile (issue #82): the fast, low-resource on-ramp. Text
+  # chat only — NO Whisper/Piper/BLIP services, just the LLM + the
+  # YOLOv8 detector already in Tier 0. Run with:
+  #   docker compose -f docker-compose.tier0.yml \
+  #                  -f docker-compose.camera-agent.yml \
+  #                  --profile camera-agent-lite up -d
+  # Then open http://localhost:9100/demo and TYPE a question.
+  # ──────────────────────────────────────────────────────────────
+  camera-agent-config-init-lite:
+    profiles: [camera-agent-lite]
+    image: alpine:3.20
+    container_name: opennvr_camera_agent_config_init_lite
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        sed_esc() { printf '%s' "$$1" | sed -e 's/\\/\\\\/g; s/&/\\&/g; s/\//\\\//g'; }
+        ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
+        lhost=$$(sed_esc "$${CAMERA_AGENT_LISTEN_HOST}")
+        omodel=$$(sed_esc "$${OLLAMA_MODEL}")
+        sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
+            -e "s/[$$][{]CAMERA_AGENT_LISTEN_HOST[}]/$$lhost/g" \
+            -e "s/[$$][{]OLLAMA_MODEL[}]/$$omodel/g" \
+            < /template/config.docker.lite.yml > /generated/config.yml
+        echo "Wrote lite /generated/config.yml from template."
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
+    volumes:
+      - ./examples/camera-agent:/template:ro
+      - opennvr_camera_agent_config_lite:/generated
+
+  camera-agent-lite:
+    profiles: [camera-agent-lite]
+    build:
+      context: .
+      dockerfile: examples/camera-agent/Dockerfile
+    image: opennvr/camera-agent:local-build
+    container_name: opennvr_camera_agent_lite
+    restart: unless-stopped
+    depends_on:
+      camera-agent-config-init-lite:
+        condition: service_completed_successfully
+      ollama:
+        condition: service_healthy
+      ollama-model-pull:
+        condition: service_completed_successfully
+      opennvr-core:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:9100:9100"  # demo UI (text chat)
+    volumes:
+      - opennvr_camera_agent_config_lite:/app/config:ro
+    command:
+      - --config
+      - /app/config/config.yml
+    networks:
+      - opennvr_internal
+
+  # ──────────────────────────────────────────────────────────────
+  # WATCH (Standard) edition — text chat + scene description/VQA.
+  # Runs detector + BLIP caption adapter + small LLM; NO Whisper/Piper.
+  #   docker compose -f docker-compose.tier0.yml \
+  #                  -f docker-compose.camera-agent.yml \
+  #                  --profile camera-agent-standard up -d
+  # ──────────────────────────────────────────────────────────────
+  camera-agent-config-init-standard:
+    profiles: [camera-agent-standard]
+    image: alpine:3.20
+    container_name: opennvr_camera_agent_config_init_standard
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        sed_esc() { printf '%s' "$$1" | sed -e 's/\\/\\\\/g; s/&/\\&/g; s/\//\\\//g'; }
+        ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
+        lhost=$$(sed_esc "$${CAMERA_AGENT_LISTEN_HOST}")
+        omodel=$$(sed_esc "$${OLLAMA_MODEL}")
+        sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
+            -e "s/[$$][{]CAMERA_AGENT_LISTEN_HOST[}]/$$lhost/g" \
+            -e "s/[$$][{]OLLAMA_MODEL[}]/$$omodel/g" \
+            < /template/config.docker.standard.yml > /generated/config.yml
+        echo "Wrote standard /generated/config.yml from template."
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:3b}
+    volumes:
+      - ./examples/camera-agent:/template:ro
+      - opennvr_camera_agent_config_standard:/generated
+
+  camera-agent-standard:
+    profiles: [camera-agent-standard]
+    build:
+      context: .
+      dockerfile: examples/camera-agent/Dockerfile
+    image: opennvr/camera-agent:local-build
+    container_name: opennvr_camera_agent_standard
+    restart: unless-stopped
+    depends_on:
+      camera-agent-config-init-standard:
+        condition: service_completed_successfully
+      ollama:
+        condition: service_healthy
+      ollama-model-pull:
+        condition: service_completed_successfully
+      opennvr-core:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:9100:9100"  # demo UI (text chat)
+    volumes:
+      - opennvr_camera_agent_config_standard:/app/config:ro
+    command:
+      - --config
+      - /app/config/config.yml
+    networks:
+      - opennvr_internal
+
 volumes:
   # Ollama model store — persisted so the LLM survives ``compose
   # down``. ``ollama-model-pull`` writes here once; subsequent
@@ -278,3 +400,7 @@ volumes:
   # can mount it read-only without exposing the secret-bearing
   # config to the repo.
   opennvr_camera_agent_config:
+  # Generated lite config.yml for the camera-agent-lite profile.
+  opennvr_camera_agent_config_lite:
+  # Generated standard config.yml for the camera-agent-standard profile.
+  opennvr_camera_agent_config_standard:

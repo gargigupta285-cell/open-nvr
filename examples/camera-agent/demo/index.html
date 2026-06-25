@@ -91,6 +91,10 @@
     .notifyrow{display:flex;align-items:center;gap:0.5rem;margin-top:0.5rem;}
     .notifyrow .empty-note{flex:1;}
     .notifyrow .ghost{font-size:0.72rem;padding:0.3rem 0.55rem;}
+    .askrow{gap:0.4rem;}
+    .askrow input{flex:1;background:#0f1320;color:var(--text);border:1px solid rgba(255,255,255,0.12);
+      border-radius:0.5rem;padding:0.6rem 0.7rem;font-size:0.95rem;}
+    .askrow .ghost{background:var(--accent);color:#062321;border:none;font-weight:700;}
   </style>
 </head>
 <body>
@@ -120,10 +124,17 @@
           <div class="cambox" id="cambox">
             <label><input type="checkbox" id="cam-all" checked> All cameras</label>
           </div>
+          <div class="row">
+            <button id="useLocalCam" class="ghost" type="button" title="Use a camera attached to this machine — webcam, USB, Pi or drone">📷 Use this machine's camera</button>
+          </div>
 
           <button id="talk" class="talk" type="button">🎤 Talk</button>
+          <div class="row askrow">
+            <input id="askInput" type="text" placeholder="Type a question, e.g. how many people on cam1?" autocomplete="off">
+            <button id="askBtn" class="ghost" type="button">Send</button>
+          </div>
           <div class="row">
-            <div class="status" id="status">Ready. Tap Talk.</div>
+            <div class="status" id="status">Ready. Type a question or tap Talk.</div>
             <span class="chip" id="working" hidden></span>
             <button id="reset" class="ghost" type="button">Reset</button>
           </div>
@@ -233,8 +244,32 @@
       workingEl.hidden=false; workingTimer=setTimeout(()=>{workingEl.hidden=true;},6000); }
 
     async function loadAgent(){ try{ const a=await (await fetch("/agent")).json();
-      if(a.name){ agentName=a.name; titleEl.textContent=agentName+" — OpenNVR Camera Agent";
-        ledeEl.innerHTML=`Tap <strong>Talk</strong>, then just speak. ${agentName} listens hands-free and answers aloud.`; } }catch{} }
+      if(a.name){ agentName=a.name; titleEl.textContent=agentName+" — OpenNVR Camera Agent"; }
+      if(a.text_mode){
+        // Lite/text profile: lead with typing; voice is optional.
+        document.getElementById("talk").style.display="none";
+        ledeEl.innerHTML=`Type a question to ${agentName} — e.g. <em>"how many people on cam1?"</em>`;
+        setStatus("Ready. Type a question.");
+      } else {
+        ledeEl.innerHTML=`Tap <strong>Talk</strong> and speak, or type below. ${agentName} answers from your cameras.`;
+      }
+    }catch{} }
+
+    // ── lite text turn ──
+    async function ask(){
+      const inp=$("askInput"), q=inp.value.trim(); if(!q) return;
+      inp.value=""; addMsg(q,"user"); setStatus("Thinking…"); setAvatar("thinking");
+      $("askBtn").disabled=true;
+      try{
+        const r=await fetch("/ask",{method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({text:q,camera:cameraParam()})});
+        const d=await r.json();
+        if(!r.ok){ addMsg("Error: "+(d.error||("HTTP "+r.status)),"sys"); }
+        else { if(d.reply) addMsg(d.reply,"agent"); showWorking(d.cameras_used); }
+        setStatus("Ready. Type a question.","");
+      }catch(err){ addMsg("Request failed: "+err.message,"sys"); setStatus("Error","error"); }
+      finally{ $("askBtn").disabled=false; setAvatar("idle"); }
+    }
     async function loadCameras(){ try{ const r=await fetch("/cameras"); if(!r.ok)return;
       for(const cam of ((await r.json()).cameras||[])){ const lab=document.createElement("label");
         const role=(cam.role||"").trim(); const txt=role&&role!=="(no role configured)"?`${cam.camera_id} · ${role.slice(0,28)}`:cam.camera_id;
@@ -244,6 +279,24 @@
       camboxEl.addEventListener("change",(e)=>{ if(e.target.classList.contains("cam-cb")&&e.target.checked) all.checked=false;
         if(!cbs().some(c=>c.checked)) all.checked=true; });
     }catch{} }
+    async function useLocalCamera(){
+      const btn=$("useLocalCam"); if(btn) btn.disabled=true;
+      setStatus("Looking for a camera on this machine…");
+      try{
+        const r=await fetch("/devices/use",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})});
+        const data=await r.json();
+        const added=(data.added||[]);
+        if(!added.length){ setStatus("No new local camera found (it may already be in use).","error"); }
+        else{
+          for(const cam of added){ const lab=document.createElement("label");
+            lab.innerHTML=`<input type="checkbox" class="cam-cb" value="${cam.camera_id}" checked> ${cam.camera_id} · this machine`;
+            camboxEl.appendChild(lab); }
+          const all=$("cam-all"); if(all) all.checked=false;
+          setStatus(`Using this machine's camera (${added.map(c=>c.camera_id).join(", ")}). Ask a question!`,"ok");
+        }
+      }catch(err){ setStatus("Could not access a local camera: "+err.message,"error"); }
+      finally{ if(btn) btn.disabled=false; }
+    }
     function cameraParam(){ const all=$("cam-all"); if(all&&all.checked) return "all";
       const picked=[...document.querySelectorAll(".cam-cb:checked")].map(c=>c.value); return picked.length?picked.join(","):"all"; }
 
@@ -386,6 +439,8 @@
     document.querySelectorAll(".preset").forEach(btn=>btn.addEventListener("click",()=>{
       const body={name:btn.dataset.name,target:btn.dataset.target,camera_id:cameraParam()};
       if(btn.dataset.after) body.after=btn.dataset.after; addAlarm(body); }));
+    $("askBtn").addEventListener("click", ask);
+    $("askInput").addEventListener("keydown",(e)=>{ if(e.key==="Enter") ask(); });
     talkBtn.addEventListener("click",()=>{ ensureOutputAudio(); if(busy&&sessionActive)return; if(sessionActive)stopSession(); else startSession(); });
     resetBtn.addEventListener("click",async()=>{ try{ await fetch("/reset",{method:"POST"}); logEl.innerHTML=""; addMsg("Conversation reset.","sys"); }catch{} });
 
@@ -401,6 +456,7 @@
         addMsg(r.ok?`Test sent to ${d.delivered}/${d.channels} channel(s).`:("Test failed: "+(d.error||"")), "sys"); }catch{}
     });
 
+    const _ulc=$("useLocalCam"); if(_ulc) _ulc.addEventListener("click", useLocalCamera);
     loadAgent(); loadCameras(); loadNotify(); setAvatar("idle");
     renderTasks([]); renderMonitors([]); renderAlarms([]); renderReports([]);
     alarmTimer = setInterval(pollAlarms, 2500);   // alarms ring even before Talk

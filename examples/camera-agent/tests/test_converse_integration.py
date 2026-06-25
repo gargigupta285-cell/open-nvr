@@ -140,6 +140,9 @@ def test_converse_full_tool_turn(harness):
 
 def test_converse_camera_hint_selects_camera(harness):
     client, state = harness
+    # A detection-style question so forced grounding picks detect_objects
+    # (vs describe_camera for open-ended "what do you see").
+    state["transcript"] = "how many people are there"
 
     # Model answers WITHOUT calling a tool → anti-fabrication forces a
     # detection. With ?camera=cam2 the forced detection must target cam2.
@@ -156,6 +159,7 @@ def test_converse_camera_hint_selects_camera(harness):
 
 def test_converse_bogus_camera_hint_falls_back(harness):
     client, state = harness
+    state["transcript"] = "how many people are there"
 
     async def chat(*, messages, tools=None, temperature=0.4, max_tokens=256, **kw):
         if any(m.get("role") == "tool" for m in messages):

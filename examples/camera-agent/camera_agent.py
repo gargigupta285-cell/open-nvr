@@ -47,11 +47,12 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from adapter_clients import (
     KaicAdapterClient,
     OllamaClient,
+    OpenAILLMClient,
     PiperClient,
     WhisperClient,
 )
 from context import CameraContext, CameraSpec, run_event_subscriber
-from frame_sources import build_frame_source
+from frame_sources import build_frame_source, discover_local_cameras
 from tools import CameraTools, build_tool_definitions
 
 logger = logging.getLogger("camera-agent")
@@ -76,6 +77,14 @@ class AppConfig:
     whisper_token: str = ""
     ollama_url: str = "http://127.0.0.1:9004"
     ollama_token: str = ""
+
+    # LLM brain provider. "ollama" (default) → local Ollama at ollama_url.
+    # "openai" → any OpenAI-compatible chat API at llm_base_url (cloud or a
+    # local OpenAI-API server) with llm_api_key. The cloud/hybrid path gives
+    # stronger, lower-latency tool-calling without a local LLM (issue #82).
+    llm_provider: str = "ollama"
+    llm_base_url: str | None = None
+    llm_api_key: str | None = None
     piper_url: str = "http://127.0.0.1:9001"
     piper_token: str = ""
 
@@ -83,6 +92,11 @@ class AppConfig:
     llm_model: str = "llama3.2:3b"
     llm_temperature: float = 0.4
     llm_max_tokens: int = 256
+
+    # Lite/text mode: the UI defaults to a text box (no mic) and the voice
+    # adapters (Whisper/Piper) aren't required. The fast, low-resource on-ramp
+    # — see issue #82 and config.lite.yml.
+    text_mode: bool = False
 
     # Which tools to advertise to the LLM. None = all. Restricting this
     # shortens the prompt (faster CPU prefill) and stops small models
@@ -146,6 +160,14 @@ class AppConfig:
     # System prompt + cameras.
     system_prompt: str = ""
     cameras: list[CameraSpec] = None  # type: ignore[assignment]
+
+    # Run on whatever hardware you're already on: if no cameras are configured
+    # and this is set, the agent discovers a local capture device (laptop
+    # webcam, USB/Pi camera, drone /dev/video node) and uses it. Zero camera
+    # provisioning — great for devs and edge devices. ``auto_discover_all``
+    # exposes every enumerated device instead of just the first.
+    auto_discover_cameras: bool = False
+    auto_discover_all: bool = False
 
 
 _DEFAULT_SYSTEM_PROMPT = (
@@ -1275,6 +1297,20 @@ def load_config(path: str | Path) -> AppConfig:
             frame_url=str(url),
             role=str(entry.get("role") or "(no role configured)"),
         ))
+    if not cameras and raw.get("auto_discover_cameras"):
+        # Run on whatever hardware we're already on — laptop webcam, USB/Pi
+        # camera, drone /dev/video node. No camera provisioning required.
+        discovered = discover_local_cameras(
+            all_devices=bool(raw.get("auto_discover_all"))
+        )
+        cameras = [
+            CameraSpec(camera_id=cid, frame_url=url, role="local onboard camera")
+            for cid, url in discovered
+        ]
+        logger.info(
+            "auto-discovered %d local camera(s): %s",
+            len(cameras), ", ".join(f"{c.camera_id}({c.frame_url})" for c in cameras),
+        )
     if not cameras and raw.get("opennvr_cameras_url"):
         cameras = _load_opennvr_cameras(
             url=str(raw["opennvr_cameras_url"]),
@@ -1319,6 +1355,9 @@ def load_config(path: str | Path) -> AppConfig:
         whisper_token=_str("whisper_token", ""),
         ollama_url=_str("ollama_url", "http://127.0.0.1:9004"),
         ollama_token=_str("ollama_token", ""),
+        llm_provider=_str("llm_provider", "ollama"),
+        llm_base_url=raw.get("llm_base_url"),
+        llm_api_key=raw.get("llm_api_key"),
         piper_url=_str("piper_url", "http://127.0.0.1:9001"),
         piper_token=_str("piper_token", ""),
         llm_model=_str("llm_model", "llama3.2:3b"),
@@ -1329,6 +1368,7 @@ def load_config(path: str | Path) -> AppConfig:
             if isinstance(raw.get("enabled_tools"), list)
             else None
         ),
+        text_mode=bool(raw.get("text_mode", False)),
         frame_cache_ttl_seconds=_float("frame_cache_ttl_seconds", 2.0),
         event_ring_size=_int("event_ring_size", 256),
         nats_inference_url=raw.get("nats_inference_url"),
@@ -1356,6 +1396,8 @@ def load_config(path: str | Path) -> AppConfig:
         port=_int("port", 9100),
         system_prompt=str(raw.get("system_prompt") or _DEFAULT_SYSTEM_PROMPT),
         cameras=cameras,
+        auto_discover_cameras=bool(raw.get("auto_discover_cameras", False)),
+        auto_discover_all=bool(raw.get("auto_discover_all", False)),
     )
 
 
@@ -1426,9 +1468,18 @@ class CameraAgentRuntime:
             )
 
         self.whisper = WhisperClient(url=cfg.whisper_url, token=cfg.whisper_token)
-        self.ollama = OllamaClient(
-            url=cfg.ollama_url, token=cfg.ollama_token, model=cfg.llm_model,
-        )
+        if cfg.llm_provider.strip().lower() == "openai":
+            self.ollama = OpenAILLMClient(
+                base_url=cfg.llm_base_url or cfg.ollama_url,
+                api_key=cfg.llm_api_key or cfg.ollama_token or None,
+                model=cfg.llm_model,
+            )
+            logger.info("LLM brain: OpenAI-compatible at %s (model=%s)",
+                        cfg.llm_base_url or cfg.ollama_url, cfg.llm_model)
+        else:
+            self.ollama = OllamaClient(
+                url=cfg.ollama_url, token=cfg.ollama_token, model=cfg.llm_model,
+            )
         self.piper = PiperClient(url=cfg.piper_url, token=cfg.piper_token)
 
         self.caption_client = KaicAdapterClient(
@@ -1738,6 +1789,37 @@ class CameraAgentRuntime:
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
+    def list_local_devices(self, *, all_devices: bool = False) -> list[dict[str, str]]:
+        """Discover camera(s) attached to THIS machine without registering them.
+        Powers the demo's 'use this machine's camera' button."""
+        return [
+            {"camera_id": cid, "frame_url": url}
+            for cid, url in discover_local_cameras(all_devices=all_devices)
+        ]
+
+    def use_local_cameras(self, *, all_devices: bool = False) -> list[CameraSpec]:
+        """Discover local capture device(s) and register them at runtime so the
+        agent starts using the machine's own camera with zero provisioning.
+        Idempotent: cameras already registered are skipped. Returns the specs
+        that were newly added."""
+        added: list[CameraSpec] = []
+        for cid, url in discover_local_cameras(all_devices=all_devices):
+            if self.context.known_camera(cid):
+                continue
+            spec = CameraSpec(camera_id=cid, frame_url=url, role="local onboard camera")
+            self.context.add_camera(spec)
+            self.context.register_frame_source(
+                cid, build_frame_source(camera_id=cid, url=url)
+            )
+            self.cfg.cameras.append(spec)
+            added.append(spec)
+        if added:
+            logger.info(
+                "registered %d local camera(s) at runtime: %s",
+                len(added), ", ".join(f"{c.camera_id}({c.frame_url})" for c in added),
+            )
+        return added
+
     async def startup(self) -> None:
         if self.cfg.nats_inference_url:
             self._subscriber_task = asyncio.create_task(
@@ -2017,10 +2099,34 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             ]
         }
 
+    @app.get("/devices")
+    async def _devices() -> dict[str, Any]:
+        """Cameras attached to THIS machine (laptop webcam / USB / Pi / drone).
+        Listed, not yet in use — POST /devices/use to start using them."""
+        return {"devices": runtime.list_local_devices()}
+
+    @app.post("/devices/use")
+    async def _devices_use(request: Request) -> dict[str, Any]:
+        """Register this machine's camera(s) at runtime — zero provisioning.
+        Body: {"all_devices": false}. Returns the cameras now available."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        all_devices = bool((body or {}).get("all_devices", False))
+        added = runtime.use_local_cameras(all_devices=all_devices)
+        return {
+            "added": [{"camera_id": c.camera_id, "frame_url": c.frame_url} for c in added],
+            "cameras": [
+                {"camera_id": c.camera_id, "role": c.role} for c in runtime.cfg.cameras
+            ],
+        }
+
     @app.get("/agent")
     async def _agent() -> dict[str, Any]:
-        """Lightweight identity for the UI (name + voice) — no TTS."""
-        return {"name": runtime.agent_name, "voice_gender": runtime.cfg.voice_gender}
+        """Lightweight identity for the UI (name + voice + mode) — no TTS."""
+        return {"name": runtime.agent_name, "voice_gender": runtime.cfg.voice_gender,
+                "text_mode": runtime.cfg.text_mode}
 
     @app.get("/notify")
     async def _notify_status() -> dict[str, Any]:
@@ -2219,6 +2325,51 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
     async def _reset() -> dict[str, str]:
         demo_history.clear()
         return {"status": "ok"}
+
+    @app.post("/ask")
+    async def _ask(request: Request) -> JSONResponse:
+        """Lightweight TEXT turn: {text, camera?} in → {reply, cameras_used} out.
+
+        The fast, low-resource path — no microphone, no Whisper, no Piper. Just
+        the LLM tool-calling loop over the live vision tools. This is what the
+        'lite' profile uses so the agent is useful in seconds on a modest box
+        (issue #82) while the full voice loop stays opt-in."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        text = str((body or {}).get("text") or "").strip()
+        if not text:
+            return JSONResponse({"error": "text is required"}, status_code=400)
+
+        configured = {cam.camera_id for cam in runtime.cfg.cameras}
+        camera_hint = None
+        for part in str((body or {}).get("camera") or "").split(","):
+            part = part.strip()
+            if part in configured:
+                camera_hint = part
+                break
+
+        import time as _t
+        t0 = _t.perf_counter()
+        runtime.tools.last_cameras_used = []
+        try:
+            reply = await _run_conversation_turn(
+                runtime, demo_history, text, preferred_camera=camera_hint
+            )
+        except Exception:
+            logger.exception("ask: turn failed")
+            return JSONResponse({"error": "assistant failed"}, status_code=502)
+
+        demo_history.append({"role": "user", "content": text})
+        demo_history.append({"role": "assistant", "content": reply})
+        del demo_history[:-_MAX_HISTORY_TURNS]
+
+        return JSONResponse({
+            "reply": reply,
+            "cameras_used": list(runtime.tools.last_cameras_used),
+            "latency_ms": int((_t.perf_counter() - t0) * 1000),
+        })
 
     @app.post("/converse")
     async def _converse(request: Request) -> JSONResponse:

@@ -1,0 +1,59 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# LITE profile — the fast, low-resource on-ramp for the camera agent (issue #82).
+#
+# What "lite" means:
+#   * TEXT chat only (POST /ask) — no microphone, no Whisper STT, no Piper TTS,
+#     so the heavy audio models never load. Useful in seconds on a modest box.
+#   * Detection-grounded skills only: see what's on a camera, count things,
+#     look back at recent events, and set up watches/alarms — all on the single
+#     small YOLOv8 detector the Tier-0 stack already runs.
+#   * A small, snappy LLM as the brain (or point it at a cloud endpoint — see
+#     llm_* notes).
+#
+# Run:  python camera_agent.py --config config.lite.yml
+# Then open http://localhost:9100/demo and type a question.
+
+text_mode: true            # UI shows a text box; /converse voice loop stays optional
+
+# KAI-C (audited vision tool calls).
+kaic_url: http://127.0.0.1:8100
+kaic_api_key: REPLACE_WITH_INTERNAL_API_KEY
+
+# Only the detector is required for lite. Tier-0 registers YOLOv8 as "default".
+detection_adapter: default
+recognition_adapter: insightface     # used only if you enable recognize_faces
+caption_adapter: blip                # describe_camera falls back to the detector if absent
+
+# Lean skill set — detection-grounded tools + standing watches/alarms. No
+# footage search / face recognition by default (their adapters aren't in Tier-0).
+enabled_tools:
+  - detect_objects
+  - describe_camera
+  - recent_events
+  - create_monitor
+  - create_alarm
+
+# Brain: a small local LLM (snappy on CPU, must support tool-calling). For more
+# reliable tool use with no local RAM, point ollama_url at a cloud
+# OpenAI-compatible gateway and set ollama_token (see ARCHITECTURE_REVIEW_82.md).
+ollama_url: http://127.0.0.1:9004
+ollama_token: ""
+llm_model: qwen2.5:1.5b
+llm_temperature: 0.3
+llm_max_tokens: 200
+
+frame_cache_ttl_seconds: 2.0
+event_ring_size: 128
+
+host: 127.0.0.1
+port: 9100
+
+# Add your cameras, or auto-discover from OpenNVR (see config.example.yml).
+cameras: []
+
+system_prompt: |
+  You are a concise camera assistant. Answer ONLY from tool results — call a
+  tool before describing what any camera shows; never guess. Keep replies to
+  1-2 short sentences.
