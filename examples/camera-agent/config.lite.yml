@@ -40,7 +40,8 @@ enabled_tools:
 # OpenAI-compatible gateway and set ollama_token (see ARCHITECTURE_REVIEW_82.md).
 ollama_url: http://127.0.0.1:9004
 ollama_token: ""
-llm_model: qwen2.5:1.5b
+llm_model: qwen3:1.7b
+llm_think: false   # Qwen3: non-thinking for snappy tool-calling (use qwen3:0.6b for nano)
 llm_temperature: 0.3
 llm_max_tokens: 200
 

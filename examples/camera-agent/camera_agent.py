@@ -76,6 +76,10 @@ class AppConfig:
     # Direct adapter URLs (streaming voice path — bypasses KAI-C in v0.1).
     whisper_url: str = "http://127.0.0.1:9003"
     whisper_token: str = ""
+    # Drop Whisper transcripts that are almost certainly background noise /
+    # silence hallucinations ("Thank you.", "you", "Thanks for watching") so
+    # ambient noise doesn't start a spurious conversation turn.
+    stt_noise_filter: bool = True
     ollama_url: str = "http://127.0.0.1:9004"
     ollama_token: str = ""
 
@@ -93,6 +97,10 @@ class AppConfig:
     llm_model: str = "llama3.2:3b"
     llm_temperature: float = 0.4
     llm_max_tokens: int = 256
+    # Reasoning toggle for "thinking" models (Qwen3 etc.). Leave None for
+    # non-thinking models (no effect). Set False to force snappy, non-thinking
+    # tool-calling (appends Qwen3's ``/no_think`` switch); True to allow it.
+    llm_think: bool | None = None
 
     # Lite/text mode: the UI defaults to a text box (no mic) and the voice
     # adapters (Whisper/Piper) aren't required. The fast, low-resource on-ramp
@@ -196,6 +204,37 @@ _DEFAULT_SYSTEM_PROMPT = (
 # here selects the matching persona NAME (and pronouns) the agent uses.
 AGENT_NAMES = {"female": "Shailaja", "male": "Sidhu"}
 DEFAULT_VOICE_GENDER = "male"
+
+
+# Phrases Whisper commonly hallucinates from silence / background noise / the
+# end of an utterance. Matched case-insensitively after stripping punctuation,
+# so noise doesn't trigger a turn. (English-only; extend per deployment.)
+_STT_NOISE_PHRASES = frozenset({
+    "", "you", "thank you", "thanks", "thank you very much", "thanks for watching",
+    "thank you for watching", "please subscribe", "subscribe", "like and subscribe",
+    "bye", "bye bye", "goodbye", "okay", "ok", "uh", "um", "hmm", "mm", "mhm",
+    "yeah", "yep", "so", "the", "a", "i", "and", "music", "applause", "silence",
+    "subtitles by the amara.org community", "transcription by", "amara.org",
+})
+
+
+def looks_like_noise(transcript: str) -> bool:
+    """True if a transcript is almost certainly a noise/silence hallucination
+    rather than a real spoken question — so the voice loop can ignore it and
+    keep listening instead of answering phantom turns."""
+    t = (transcript or "").strip().lower()
+    if not t:
+        return True
+    norm = t.strip(" .,!?-—…\"'()[]*").strip()
+    if norm in _STT_NOISE_PHRASES:
+        return True
+    letters = [c for c in t if c.isalpha()]
+    if len(letters) < 2:                       # punctuation / single letter
+        return True
+    words = norm.split()
+    if len(words) <= 2 and all(w in _STT_NOISE_PHRASES for w in words):
+        return True
+    return False
 
 
 def agent_name_for(voice_gender: str | None) -> str:
@@ -1359,11 +1398,13 @@ def load_config(path: str | Path) -> AppConfig:
         caption_adapter=_str("caption_adapter", "blip"),
         whisper_url=_str("whisper_url", "http://127.0.0.1:9003"),
         whisper_token=_str("whisper_token", ""),
+        stt_noise_filter=bool(raw.get("stt_noise_filter", True)),
         ollama_url=_str("ollama_url", "http://127.0.0.1:9004"),
         ollama_token=_str("ollama_token", ""),
         llm_provider=_str("llm_provider", "ollama"),
         llm_base_url=raw.get("llm_base_url"),
         llm_api_key=raw.get("llm_api_key"),
+        llm_think=(None if raw.get("llm_think") is None else bool(raw.get("llm_think"))),
         piper_url=_str("piper_url", "http://127.0.0.1:9001"),
         piper_token=_str("piper_token", ""),
         llm_model=_str("llm_model", "llama3.2:3b"),
@@ -1968,7 +2009,7 @@ class CameraAgentRuntime:
         roster = "\n".join(
             f"- {cam.camera_id}: {cam.role}" for cam in self.cfg.cameras
         )
-        return (
+        prompt = (
             f"Your name is {self.agent_name}. You are the OpenNVR camera agent. "
             f"When you introduce yourself, use the name {self.agent_name}.\n\n"
             f"{self.cfg.system_prompt.strip()}\n\n"
@@ -2000,6 +2041,12 @@ class CameraAgentRuntime:
             f"look into it and get back to them, and keep the conversation going. "
             f"You'll deliver the result when the task finishes."
         )
+        # Disable Qwen3-style "thinking" for snappy tool-calling when the
+        # operator opted out. Only appended when llm_think is explicitly False,
+        # so non-thinking models (qwen2.5, llama3.2, …) are unaffected.
+        if self.cfg.llm_think is False:
+            prompt += "\n\n/no_think"
+        return prompt
 
 
 # ── Pipecat pipeline factory ───────────────────────────────────────
@@ -2434,12 +2481,15 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             return JSONResponse({"error": "transcription failed"}, status_code=502)
         t2 = _mark("stt", t1)
         logger.info("converse: transcript=%r", transcript)
-        if not transcript:
-            # Nothing intelligible — tell the UI so it can prompt a retry
-            # instead of sending the LLM an empty turn.
+        if not transcript or (runtime.cfg.stt_noise_filter and looks_like_noise(transcript)):
+            # Nothing intelligible, or a noise/silence hallucination ("Thank
+            # you.", "you", …) — tell the UI to keep listening rather than
+            # sending the LLM a phantom turn triggered by background noise.
+            if transcript:
+                logger.info("converse: dropped noise hallucination %r", transcript)
             timings["total"] = int((_t.perf_counter() - t0) * 1000)
             return JSONResponse({"transcript": "", "reply": "", "audio_b64": None,
-                                 "timings_ms": timings})
+                                 "timings_ms": timings, "noise": bool(transcript)})
 
         # 3) LLM tool-calling loop.
         runtime.tools.last_cameras_used = []

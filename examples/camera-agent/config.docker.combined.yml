@@ -29,6 +29,7 @@ enabled_tools:
   - describe_camera
 
 llm_model: ${OLLAMA_MODEL}
+llm_think: false   # Qwen3 default: snappy non-thinking tool-calling
 llm_temperature: 0.4
 llm_max_tokens: 128
 

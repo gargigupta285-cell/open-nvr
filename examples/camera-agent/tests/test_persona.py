@@ -48,6 +48,23 @@ def test_male_voice_names_sidhu():
     assert "Sidhu" in rt.build_system_prompt()
 
 
+def test_llm_think_false_appends_no_think():
+    # Qwen3 default runs non-thinking for snappy tool-calling
+    cfg = AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+                    llm_think=False,
+                    cameras=[CameraSpec(camera_id="c", frame_url="http://x/1.jpg", role="r")])
+    assert CameraAgentRuntime(cfg).build_system_prompt().rstrip().endswith("/no_think")
+
+
+def test_llm_think_default_and_true_do_not_append():
+    # default (None) and True must NOT inject /no_think (non-thinking models)
+    assert "/no_think" not in _runtime().build_system_prompt()
+    cfg = AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+                    llm_think=True,
+                    cameras=[CameraSpec(camera_id="c", frame_url="http://x/1.jpg", role="r")])
+    assert "/no_think" not in CameraAgentRuntime(cfg).build_system_prompt()
+
+
 # ── tool wiring: create_background_task is foreground-only ─────────────
 
 

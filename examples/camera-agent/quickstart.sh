@@ -27,19 +27,21 @@ ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$ROOT"
 
 PROFILE="camera-agent-lite"; EDITION="Spotter (lite · text · ~1-2 GB)"
-ACTION="up"
+ACTION="up"; NANO=0
 for arg in "$@"; do
   case "$arg" in
     --standard) PROFILE="camera-agent-standard"; EDITION="Watch (standard · +scene description · ~3-4 GB)";;
     --voice|--full) PROFILE="camera-agent"; EDITION="Sentinel (full · hands-free voice · ~6-12 GB)";;
     --demo) PROFILE="camera-agent-demo"; EDITION="Demo (no camera · scripted scenes · instant)";;
     --lite|--spotter) PROFILE="camera-agent-lite";;
+    --nano) PROFILE="camera-agent-lite"; NANO=1; EDITION="Nano (lite · tiniest LLM qwen3:0.6b · ~2-3 GB)";;
     --down|--stop) ACTION="down";;
     -h|--help)
       cat <<'EOF'
 OpenNVR Camera Agent — one-command quickstart (run from repo root)
 
   examples/camera-agent/quickstart.sh            Spotter (lite · text · ~1-2 GB)
+  examples/camera-agent/quickstart.sh --nano     Nano: tiniest LLM qwen3:0.6b (~2-3 GB, low-RAM boxes)
   examples/camera-agent/quickstart.sh --demo     Demo: no camera, scripted scenes (instant try / GIF)
   examples/camera-agent/quickstart.sh --standard Watch  (+ scene description · ~3-4 GB)
   examples/camera-agent/quickstart.sh --voice    Sentinel (full hands-free voice)
@@ -79,6 +81,14 @@ if [ ! -f .env ]; then
   ok ".env ready."
 else
   ok ".env already present."
+fi
+
+# Nano: override the model to the tiniest tool-capable LLM. Exporting it makes
+# Docker Compose use it for BOTH the model pull and the rendered config (shell
+# env overrides the .env value), so they stay in sync.
+if [ "${NANO}" = "1" ]; then
+  export OLLAMA_MODEL="${OLLAMA_MODEL:-qwen3:0.6b}"
+  say "Nano mode: OLLAMA_MODEL=${OLLAMA_MODEL}"
 fi
 
 # 2) Bring up the chosen edition. The lite/standard profiles auto-pull the

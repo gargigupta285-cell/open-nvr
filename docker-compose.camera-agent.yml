@@ -175,7 +175,7 @@ services:
   # camera-agent depends_on it (service_completed_successfully), so the
   # model is guaranteed present before the agent starts — no manual step.
   # (You can still run it on its own: ``docker compose ... run --rm
-  # ollama-model-pull``.) Model = OLLAMA_MODEL in .env (default qwen2.5:1.5b).
+  # ollama-model-pull``.) Model = OLLAMA_MODEL in .env (default qwen3:1.7b).
   # ──────────────────────────────────────────────────────────────
   ollama-model-pull:
     profiles: [camera-agent, camera-agent-lite, camera-agent-standard, camera-agent-combined, camera-agent-demo]
@@ -193,12 +193,12 @@ services:
       - -c
       - |
         set -e
-        MODEL="$${OLLAMA_MODEL:-qwen2.5:1.5b}"
+        MODEL="$${OLLAMA_MODEL:-qwen3:1.7b}"
         echo "Pulling Ollama model: $$MODEL"
         OLLAMA_HOST=http://ollama:11434 ollama pull "$$MODEL"
         echo "Model ready."
     environment:
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen3:1.7b}
     volumes:
       - opennvr_ollama_models:/root/.ollama
     networks:
@@ -248,7 +248,7 @@ services:
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen3:1.7b}
     volumes:
       - ./examples/camera-agent:/template:ro
       - opennvr_camera_agent_config:/generated
@@ -318,7 +318,7 @@ services:
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen3:1.7b}
     volumes:
       - ./examples/camera-agent:/template:ro
       - opennvr_camera_agent_config_lite:/generated
@@ -378,7 +378,7 @@ services:
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen3:1.7b}
     volumes:
       - ./examples/camera-agent:/template:ro
       - opennvr_camera_agent_config_standard:/generated
@@ -439,7 +439,7 @@ services:
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen3:1.7b}
     volumes:
       - ./examples/camera-agent:/template:ro
       - opennvr_camera_agent_config_combined:/generated

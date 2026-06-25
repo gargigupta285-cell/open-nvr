@@ -21,7 +21,8 @@ kaic_api_key: demo
 
 ollama_url: http://127.0.0.1:11434
 ollama_token:
-llm_model: qwen2.5:1.5b
+llm_model: qwen3:1.7b
+llm_think: false   # Qwen3: non-thinking for snappy tool-calling
 llm_temperature: 0.2
 llm_max_tokens: 120
 

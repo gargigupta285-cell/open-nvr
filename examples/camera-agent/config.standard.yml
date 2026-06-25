@@ -14,12 +14,13 @@ text_mode: true
 kaic_url: http://127.0.0.1:8100
 kaic_api_key: REPLACE_WITH_INTERNAL_API_KEY
 
-# Local brain — Qwen2.5-3B is the reliable default for the heavier, multi-tool
-# Watch prompt. Drop to qwen2.5:1.5b for snappier replies on a modest box, or
+# Local brain — qwen3:1.7b (non-thinking) is the reliable default for the
+# heavier, multi-tool Watch prompt. Bump to qwen3:4b for more headroom, or
 # set llm_provider: openai (see config.cloud.yml) for a cloud brain.
 ollama_url: http://127.0.0.1:11434
 ollama_token:
-llm_model: qwen2.5:3b
+llm_model: qwen3:1.7b
+llm_think: false   # Qwen3: non-thinking; ~qwen2.5:3b quality at ~half the RAM
 llm_temperature: 0.3
 llm_max_tokens: 220
 

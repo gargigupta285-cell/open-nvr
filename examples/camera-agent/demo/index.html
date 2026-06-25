@@ -136,6 +136,7 @@
           <div class="row">
             <div class="status" id="status">Ready. Type a question or tap Talk.</div>
             <span class="chip" id="working" hidden></span>
+            <span class="chip" id="lat" hidden title="Per-turn latency: STT · LLM · TTS · total"></span>
             <button id="reset" class="ghost" type="button">Reset</button>
           </div>
 
@@ -180,8 +181,13 @@
     const alarmListEl=$("alarmList"), monitorListEl=$("monitorList"), taskListEl=$("taskList"), reportListEl=$("reportList");
     const titleEl=$("title"), ledeEl=$("lede");
 
-    const START_RMS=0.025, SILENCE_RMS=0.015, START_FRAMES=3;
+    // VAD: START_RMS/SILENCE_RMS are FLOORS — the real gates adapt to the
+    // measured ambient noise floor (noiseFloor*MARGIN), so steady background
+    // noise won't trigger a turn but soft speech still does.
+    const START_RMS=0.022, SILENCE_RMS=0.013, START_FRAMES=3;
     const SILENCE_MS=900, MIN_UTTER_MS=350, MAX_UTTER_MS=15000, TICK_MS=40;
+    const START_MARGIN=2.2, SILENCE_MARGIN=1.5, FLOOR_EMA=0.05;
+    let noiseFloor=0.01;
     const IDLE_MS=25000, POLL_MS=3000;
 
     let agentName="the agent";
@@ -238,6 +244,12 @@
       if(who==="sys"){d.textContent=text;} else { const label=who==="user"?"you":agentName;
         d.innerHTML=`<span class="who">${label}:</span> `; d.appendChild(document.createTextNode(text)); }
       logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight; }
+    function showLatency(t){ const el=$("lat"); if(!el||!t)return;
+      const ms=(t.total!=null?t.total:0); if(!ms){el.hidden=true;return;}
+      const parts=[]; if(t.stt!=null)parts.push("STT "+t.stt); if(t.llm!=null)parts.push("LLM "+t.llm);
+      if(t.tts!=null)parts.push("TTS "+t.tts);
+      el.textContent=(parts.length?parts.join(" · ")+" · ":"")+(ms/1000).toFixed(1)+"s";
+      el.hidden=false; }
     function showWorking(cams){ if(workingTimer){clearTimeout(workingTimer);workingTimer=null;}
       if(!cams||!cams.length){workingEl.hidden=true;return;}
       workingEl.textContent = cams.length>2 ? `looked at ${cams.length} cameras` : "looked at "+cams.join(", ");
@@ -265,7 +277,7 @@
           body:JSON.stringify({text:q,camera:cameraParam()})});
         const d=await r.json();
         if(!r.ok){ addMsg("Error: "+(d.error||("HTTP "+r.status)),"sys"); }
-        else { if(d.reply) addMsg(d.reply,"agent"); showWorking(d.cameras_used); }
+        else { if(d.reply) addMsg(d.reply,"agent"); showWorking(d.cameras_used); showLatency({total:d.latency_ms}); }
         setStatus("Ready. Type a question.","");
       }catch(err){ addMsg("Request failed: "+err.message,"sys"); setStatus("Error","error"); }
       finally{ $("askBtn").disabled=false; setAvatar("idle"); }
@@ -313,8 +325,17 @@
       const now=performance.now();
       if(!capturing && (now-lastActivity>IDLE_MS)){ pauseForIdle(); return; }
       const level=rms();
-      if(!capturing){ loudFrames=level>START_RMS?loudFrames+1:0; if(loudFrames>=START_FRAMES)startCapture(); return; }
-      if(level>SILENCE_RMS){ lastVoice=now; lastActivity=now; }
+      // Gates adapt to ambient noise so background noise doesn't start a turn.
+      const startGate=Math.max(START_RMS, noiseFloor*START_MARGIN);
+      const silenceGate=Math.max(SILENCE_RMS, noiseFloor*SILENCE_MARGIN);
+      if(!capturing){
+        // Learn the ambient noise floor only from quiet frames (never from speech).
+        if(level<startGate){ noiseFloor=(1-FLOOR_EMA)*noiseFloor+FLOOR_EMA*level; }
+        loudFrames=level>startGate?loudFrames+1:0;
+        if(loudFrames>=START_FRAMES)startCapture();
+        return;
+      }
+      if(level>silenceGate){ lastVoice=now; lastActivity=now; }
       const dur=now-captureStart;
       if((now-lastVoice>SILENCE_MS && dur>MIN_UTTER_MS)||dur>MAX_UTTER_MS) stopCapture();
     }
@@ -334,7 +355,7 @@
         if(!resp.ok){const e=await resp.json().catch(()=>({}));throw new Error(e.error||("HTTP "+resp.status));}
         const data=await resp.json();
         if(!data.transcript){ if(sessionActive){setAvatar("listening");setStatus("Didn't catch that — keep talking.","active");} return; }
-        addMsg(data.transcript,"user"); lastActivity=performance.now(); showWorking(data.cameras_used);
+        addMsg(data.transcript,"user"); lastActivity=performance.now(); showWorking(data.cameras_used); showLatency(data.timings_ms);
         if(data.reply) addMsg(data.reply,"agent");
         if(data.audio_b64){ speaking=true; setAvatar("speaking"); await playWav(data.audio_b64); speaking=false; }
         if(sessionActive){ setAvatar("listening"); setStatus("Listening…","active"); }

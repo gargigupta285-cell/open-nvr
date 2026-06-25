@@ -20,11 +20,42 @@ Anything that adds a synchronous step (an extra tool call, a slow model) is
 felt directly, so the model picks below favour *fast and good-enough* over
 *slow and perfect*.
 
+### Measuring it
+Every `/converse` turn returns a `timings_ms` breakdown
+(`transcode`/`stt`/`llm`/`tts`/`total`), and the text `/ask` turn returns
+`latency_ms`. The demo UI shows a per-turn chip (`STT 420 · LLM 1200 · TTS 300
+· 1.9s`). For a repeatable load test against a live agent, run the harness:
+
+```bash
+python tools/latency_harness.py --url http://localhost:9100 \
+    --audio question.wav --turns 8 --load-monitors 6
+```
+
+It reports p50/p95 per phase and quantifies how much background polling
+(watches/alarms) steals from the live turn.
+
+## Turn detection & background-noise rejection
+
+A hands-free loop only feels good if it (a) ends the turn when you stop talking
+and (b) doesn't react to room noise. Two layers handle this:
+
+- **Client VAD (browser).** The mic uses `echoCancellation` + `noiseSuppression`
+  + `autoGainControl`, then an RMS energy gate that **adapts to the ambient
+  noise floor** (a rolling EMA of quiet frames): the start gate is
+  `max(floor, noiseFloor × 2.2)`, so steady background noise never crosses it,
+  while soft speech still does. Endpointing stops the turn after ~900 ms of
+  silence (min 350 ms, max 15 s), and capture is suppressed while the agent is
+  speaking so it never hears itself.
+- **Server STT guard (`stt_noise_filter`, on by default).** Whisper hallucinates
+  stock phrases from silence/noise — "Thank you.", "you", "Thanks for watching".
+  `looks_like_noise()` drops these so a noisy room can't trigger a phantom turn;
+  the UI just keeps listening. Set `stt_noise_filter: false` to disable.
+
 ## Recommended model choices
 
 | Role | Default (snappy) | Upgrade (quality, slower) | Why |
 |------|------------------|---------------------------|-----|
-| LLM | `qwen2.5:1.5b` | `qwen2.5:3b` / `llama3.1:8b-instruct` | Must support tool-calling. 1.5B answers tool calls in ~1–2 s warm on CPU; 8B is noticeably slower. |
+| LLM | `qwen3:1.7b` (non-thinking) | `qwen3:4b` / `llama3.1:8b-instruct` | Must support tool-calling. 1.7B answers tool calls in ~1–2 s warm on CPU; 8B is noticeably slower. All Qwen3 dense models are Apache-2.0. |
 | STT | faster-whisper `base.en` | `small.en` | `.en` is English-only — faster and far fewer hallucinated tokens on quiet audio than multilingual. |
 | TTS | Piper `en_US-libritts-high` | (voice of choice) | Piper is fast and CPU-friendly; pick the voice to match the persona gender. |
 | Detect | YOLOv8n (`yolov8n.onnx`) | YOLOv8s/m | n is the fastest; larger nets cost latency per frame and per poll. |

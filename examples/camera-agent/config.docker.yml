@@ -49,14 +49,17 @@ enabled_tools:
   - detect_objects
   - describe_camera
 
-# LLM tuning. qwen2.5:1.5b is the docker-compose.camera-agent.yml
-# default — ~1.5 GB of RAM, snappy on CPU, and a solid small tool-caller
-# (keeps the full edition light, issue #82). For more reliable tool-calling
-# on a roomier box, set OLLAMA_MODEL=qwen2.5:3b (or llama3.1:8b-instruct,
-# ~6 GB) in your .env — that single var drives BOTH the model pull and this
-# config. Whichever model you pick, it MUST support tool calling — see
+# LLM tuning. qwen3:1.7b is the docker-compose.camera-agent.yml default —
+# ~1.5-2 GB of RAM, snappy on CPU (run non-thinking via llm_think: false), and
+# ~qwen2.5:3b-class tool-calling (keeps the full edition light, issue #82). For
+# more headroom set OLLAMA_MODEL=qwen3:4b in your .env — that single var drives
+# BOTH the model pull and this config. All Qwen3 dense models are Apache-2.0.
+# Whichever model you pick, it MUST support tool calling — see
 # https://ollama.com/blog/tool-support.
 llm_model: ${OLLAMA_MODEL}
+# Qwen3 (the default) is a "thinking" model — disable thinking for snappy,
+# non-verbose tool-calling. Harmless for non-thinking models (qwen2.5/llama3.2).
+llm_think: false
 llm_temperature: 0.4
 # Spoken replies are 1-2 short sentences (see system_prompt). 256 let the
 # model ramble for ~20s of CPU generation; 128 is plenty and noticeably

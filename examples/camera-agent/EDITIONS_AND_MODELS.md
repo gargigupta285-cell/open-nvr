@@ -70,8 +70,9 @@ and weight every choice by CPU latency because that *is* the user experience.
 | **Scene description / VQA** | **BLIP-base** now → **Moondream2** next | BLIP captions today; Moondream2 (~1.8B) adds real *visual Q&A* ("is the gate open?") at edge size — a feature unlock, not just a caption | BLIP ~990 MB · Moondream2 ~1.7 GB |
 | **Speech-to-text** | **faster-whisper `base.en`** (CTranslate2) | ~4× faster than vanilla Whisper on CPU at equal accuracy; English-only avoids foreign-token hallucination | ~140 MB · near-real-time |
 | **Text-to-speech** | **Piper** (`en_US-libritts-high`, `-low` for snappier first audio) | Already the most efficient quality TTS for local; sub-second synthesis | ~60 MB |
-| **Brain — snappy** | **Qwen2.5-1.5B-Instruct** | Smallest model that still tool-calls reliably; the Spotter default | ~1.5 GB · ~10–20 tok/s CPU |
-| **Brain — reliable** | **Qwen2.5-3B-Instruct** | Markedly better multi-tool prompts; the Watch/Sentinel default | ~3 GB |
+| **Brain — default** | **Qwen3-1.7B** (non-thinking) | Per Qwen, ~Qwen2.5-3B quality with better tool-calling, at ~half the RAM; the default across editions. Run non-thinking (`llm_think: false`) for snappy replies | ~1.5–2 GB · ~10–20 tok/s CPU |
+| **Brain — nano** | **Qwen3-0.6B** | The floor that still tool-calls; `quickstart.sh --nano`. Misses more tool calls (forced-grounding mitigates) — for demo / very low-RAM boxes | **~0.5 GB** |
+| **Brain — roomier** | Qwen3-4B / a cloud model | When you have the headroom or want max reliability | ~3 GB+ |
 | **Brain — cloud** | gpt-4o-mini · Groq Llama-3.3-70B · Claude Haiku | Best tool-call reliability, ~0 local RAM, lowest latency | BYO key |
 | **Faces / watchlist** | **InsightFace `buffalo_s`** | Small face pack is plenty for enroll + watchlist match; half the RAM of `buffalo_l` | ~0.3 GB |
 
@@ -147,7 +148,7 @@ now favour the light end (override per box via `.env`):
 
 | Component | Old default | New default | Resident RAM |
 |-----------|-------------|-------------|--------------|
-| LLM (Ollama, kept warm) | `llama3.2:3b` | **`qwen2.5:1.5b`** | ~3.5 GB → **~1.5–2 GB** |
+| LLM (Ollama, kept warm) | `llama3.2:3b` | **`qwen3:1.7b`** (non-thinking; `qwen3:0.6b` for nano) | ~3.5 GB → **~1.5–2 GB** (~0.5 GB nano) |
 | STT (Whisper) | `base.en` | **`tiny.en`** | ~1 GB → **~0.3–0.5 GB** |
 | Captions (BLIP + torch) | on | on (full only) | ~2.5–3 GB |
 | TTS (Piper) | on | on (full only) | ~0.1 GB |
@@ -156,14 +157,20 @@ now favour the light end (override per box via `.env`):
 So a default **full** edition lands around **~6–8 GB** instead of ~11–12 GB,
 and **Spotter/Watch** (no Whisper/Piper/BLIP) sit at ~1–4 GB. The single var
 `OLLAMA_MODEL` drives both the model pull and the agent config, and
-`WHISPER_MODEL_SIZE` swaps the STT model — bump them to `qwen2.5:3b` / `base.en`
+`WHISPER_MODEL_SIZE` swaps the STT model — bump them to `qwen3:4b` / `base.en`
 for more reliable tool-calling and transcription when you have the headroom.
 
 This is the real RAM lever (the combined-image merge above is operational
-simplicity, not memory). Be honest in conversation about the trade: a 1.5B model
-on CPU is snappy but will occasionally miss a tool call on a busy prompt — the
-forced-grounding guard catches the worst of it, and the cloud/`qwen2.5:3b` tiers
-are there when reliability matters more than footprint.
+simplicity, not memory). Be honest in conversation about the trade: a sub-2B
+model on CPU is snappy but will occasionally miss a tool call on a busy prompt —
+the forced-grounding guard catches the worst of it, and the cloud / `qwen3:4b`
+tiers are there when reliability matters more than footprint.
+
+**Licensing note:** all the local models above are permissively licensed for
+commercial use — every **Qwen3** dense model (0.6B/1.7B/4B/…) is **Apache-2.0**,
+as are YOLOv8n, BLIP, faster-whisper, Piper, and InsightFace's small pack. We
+deliberately default to Qwen3 (not Qwen2.5-3B, which ships under the non-Apache
+Qwen Research License) so the sovereign stack stays clean to redistribute.
 
 ## How this maps to the issue #82 complaints
 
