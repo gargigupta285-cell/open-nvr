@@ -10,6 +10,20 @@ pattern of "OpenNVR camera as participant", not just camera as data
 source. The next milestone (v0.2) extends the same agent to join
 LiveKit rooms as a virtual participant.
 
+### Read in detail
+
+- [**Editions & models**](EDITIONS_AND_MODELS.md) — the lite/standard/full/cloud
+  editions, the efficient model picks, and run-on-any-hardware (laptop webcam,
+  Pi, drone). Start here.
+- [**Models & latency**](MODELS_AND_LATENCY.md) — how model choices were weighed
+  for CPU latency and good UX.
+- [**Alarms**](ALARMS.md) — ringing alarms, time windows, presets, and the
+  documented emergency-calling hook.
+- [**Notifications**](NOTIFICATIONS.md) — external webhook/push delivery.
+- [**Faces & watchlist**](FACES.md) — enrollment and watchlist matching.
+- [Architecture review (issue #82)](ARCHITECTURE_REVIEW_82.md) — design notes
+  behind the editions/topology work.
+
 ## What it does
 
 ```
@@ -121,6 +135,12 @@ Real-world limitations the example does NOT yet handle:
   should use `@pipecat-ai/client-js`.
 
 ## Quick start
+
+**Fastest path (lite):** from the repo root, `examples/camera-agent/quickstart.sh`
+brings up a ~1–2 GB text agent in one command — no GPU, and you can click "Use
+this machine's camera" in the demo. The full six-adapter voice setup below is the
+heavy, opt-in path; see [Editions & models](EDITIONS_AND_MODELS.md) for the
+middle grounds.
 
 ```bash
 # 1. Start the adapters you need (in the ai-adapter repo). The
