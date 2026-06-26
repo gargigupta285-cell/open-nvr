@@ -126,6 +126,14 @@ services:
   # container, each on its existing port with the same /infer contract.
   # Used by the camera-agent-combined profile instead of the three
   # separate adapter services. One image to pull, one container to run.
+  #
+  # NOTE (test-report V-1): this image is published by the ai-adapter CI
+  # matrix but may not exist on GHCR yet. Until it does, the DEFAULT Sentinel
+  # path is the modular ``camera-agent`` profile (3 separate adapters). To use
+  # this profile before the image is published, build it yourself from the
+  # ai-adapter repo:
+  #   docker build -f adapters/voice-bundle/Dockerfile \
+  #     -t ghcr.io/open-nvr/voice-adapter:latest .
   # ──────────────────────────────────────────────────────────────
   voice-adapter:
     profiles: [camera-agent-combined]
@@ -150,7 +158,7 @@ services:
 
   ollama:
     profiles: [camera-agent, camera-agent-lite, camera-agent-standard, camera-agent-combined, camera-agent-demo]
-    image: ollama/ollama:0.5.4
+    image: ollama/ollama:0.21.2  # >=0.6.6 required to pull qwen3 (test-report I-1)
     container_name: opennvr_ollama
     restart: unless-stopped
     environment:
@@ -179,7 +187,7 @@ services:
   # ──────────────────────────────────────────────────────────────
   ollama-model-pull:
     profiles: [camera-agent, camera-agent-lite, camera-agent-standard, camera-agent-combined, camera-agent-demo]
-    image: ollama/ollama:0.5.4
+    image: ollama/ollama:0.21.2  # >=0.6.6 required to pull qwen3 (test-report I-1)
     container_name: opennvr_ollama_pull
     # One-shot: pull the model, then exit 0. `restart: no` keeps it a true
     # one-shot so camera-agent's `service_completed_successfully` dependency

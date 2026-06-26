@@ -52,6 +52,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
             "PyYAML>=6.0,<7.0" \
             "nats-py>=2.6" \
             "Pillow>=10.0" \
+            "opencv-python-headless>=4.8" \
         && break; \
         if [ "$i" = 5 ]; then echo "pip install failed after 5 attempts" >&2; exit 1; fi; \
         echo "attempt $i failed; retrying in 15s..."; sleep 15; \

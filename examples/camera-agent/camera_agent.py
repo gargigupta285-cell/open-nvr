@@ -1600,6 +1600,16 @@ class CameraAgentRuntime:
             _list_people_tool(),
             _forget_face_tool(),
         ]
+        # Honour enabled_tools across ALL advertised tools (base + control) —
+        # not just the base set. Previously the control tools (monitor/alarm/
+        # report/face/background) were appended unconditionally, so enabled_tools
+        # had "no effect" (test-report #4). Fewer tools = shorter prompt + far
+        # fewer wrong-tool picks by small models.
+        if cfg.enabled_tools is not None:
+            allow = set(cfg.enabled_tools)
+            self.tool_definitions = [
+                t for t in self.tool_definitions if t["function"]["name"] in allow
+            ]
         self.tool_handlers = {
             "describe_camera": self.tools.describe_camera,
             "detect_objects": self.tools.detect_objects,
@@ -2011,7 +2021,9 @@ class CameraAgentRuntime:
         )
         prompt = (
             f"Your name is {self.agent_name}. You are the OpenNVR camera agent. "
-            f"When you introduce yourself, use the name {self.agent_name}.\n\n"
+            f"Speak in the FIRST person — say 'I see…', 'I'm watching…', never "
+            f"'{self.agent_name} sees…' in the third person. Only use the name "
+            f"{self.agent_name} when you introduce yourself.\n\n"
             f"{self.cfg.system_prompt.strip()}\n\n"
             f"Cameras available to you:\n{roster}\n\n"
             f"Always pass one of the camera_id values exactly as listed "
@@ -2140,7 +2152,9 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         return {
             "status": "ok",
             "cameras": [cam.camera_id for cam in runtime.cfg.cameras],
-            "tools": list(runtime.tool_handlers.keys()),
+            # The tools actually ADVERTISED to the LLM (honours enabled_tools),
+            # not every registered handler (test-report #4).
+            "tools": [t["function"]["name"] for t in runtime.tool_definitions],
             "llm_model": runtime.cfg.llm_model,
         }
 
@@ -2682,12 +2696,32 @@ _DETECTION_WORDS: tuple[str, ...] = (
 )
 _DETECTION_RE = re.compile(r"\b(" + "|".join(_DETECTION_WORDS) + r")\b", re.IGNORECASE)
 
+# Attribute / activity / appearance questions ("what is he WEARING?", "what's
+# he DOING?", "DESCRIBE the scene", "what's HAPPENING?") want a scene
+# description (BLIP caption, or a VQA model), NOT the object detector — even
+# though they usually also contain an object noun like "man" that would
+# otherwise match _DETECTION_RE. These take precedence (test-report S-4/L-3/V-3).
+_DESCRIBE_WORDS: tuple[str, ...] = (
+    "describe", "description", "detail", "details", "wearing", "wear", "dressed",
+    "doing", "holding", "carrying", "looks like", "look like", "looking",
+    "appearance", "happening", "going on", "scene", "activity", "colour", "color",
+)
+_DESCRIBE_RE = re.compile(r"\b(" + "|".join(_DESCRIBE_WORDS) + r")\b", re.IGNORECASE)
+
 
 def _pick_forced_tool(text: str) -> str:
-    """Choose the forced-grounding tool by question type: ``detect_objects``
-    (yolov8) for object presence/count asks, else ``describe_camera`` (BLIP
-    scene caption, which itself falls back to detection if BLIP is down)."""
-    return "detect_objects" if _DETECTION_RE.search(text or "") else "describe_camera"
+    """Choose the forced-grounding tool by question type. Description/attribute/
+    activity questions → ``describe_camera`` (BLIP caption / VQA, which falls
+    back to the detector if no caption adapter is registered). Object presence/
+    count questions → ``detect_objects`` (yolov8). Describe takes precedence so
+    'what is the man wearing?' isn't routed to the detector just because it
+    contains 'man'."""
+    t = text or ""
+    if _DESCRIBE_RE.search(t):
+        return "describe_camera"
+    if _DETECTION_RE.search(t):
+        return "detect_objects"
+    return "describe_camera"
 
 
 # Questions about the camera ROSTER / system config ("how many cameras are
