@@ -101,6 +101,11 @@ class AppConfig:
     # non-thinking models (no effect). Set False to force snappy, non-thinking
     # tool-calling (appends Qwen3's ``/no_think`` switch); True to allow it.
     llm_think: bool | None = None
+    # Limited-hardware knobs (local Ollama only). llm_num_threads caps CPU cores
+    # (None = all). llm_num_ctx sizes the context window (lower = less RAM /
+    # faster prefill, but must hold the prompt).
+    llm_num_threads: int | None = None
+    llm_num_ctx: int = 4096
 
     # Lite/text mode: the UI defaults to a text box (no mic) and the voice
     # adapters (Whisper/Piper) aren't required. The fast, low-resource on-ramp
@@ -1405,6 +1410,8 @@ def load_config(path: str | Path) -> AppConfig:
         llm_base_url=raw.get("llm_base_url"),
         llm_api_key=raw.get("llm_api_key"),
         llm_think=(None if raw.get("llm_think") is None else bool(raw.get("llm_think"))),
+        llm_num_threads=(int(raw["llm_num_threads"]) if raw.get("llm_num_threads") else None),
+        llm_num_ctx=int(raw.get("llm_num_ctx") or 4096),
         piper_url=_str("piper_url", "http://127.0.0.1:9001"),
         piper_token=_str("piper_token", ""),
         llm_model=_str("llm_model", "llama3.2:3b"),
@@ -1527,6 +1534,7 @@ class CameraAgentRuntime:
         else:
             self.ollama = OllamaClient(
                 url=cfg.ollama_url, token=cfg.ollama_token, model=cfg.llm_model,
+                num_thread=cfg.llm_num_threads, num_ctx=cfg.llm_num_ctx,
             )
         self.piper = PiperClient(url=cfg.piper_url, token=cfg.piper_token)
 

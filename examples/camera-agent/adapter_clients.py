@@ -259,6 +259,13 @@ class OllamaClient(_ReusableClientMixin):
         # prompt; keep this comfortably above the adapter-side timeout so the
         # first turn completes instead of being cut off.
         timeout_seconds: float = 300.0,
+        # Limited-hardware knobs. num_thread caps CPU cores Ollama uses (None =
+        # all cores; set e.g. 2 to keep the rest of the machine responsive).
+        # num_ctx sizes the context window: 4096 holds the full tool prompt;
+        # lower it (e.g. 2048, when enabled_tools keeps the prompt short) to
+        # save RAM and speed up prefill on weak boxes.
+        num_thread: int | None = None,
+        num_ctx: int = 4096,
     ) -> None:
         # Talk to Ollama's NATIVE chat API. The deployment points
         # ``ollama_url`` at the raw ollama runtime (http://ollama:11434),
@@ -270,6 +277,8 @@ class OllamaClient(_ReusableClientMixin):
         self._token = token
         self._model = model
         self._timeout = timeout_seconds
+        self._num_thread = num_thread
+        self._num_ctx = num_ctx
 
     async def chat(
         self,
@@ -308,9 +317,12 @@ class OllamaClient(_ReusableClientMixin):
                 # re-prefill (~110s) on EVERY call instead of reusing cache.
                 # 4096 holds the whole prompt so the prefix stays stable and
                 # the prewarm + iter0→iter1 cache reuse actually kick in.
-                "num_ctx": 4096,
+                "num_ctx": self._num_ctx,
             },
         }
+        if self._num_thread:
+            # Cap CPU cores so the LLM doesn't peg a limited machine.
+            body["options"]["num_thread"] = self._num_thread
         if tools:
             # Native /api/chat decides tool use automatically; there is no
             # ``tool_choice`` field (it would be ignored). Just advertise

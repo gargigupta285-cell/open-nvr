@@ -46,7 +46,7 @@ services:
       - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
       # English-only Whisper: faster on CPU and avoids the multilingual
       # model hallucinating foreign-language tokens on noisy/quiet audio.
-      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-tiny.en}
+      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-base.en}
     volumes:
       - opennvr_whisper_models:/app/model_weights/whisper
     networks:
@@ -142,7 +142,7 @@ services:
     restart: unless-stopped
     environment:
       - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
-      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-tiny.en}
+      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-base.en}
     volumes:
       - opennvr_whisper_models:/app/model_weights/whisper
       - ../ai-adapter/model_weights/piper:/app/model_weights/piper:ro
@@ -165,8 +165,14 @@ services:
       # Keep the model resident in RAM indefinitely. Without this Ollama
       # unloads after 5 min idle, so the next turn pays a cold reload +
       # full prompt prefill and can blow past the request timeout. Warm,
-      # turns return in seconds instead of ~a minute.
-      - OLLAMA_KEEP_ALIVE=-1
+      # turns return in seconds instead of ~a minute. On a VERY RAM-limited
+      # box, set OLLAMA_KEEP_ALIVE=5m in .env to free the model's RAM when
+      # idle (at the cost of a cold reload on the next turn).
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:--1}
+      # Limited-hardware guards: load one model, serve one request at a time so
+      # a weak CPU box isn't oversubscribed. Raise on bigger machines.
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_NUM_PARALLEL=1
     volumes:
       - opennvr_ollama_models:/root/.ollama
     networks:
