@@ -1,0 +1,53 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# WATCH (Standard) edition — text chat with richer scene understanding.
+# Spotter's detection skills PLUS natural-language scene description / visual
+# Q&A (caption adapter) and open-vocabulary "find the red truck" (vlm adapter).
+# Still fully local-capable: no Whisper/Piper voice stack, so it stays light
+# (~3-4 GB) while answering much more interesting questions than Lite.
+#
+# Run:  python camera_agent.py --config config.standard.yml
+
+text_mode: true
+
+kaic_url: http://127.0.0.1:8100
+kaic_api_key: REPLACE_WITH_INTERNAL_API_KEY
+
+# Local brain — qwen3:1.7b (non-thinking) is the reliable default for the
+# heavier, multi-tool Watch prompt. Bump to qwen3:4b for more headroom, or
+# set llm_provider: openai (see config.cloud.yml) for a cloud brain.
+ollama_url: http://127.0.0.1:11434
+ollama_token:
+llm_model: qwen3:1.7b
+llm_think: false   # Qwen3: non-thinking; ~qwen2.5:3b quality at ~half the RAM
+llm_temperature: 0.3
+llm_max_tokens: 220
+
+# Vision routing. detect_objects -> YOLOv8 (name "default"); describe_camera ->
+# the caption/VQA adapter; open-vocab find -> the vlm (OWLv2) adapter. Each
+# lights up automatically once registered in KAI-C; describe_camera falls back
+# to the detector if no caption adapter is present.
+detection_adapter: default
+caption_adapter: blip
+recognition_adapter: insightface
+
+enabled_tools:
+  - detect_objects
+  - describe_camera
+  - recent_events
+  - create_monitor
+  - create_alarm
+
+frame_cache_ttl_seconds: 2.0
+event_ring_size: 256
+
+host: 127.0.0.1
+port: 9100
+cameras: []
+
+system_prompt: |
+  You are a concise camera assistant. Answer ONLY from tool results — call a
+  tool before describing what any camera shows; never guess. Prefer
+  describe_camera for "what's happening / what do you see" questions and
+  detect_objects for counting. Keep replies to 1-2 short sentences.

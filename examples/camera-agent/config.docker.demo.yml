@@ -1,0 +1,46 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# DEMO config for docker (issue #82 / launch). Scripted `synth:` cameras + a
+# demo detector (synthetic_detection) so the agent answers deterministically
+# with NO real camera and NO vision adapters — for trying it instantly or
+# recording the demo GIF. Mounted directly (no secrets), so no init container.
+# Only Ollama + this agent run for the AI; edit the synth counts to script it.
+
+text_mode: true
+synthetic_detection: true
+
+kaic_url: http://opennvr-core:8100   # unused in demo mode, but a required field
+kaic_api_key: demo
+
+ollama_url: http://ollama:11434
+ollama_token:
+llm_model: qwen3:1.7b
+llm_think: false   # Qwen3: snappy non-thinking tool-calling
+llm_temperature: 0.2
+llm_max_tokens: 120
+
+detection_adapter: default
+enabled_tools:
+  - detect_objects
+  - describe_camera
+  - recent_events
+  - create_monitor
+  - create_alarm
+
+# Scripted scenes — change the counts to script the demo answers.
+cameras:
+  - camera_id: front_door
+    frame_url: synth:people=2
+    role: the front door
+  - camera_id: driveway
+    frame_url: synth:cars=1,people=0
+    role: the driveway
+
+host: 0.0.0.0
+port: 9100
+
+system_prompt: |
+  You are a concise camera assistant. Answer ONLY from tool results — call a
+  tool before describing what any camera shows; never guess. Keep replies to
+  1-2 short sentences.

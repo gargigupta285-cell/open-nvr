@@ -4,7 +4,7 @@
 
 ### Cameras are everywhere. Almost none of them are yours.
 
-OpenNVR™ is the open, sovereign video-recording platform for organizations that **can't** put their camera footage — or the AI that watches it — in a vendor's cloud. Air-gapped by default, governed AI on your own hardware, an audit trail you can hand to a regulator. From the homelab doorbell that never phones home to the air-gapped government site that legally cannot.
+OpenNVR™ is the open, sovereign platform for recording your cameras and running AI on them — entirely on hardware you own, with **AI you choose and control**. No vendor cloud holds your footage or watches it for you. Air-gapped by default, an audit trail you can hand to a regulator. From a homelab doorbell that never phones home, to a laptop you spin it up on in a minute, to the air-gapped government site that legally cannot use anything else.
 
 [![CI](https://github.com/open-nvr/open-nvr/actions/workflows/ci.yml/badge.svg)](https://github.com/open-nvr/open-nvr/actions/workflows/ci.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
@@ -25,7 +25,7 @@ The pattern keeps repeating because the architecture is wrong. Cameras are conne
 
 And now the rules have changed. Under NDAA §889 and the 2025–26 FCC enforcement, U.S. federal agencies, contractors, and a widening set of regulated buyers can no longer use cameras from the dominant vendors — forcing a rip-and-replace cycle in environments where cloud surveillance was never an option to begin with: defence, critical infrastructure, healthcare, schools, and government. They need a recording and AI layer they can run entirely on their own terms. That layer didn't exist as open infrastructure. OpenNVR is the bet that it should.
 
-OpenNVR is the bet that the alternative is open-source surveillance infrastructure built around four commitments: **cameras you connect, hardware you own, AI you author, audit logs you can show to a regulator.**
+OpenNVR is the bet that the alternative is open-source surveillance infrastructure built around four commitments: **cameras you connect, hardware you own, AI you choose and author, audit logs you can show to a regulator.**
 
 The architecture is published — a peer-citable paper this year, 34 references, three-tier offline-first model, six categories of systemic IP-camera weakness it structurally eliminates ([DOI 10.5281/zenodo.17261761](https://doi.org/10.5281/zenodo.17261761)). This repo is the reference implementation.
 
@@ -37,7 +37,9 @@ The architecture is published — a peer-citable paper this year, 34 references,
 
 **Its AI layer is open.** Any model behind a REST or WebSocket endpoint becomes a first-class capability through the AI Adapter Contract — a published wire spec. Object detection, open-vocabulary detection, license-plate OCR, face recognition, scene captioning, multi-object tracking, ASR, TTS, LLM tool-calling all ship out of the box. The SDK to write your own is Apache-2.0 and runs around thirty lines of Python.
 
-**You can talk to it.** The included camera-agent is a voice loop — you ask out loud *"is there a person at the front door?"* and a local LLM answers grounded in a live frame from your camera, spoken back through Piper TTS. No cloud, no API keys.
+**You can talk to it — light or full.** The included camera-agent lets you *ask* your cameras questions. It starts as a ~1–2 GB **text** agent on a plain CPU — one command, no GPU — and scales up to a full **hands-free voice** loop with a named persona and animated avatar. The brain runs locally (Ollama) by default, or you **bring your own** any OpenAI-compatible model — your choice, your control. A few editions cover the range from a dev laptop to a GPU box; details in [`examples/camera-agent/EDITIONS_AND_MODELS.md`](examples/camera-agent/EDITIONS_AND_MODELS.md).
+
+**It runs on the hardware you already have.** If the machine it's on has a camera — a laptop webcam, a USB or Pi camera, the onboard sensor on a drone or robot — the agent can discover and use it with zero provisioning. Any device that can see a camera or a stream can run its own on-board sovereign agent.
 
 **It's built for sovereignty.** For homelab users that means the doorbell that doesn't phone home. For defence, critical infrastructure, healthcare, and government deployments it means tactical AI that runs on your hardware under your control — models you've fine-tuned, models you can't share with a vendor, analytics whose detection logic itself is operationally sensitive. The procurement brief is in [`docs/GOVERNMENT_DEPLOYMENT.md`](docs/GOVERNMENT_DEPLOYMENT.md).
 
@@ -52,6 +54,8 @@ cd open-nvr
 ```
 
 That's it. First run launches a brief interactive setup (deploy mode, recording path, secrets generated for you). Run `./start.sh up` again to start containers.
+
+> **Just want to try the AI?** `examples/camera-agent/quickstart.sh` brings up a ~1–2 GB text agent you can ask questions in one command — no GPU, and you can point it at your laptop webcam. See [Talk to your cameras](#talk-to-your-cameras).
 
 ### What you'll see when it boots
 
@@ -106,19 +110,30 @@ Skipping `./start.sh up` and using bare `docker compose up -d` works too (Docker
 
 ## Talk to your cameras
 
-The camera-agent layers a voice loop on top of the core stack — ask out loud, hear the answer back, all on your hardware. Two commands once Tier 0 is running:
+The camera-agent lets you *ask* your cameras questions — all on your hardware. Start light with **one command** (text chat, detection only, ~1–2 GB RAM, no GPU):
 
 ```bash
-# 1. Pull the local LLM (~2 GB, one-time)
-docker compose -f docker-compose.yml -f docker-compose.camera-agent.yml \
-  --profile camera-agent run --rm ollama-model-pull
-
-# 2. Bring up the agent
-docker compose -f docker-compose.yml -f docker-compose.camera-agent.yml \
-  --profile camera-agent up -d
+examples/camera-agent/quickstart.sh        # Spotter (lite): type a question
 ```
 
-Then open <http://localhost:9100/demo>, click Start, and speak.
+Then open <http://localhost:9100/demo> and type *"how many people are at the door?"*. No camera yet? Click **"Use this machine's camera"** to run against your laptop webcam (or any USB/Pi/onboard device) with zero provisioning.
+
+**No camera at all? Try it instantly in demo mode:**
+
+```bash
+examples/camera-agent/quickstart.sh --demo   # scripted scenes, no camera, no vision models
+```
+
+This runs the agent against deterministic scripted scenes — ask *"how many people are at the front door?"* and it answers *"2 people"* every time. Perfect for a first look or recording a demo. (Edit the scene counts in `examples/camera-agent/config.docker.demo.yml`; it's a scripted demo of the UX, real detection is one flag away.)
+
+Step up an edition when you want more — one flag each:
+
+```bash
+examples/camera-agent/quickstart.sh --standard  # Watch: + scene description & visual Q&A
+examples/camera-agent/quickstart.sh --voice     # Sentinel: full hands-free voice + persona
+```
+
+What each edition runs and which models it uses is laid out in [`examples/camera-agent/EDITIONS_AND_MODELS.md`](examples/camera-agent/EDITIONS_AND_MODELS.md). Prefer to drive Compose yourself? `docker compose -f docker-compose.yml -f docker-compose.camera-agent.yml --profile camera-agent-lite up -d` does the same as the lite quickstart.
 
 **What you can ask:**
 
@@ -130,7 +145,7 @@ Then open <http://localhost:9100/demo>, click Start, and speak.
 | *"Who was at the door this morning?"* | LLM calls InsightFace against your enrolled face DB |
 | *"Did a red truck come by the dock earlier?"* | LLM searches the recorded-footage index (when a [`footage-search`](examples/footage-search) index is configured) |
 
-Under the hood: Pipecat pipeline · Silero VAD · Whisper STT · Ollama LLM with OpenAI-style tool-calling · Piper TTS. No cloud, no API keys.
+Under the hood: a local LLM (Ollama) doing OpenAI-style tool-calling over your live frames — or a cloud brain you bring. The lite default is text-only on CPU; the full voice loop (Pipecat · Silero VAD · Whisper STT · Piper TTS) is one flag up. No cloud and no API keys unless *you* choose a cloud model.
 
 This is the first OpenNVR example where the cameras have agency, not just data.
 
@@ -205,7 +220,7 @@ Adapters are *capabilities*; applications are *solutions*. Each example below is
 | [`license-plate-recognition`](examples/license-plate-recognition) | YOLOv8 + fast-plate-ocr chain with allowlists | intermediate |
 | [`smart-doorbell`](examples/smart-doorbell) | InsightFace recognition with REST enrollment | intermediate |
 | [`package-delivery`](examples/package-delivery) | Per-track state machine for arrival, linger, pickup | intermediate |
-| [`camera-agent`](examples/camera-agent) | Voice agent that grounds answers in live camera feeds | advanced |
+| [`camera-agent`](examples/camera-agent) | Ask your cameras questions — ~1–2 GB text mode on a laptop, up to full hands-free voice | beginner→advanced |
 | [`home-assistant-relay`](examples/home-assistant-relay) | Bridge alerts into Home Assistant via MQTT discovery | intermediate |
 
 Eleven of the thirteen shipped examples are listed above; [`inference-listener`](examples/inference-listener) and [`alerts-subscriber`](examples/alerts-subscriber) round out the set as minimal subscriber templates. Each application is a copy-as-template starting point. Gallery walkthrough and the "drives inference vs subscribes to events" axis-grid in [`examples/README.md`](examples/README.md). The roadmap for the application catalog — audio-event detection, tamper-evident incident export, and the vertical safety/security packs — is in [`docs/ROADMAP.md`](docs/ROADMAP.md).
@@ -220,7 +235,7 @@ Commercial deployments — deployment assistance, NDA adapter authoring, complia
 
 **Getting started** — [Docker quickstart](DOCKER_QUICKSTART.md) · [User manual](USER_MANUAL.md) · [Local dev setup](docs/LOCAL_SETUP.md) · [Use cases by industry](docs/USE_CASES.md) · [Comparisons](docs/COMPARISONS.md)
 
-**Architecture & security** — [Security architecture](docs/SECURITY_ARCHITECTURE.md) · [Compliance mapping](docs/COMPLIANCE.md) · [Government deployment brief](docs/GOVERNMENT_DEPLOYMENT.md) · [AI Adapter Contract](docs/AI_ADAPTER_CONTRACT.md)
+**Architecture & security** — [Security architecture](docs/SECURITY_ARCHITECTURE.md) · [Compliance mapping](docs/COMPLIANCE.md) · [Government deployment brief](docs/GOVERNMENT_DEPLOYMENT.md) · [AI Adapter Contract](docs/AI_ADAPTER_CONTRACT.md) · [Edge autonomy & robotics](docs/EDGE_AUTONOMY.md)
 
 **Project** — [Roadmap](docs/ROADMAP.md) · [Support](docs/SUPPORT.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
 
@@ -234,7 +249,7 @@ OpenNVR is **AGPLv3**. The [adapter SDK](https://github.com/open-nvr/ai-adapter/
 
 <div align="center">
 
-**OpenNVR — cameras you connect, hardware you own, AI you author, audit you can show.**
+**OpenNVR — cameras you connect, hardware you own, AI you choose and author, audit you can show.**
 
 [⭐ Star on GitHub](https://github.com/open-nvr/open-nvr) · [📄 Read the paper](https://doi.org/10.5281/zenodo.17261761) · [⚡ Quickstart](#quickstart)
 

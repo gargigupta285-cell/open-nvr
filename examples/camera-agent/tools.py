@@ -36,30 +36,46 @@ logger = logging.getLogger(__name__)
 # ── Tool definitions in OpenAI / Pipecat function-calling shape ────
 
 
-def build_tool_definitions(cameras: list[str]) -> list[dict[str, Any]]:
+def build_tool_definitions(
+    cameras: list[str], enabled: list[str] | None = None
+) -> list[dict[str, Any]]:
     """Build the OpenAI-style ``tools`` list. Camera IDs are baked
-    into the enum so the model can't invent unknown camera names."""
+    into the enum so the model can't invent unknown camera names.
+
+    ``enabled`` optionally restricts the exposed tools by name. Fewer
+    tools mean a shorter prompt (faster CPU prefill) AND fewer wrong-tool
+    picks by small models — so the Tier-0 demo advertises only the tools
+    that actually work (object detection + scene description), instead of
+    face recognition / footage search whose adapters aren't registered.
+    """
     camera_enum = list(cameras) or ["__no_cameras_configured__"]
-    return [
+    # Cameras can be a single id, "all", or several at once via camera_ids.
+    camera_enum_all = camera_enum + ["all"]
+    _camera_prop = {
+        "type": "string",
+        "enum": camera_enum_all,
+        "description": "A camera id, or 'all' for every camera.",
+    }
+    _camera_ids_prop = {
+        "type": "array",
+        "items": {"type": "string", "enum": camera_enum_all},
+        "description": "Optional: several cameras at once, e.g. ['cam1','cam2']. Use instead of camera_id for multiple.",
+    }
+    all_tools = [
         {
             "type": "function",
             "function": {
                 "name": "describe_camera",
                 "description": (
-                    "Get a one-sentence natural-language description of "
-                    "what is currently visible on the named camera. Use "
-                    "this when the user asks 'what's on the porch?' or "
-                    "'what do you see?' — anything that wants a scene "
-                    "description rather than a specific object count."
+                    "Describe what's currently visible on one camera, several "
+                    "cameras, or all of them. Use for 'what's on the porch?' / "
+                    "'what do you see on all cameras?'."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "camera_id": {
-                            "type": "string",
-                            "enum": camera_enum,
-                            "description": "Which camera to look at.",
-                        },
+                        "camera_id": _camera_prop,
+                        "camera_ids": _camera_ids_prop,
                     },
                     "required": ["camera_id"],
                 },
@@ -70,19 +86,15 @@ def build_tool_definitions(cameras: list[str]) -> list[dict[str, Any]]:
             "function": {
                 "name": "detect_objects",
                 "description": (
-                    "Run object detection on the named camera and "
-                    "return a list of what was detected (people, cars, "
-                    "packages, animals, etc.) with confidence scores. "
-                    "Use when the user asks 'is there a package?', "
-                    "'how many cars?', or wants a specific object count."
+                    "Detect and count objects (people, cars, packages, "
+                    "animals) on one camera, several, or all of them. Use for "
+                    "'is there a package?' / 'how many people across all cameras?'."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "camera_id": {
-                            "type": "string",
-                            "enum": camera_enum,
-                        },
+                        "camera_id": _camera_prop,
+                        "camera_ids": _camera_ids_prop,
                     },
                     "required": ["camera_id"],
                 },
@@ -93,19 +105,15 @@ def build_tool_definitions(cameras: list[str]) -> list[dict[str, Any]]:
             "function": {
                 "name": "recognize_faces",
                 "description": (
-                    "Run face recognition on the named camera. If the "
-                    "person is registered (family / friend / known) "
-                    "returns their name; otherwise reports 'unknown'. "
-                    "Use when the user asks 'who's at the door?' or "
-                    "'is that Alice?'."
+                    "Recognize faces on one camera, several, or all of them; "
+                    "returns a name if known, else 'unknown'. Use for 'who's "
+                    "at the door?'."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "camera_id": {
-                            "type": "string",
-                            "enum": camera_enum,
-                        },
+                        "camera_id": _camera_prop,
+                        "camera_ids": _camera_ids_prop,
                     },
                     "required": ["camera_id"],
                 },
@@ -116,15 +124,10 @@ def build_tool_definitions(cameras: list[str]) -> list[dict[str, Any]]:
             "function": {
                 "name": "search_footage",
                 "description": (
-                    "Search the recorded-footage index for past events "
-                    "matching a description. Use when the user asks about "
-                    "the past with specific attributes the live tools "
-                    "can't answer — 'did a red truck come by the dock "
-                    "earlier?', 'was anyone in a yellow jacket here this "
-                    "morning?'. You break the request into keywords "
-                    "(object types AND descriptors like colours/clothing); "
-                    "the index matches them against detected objects and "
-                    "scene captions. Returns matching moments newest-first."
+                    "Search recorded footage for past events with specific "
+                    "attributes the live tools can't answer — 'did a red "
+                    "truck come by earlier?'. Pass keywords (object + "
+                    "descriptors). Returns matches newest-first."
                 ),
                 "parameters": {
                     "type": "object",
@@ -133,17 +136,13 @@ def build_tool_definitions(cameras: list[str]) -> list[dict[str, Any]]:
                             "type": "array",
                             "items": {"type": "string"},
                             "description": (
-                                "The descriptive words to match, e.g. "
-                                "['red', 'truck'] or ['yellow', 'jacket']. "
-                                "Include both the object and its attributes."
+                                "Object + attributes, e.g. ['red', 'truck']."
                             ),
                         },
                         "within_minutes": {
                             "type": "number",
                             "description": (
-                                "Only search this many minutes back. "
-                                "Omit for no time limit. 'earlier today' "
-                                "≈ 720, 'in the last hour' = 60."
+                                "Minutes back to search. Omit for no limit."
                             ),
                         },
                         "camera_id": {
@@ -161,11 +160,9 @@ def build_tool_definitions(cameras: list[str]) -> list[dict[str, Any]]:
             "function": {
                 "name": "recent_events",
                 "description": (
-                    "Look back at recent inference events on the "
-                    "cameras. Use when the user asks about the past "
-                    "('did anyone come earlier?', 'when did the "
-                    "package arrive?'). Returns a list of recent "
-                    "events newest-first."
+                    "Look back at recent inference events on the cameras. "
+                    "Use for 'did anyone come earlier?'. Returns events "
+                    "newest-first."
                 ),
                 "parameters": {
                     "type": "object",
@@ -173,19 +170,13 @@ def build_tool_definitions(cameras: list[str]) -> list[dict[str, Any]]:
                         "camera_id": {
                             "type": "string",
                             "enum": camera_enum + ["__any__"],
-                            "description": (
-                                "Filter to one camera, or '__any__' for "
-                                "events across all cameras."
-                            ),
+                            "description": "One camera, or '__any__' for all.",
                         },
                         "window_seconds": {
                             "type": "number",
                             "description": (
-                                "How far back to look, in SECONDS. "
-                                "60 = last minute, 600 = last 10 "
-                                "minutes, 3600 = last hour. Always "
-                                "express the window in seconds even "
-                                "if the user phrased it differently."
+                                "How far back, in SECONDS (60=1min, "
+                                "3600=1hr)."
                             ),
                         },
                     },
@@ -194,6 +185,10 @@ def build_tool_definitions(cameras: list[str]) -> list[dict[str, Any]]:
             },
         },
     ]
+    if enabled is None:
+        return all_tools
+    allow = set(enabled)
+    return [t for t in all_tools if t["function"]["name"] in allow]
 
 
 # ── Tool handlers ──────────────────────────────────────────────────
@@ -220,84 +215,199 @@ class CameraTools:
         # Optional read-only FootageIndex (footage_index.FootageIndex).
         # When None or unavailable, search_footage reports that cleanly.
         self._footage_index = footage_index
+        # Cameras touched by the most recent tool call — read by /converse
+        # so the UI can show which camera(s) Sidhu is working on.
+        self.last_cameras_used: list[str] = []
 
     # ── describe_camera ────────────────────────────────────────────
 
     async def describe_camera(self, args: dict[str, Any]) -> str:
-        camera_id = self._require_camera(args)
-        if isinstance(camera_id, str) and camera_id.startswith("ERROR:"):
-            return camera_id
+        cams = self._resolve_cameras(args)
+        if isinstance(cams, str):  # ERROR
+            return cams
+        clauses = [await self._describe_one(c) for c in cams]
+        return self._join_clauses(clauses)
+
+    async def _describe_one(self, camera_id: str) -> str:
         try:
             frame = await self._ctx.get_frame(camera_id)
-        except (LookupError, FrameSourceError) as exc:
-            return f"Cannot fetch camera {camera_id!r}: {exc}"
+        except LookupError:
+            return f"{camera_id} is not configured"
+        except FrameSourceError as exc:
+            logger.info("%s: frame fetch failed (camera offline?): %s", camera_id, exc)
+            return f"{camera_id} appears to be offline"
+        # Prefer a real scene caption when the caption adapter is
+        # available. Send the task explicitly for symmetry with
+        # recognize_faces and so the wire shape is legible in audit logs.
         try:
-            # Send the task explicitly for symmetry with
-            # recognize_faces — BlipService defaults task to
-            # ``scene_caption`` but being explicit makes the wire
-            # shape legible in audit logs and protects against a
-            # future multi-task BLIP adapter that drops the default.
             response = await self._caption.infer(
                 frame_jpeg=frame,
                 extra={"task": "scene_caption"},
             )
+            caption = ((response.get("result") or {}).get("caption") or "").strip()
+            if caption:
+                return f"{camera_id}: {caption}"
         except Exception:
-            logger.exception("describe_camera: caption call failed")
-            return "Caption adapter failed; cannot describe the scene right now."
-        caption = ((response.get("result") or {}).get("caption") or "").strip()
-        if not caption:
-            return f"The {camera_id} camera is online but the captioner returned nothing."
-        return f"On {camera_id}: {caption}"
+            # No caption adapter registered (e.g. the Tier-0 stack ships
+            # only the object detector). Fall back to describing the scene
+            # from detected objects so the user still gets a useful answer
+            # instead of an error.
+            logger.info(
+                "describe_camera: caption adapter unavailable, "
+                "falling back to object detection"
+            )
+        return await self._describe_via_detection(camera_id, frame)
+
+    async def _describe_via_detection(self, camera_id: str, frame: bytes) -> str:
+        """Best-effort scene description built from the object detector,
+        used when no caption adapter is available."""
+        try:
+            response = await self._detect.infer(frame_jpeg=frame)
+        except Exception:
+            logger.exception("describe_camera: detection fallback failed")
+            return f"{camera_id}: scene description unavailable right now"
+        summary = self._summarize_detections(
+            (response.get("result") or {}).get("detections") or []
+        )
+        if not summary:
+            return f"{camera_id}: nothing notable visible"
+        return f"{camera_id}: I can see {summary}"
+
+    # Irregular plurals worth getting right for the COCO labels the
+    # detector emits most; everything else just takes a trailing 's'.
+    _IRREGULAR_PLURALS = {"person": "people", "man": "men", "woman": "women"}
+
+    @classmethod
+    def _summarize_detections(cls, detections: list[dict[str, Any]]) -> str:
+        """Group identical labels into a short, speakable phrase, e.g.
+        'a person, 2 cars'. Capped to keep the spoken reply short.
+
+        Detections are first de-duplicated by IoU per label: the YOLOv8
+        adapter doesn't always run NMS, so it can emit several heavily
+        overlapping boxes for the SAME object. Counting those raw would
+        make the agent say "10 people" when one person is on screen.
+        """
+        deduped = cls._dedup_detections(detections[:64])
+        counts: dict[str, int] = {}
+        for det in deduped:
+            label = str(det.get("label") or det.get("class") or "?").strip()
+            if label:
+                counts[label] = counts.get(label, 0) + 1
+        parts: list[str] = []
+        for label, count in sorted(counts.items()):
+            if count == 1:
+                article = "an" if label[:1].lower() in "aeiou" else "a"
+                parts.append(f"{article} {label}")
+            else:
+                plural = cls._IRREGULAR_PLURALS.get(label, f"{label}s")
+                parts.append(f"{count} {plural}")
+        return ", ".join(parts[:8])
+
+    @classmethod
+    def _dedup_detections(
+        cls, detections: list[dict[str, Any]], iou_threshold: float = 0.55
+    ) -> list[dict[str, Any]]:
+        """Greedy per-label NMS: drop boxes that overlap an already-kept
+        box of the same label by more than ``iou_threshold``."""
+        kept: list[dict[str, Any]] = []
+        # Highest-confidence first so the survivor of each overlap cluster
+        # is the strongest detection.
+        ordered = sorted(
+            detections,
+            key=lambda d: float(d.get("confidence") or d.get("score") or 0.0),
+            reverse=True,
+        )
+        for det in ordered:
+            label = str(det.get("label") or det.get("class") or "?").strip()
+            box = det.get("bbox") or {}
+            if not isinstance(box, dict):
+                kept.append(det)
+                continue
+            dup = False
+            for other in kept:
+                same_label = str(
+                    other.get("label") or other.get("class") or "?"
+                ).strip() == label
+                if same_label and cls._iou(box, other.get("bbox") or {}) > iou_threshold:
+                    dup = True
+                    break
+            if not dup:
+                kept.append(det)
+        return kept
+
+    @staticmethod
+    def _iou(a: dict[str, Any], b: dict[str, Any]) -> float:
+        """IoU of two center-form normalized boxes ({x, y, w, h})."""
+        try:
+            ax1, ay1 = a["x"] - a["w"] / 2, a["y"] - a["h"] / 2
+            ax2, ay2 = a["x"] + a["w"] / 2, a["y"] + a["h"] / 2
+            bx1, by1 = b["x"] - b["w"] / 2, b["y"] - b["h"] / 2
+            bx2, by2 = b["x"] + b["w"] / 2, b["y"] + b["h"] / 2
+        except (KeyError, TypeError):
+            return 0.0
+        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+        inter = iw * ih
+        if inter <= 0:
+            return 0.0
+        area_a = (ax2 - ax1) * (ay2 - ay1)
+        area_b = (bx2 - bx1) * (by2 - by1)
+        union = area_a + area_b - inter
+        return inter / union if union > 0 else 0.0
 
     # ── detect_objects ─────────────────────────────────────────────
 
     async def detect_objects(self, args: dict[str, Any]) -> str:
-        camera_id = self._require_camera(args)
-        if isinstance(camera_id, str) and camera_id.startswith("ERROR:"):
-            return camera_id
+        cams = self._resolve_cameras(args)
+        if isinstance(cams, str):  # ERROR
+            return cams
+        clauses = [await self._detect_one(c) for c in cams]
+        return self._join_clauses(clauses)
+
+    async def _detect_one(self, camera_id: str) -> str:
         try:
             frame = await self._ctx.get_frame(camera_id)
-        except (LookupError, FrameSourceError) as exc:
-            return f"Cannot fetch camera {camera_id!r}: {exc}"
+        except LookupError:
+            return f"{camera_id} is not configured"
+        except FrameSourceError as exc:
+            logger.info("%s: frame fetch failed (camera offline?): %s", camera_id, exc)
+            return f"{camera_id} appears to be offline"
         try:
             response = await self._detect.infer(frame_jpeg=frame)
         except Exception:
-            logger.exception("detect_objects: detector call failed")
-            return "Object detector failed."
+            logger.exception("detect_objects: detector call failed for %s", camera_id)
+            return f"{camera_id}: detector unavailable"
         detections = ((response.get("result") or {}).get("detections")) or []
         if not detections:
-            return f"No objects detected on {camera_id}."
-        # Group identical labels for a readable summary; cap at 8 to
-        # keep the tool-result message short.
-        counts: dict[str, int] = {}
-        for det in detections[:32]:
-            label = str(det.get("label") or det.get("class") or "?").strip()
-            if label:
-                counts[label] = counts.get(label, 0) + 1
-        parts = [
-            f"{count}× {label}" if count > 1 else label
-            for label, count in sorted(counts.items())
-        ][:8]
-        return f"On {camera_id}: " + ", ".join(parts) + "."
+            return f"{camera_id}: no objects"
+        return f"{camera_id}: {self._summarize_detections(detections)}"
 
     # ── recognize_faces ────────────────────────────────────────────
 
     async def recognize_faces(self, args: dict[str, Any]) -> str:
-        camera_id = self._require_camera(args)
-        if isinstance(camera_id, str) and camera_id.startswith("ERROR:"):
-            return camera_id
+        cams = self._resolve_cameras(args)
+        if isinstance(cams, str):  # ERROR
+            return cams
+        clauses = [await self._recognize_one(c) for c in cams]
+        return self._join_clauses(clauses)
+
+    async def _recognize_one(self, camera_id: str) -> str:
         try:
             frame = await self._ctx.get_frame(camera_id)
-        except (LookupError, FrameSourceError) as exc:
-            return f"Cannot fetch camera {camera_id!r}: {exc}"
+        except LookupError:
+            return f"{camera_id} is not configured"
+        except FrameSourceError as exc:
+            logger.info("%s: frame fetch failed (camera offline?): %s", camera_id, exc)
+            return f"{camera_id} appears to be offline"
         try:
             response = await self._recognise.infer(
                 frame_jpeg=frame,
                 extra={"task": "face_recognition"},
             )
         except Exception:
-            logger.exception("recognize_faces: recognition call failed")
-            return "Face recogniser failed."
+            logger.info("recognize_faces: recognition adapter unavailable")
+            return f"{camera_id}: face recognition isn't enabled"
         result = response.get("result") or {}
         if result.get("recognized"):
             name = result.get("name") or result.get("person_id") or "someone"
@@ -306,13 +416,10 @@ class CameraTools:
             sim_phrase = f", similarity {similarity:.2f}" if isinstance(
                 similarity, (int, float)
             ) else ""
-            return (
-                f"On {camera_id}: recognised {name} "
-                f"({category}{sim_phrase})."
-            )
+            return f"{camera_id}: recognised {name} ({category}{sim_phrase})"
         if "face_bbox" in result and result.get("face_bbox"):
-            return f"On {camera_id}: a face is visible but it's not registered."
-        return f"On {camera_id}: no face detected."
+            return f"{camera_id}: a face is visible but not registered"
+        return f"{camera_id}: no face detected"
 
     # ── recent_events ──────────────────────────────────────────────
 
@@ -431,3 +538,60 @@ class CameraTools:
                 f"{sorted(c.camera_id for c in self._ctx.cameras)}."
             )
         return camera_id
+
+    # Values that mean "every configured camera".
+    _ALL_TOKENS = frozenset({"all", "__all__", "all_cameras", "every", "everything"})
+
+    def _resolve_cameras(self, args: dict[str, Any]) -> "list[str] | str":
+        """Resolve a tool call's camera selector to a concrete list.
+
+        Accepts ``camera_ids`` (a list), or ``camera_id`` as a single id,
+        ``"all"`` (every camera), or a comma-separated string. Returns the
+        ordered, de-duplicated list, or an ``ERROR:`` string the LLM can
+        relay. Records the result in ``last_cameras_used`` for the UI."""
+        known = [c.camera_id for c in self._ctx.cameras]
+        if not known:
+            return "ERROR: no cameras are configured."
+
+        raw = args.get("camera_ids")
+        if raw is None:
+            cid = args.get("camera_id")
+            if isinstance(cid, str) and cid.strip().lower() in self._ALL_TOKENS:
+                self.last_cameras_used = list(known)
+                return list(known)
+            if isinstance(cid, str) and "," in cid:
+                raw = [p.strip() for p in cid.split(",") if p.strip()]
+            elif isinstance(cid, str) and cid:
+                raw = [cid]
+            else:
+                return "ERROR: camera_id (or camera_ids) is required."
+
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return "ERROR: camera_ids must be a list of camera names."
+
+        resolved: list[str] = []
+        for item in raw:
+            name = str(item).strip()
+            if name.lower() in self._ALL_TOKENS:
+                resolved = list(known)
+                break
+            if not self._ctx.known_camera(name):
+                return (
+                    f"ERROR: camera {name!r} is not configured. Available: "
+                    f"{known} (or 'all')."
+                )
+            if name not in resolved:
+                resolved.append(name)
+        if not resolved:
+            return "ERROR: no valid cameras in the request."
+        self.last_cameras_used = list(resolved)
+        return resolved
+
+    @staticmethod
+    def _join_clauses(clauses: list[str]) -> str:
+        """Combine per-camera result clauses into one speakable string."""
+        if len(clauses) == 1:
+            return "On " + clauses[0] + "."
+        return "Across " + str(len(clauses)) + " cameras — " + "; ".join(clauses) + "."

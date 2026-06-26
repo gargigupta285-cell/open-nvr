@@ -92,18 +92,21 @@ async def test_describe_camera_empty_caption_uses_fallback():
     ctx = _ctx_with_camera()
     tools = _build_tools(ctx, caption_response={"result": {"caption": ""}})
     result = await tools.describe_camera({"camera_id": "front-porch"})
-    # Falls back to an honest "captioner returned nothing" rather than
-    # making up a description.
-    assert "returned nothing" in result
+    # No caption available -> fall back to object detection so the user
+    # still gets a grounded answer rather than an error or a made-up scene.
+    assert "person" in result
+    assert "front-porch" in result
 
 
 @pytest.mark.asyncio
-async def test_describe_camera_caption_exception_returns_friendly_error():
+async def test_describe_camera_caption_exception_uses_detection_fallback():
     ctx = _ctx_with_camera()
     tools = _build_tools(ctx)
     tools._caption.infer.side_effect = RuntimeError("502 from BLIP")
     result = await tools.describe_camera({"camera_id": "front-porch"})
-    assert "Caption adapter failed" in result
+    # Caption adapter erroring -> grounded detection fallback, not a raw error.
+    assert "person" in result
+    assert "front-porch" in result
 
 
 # ── detect_objects ─────────────────────────────────────────────────
@@ -120,7 +123,8 @@ async def test_detect_objects_groups_duplicate_labels():
         ]},
     })
     result = await tools.detect_objects({"camera_id": "front-porch"})
-    assert "2× person" in result
+    # Counts are pluralised naturally for speech ("2 people", not "2x person").
+    assert "2 people" in result
     assert "car" in result
 
 
@@ -129,7 +133,7 @@ async def test_detect_objects_no_detections():
     ctx = _ctx_with_camera()
     tools = _build_tools(ctx, detection_response={"result": {"detections": []}})
     result = await tools.detect_objects({"camera_id": "front-porch"})
-    assert "No objects detected" in result
+    assert "no objects" in result.lower()
 
 
 @pytest.mark.asyncio
@@ -261,7 +265,8 @@ def test_tool_definitions_bake_camera_ids_into_enum():
     defs = build_tool_definitions(["front-porch", "back-door"])
     describe = next(d for d in defs if d["function"]["name"] == "describe_camera")
     enum = describe["function"]["parameters"]["properties"]["camera_id"]["enum"]
-    assert set(enum) == {"front-porch", "back-door"}
+    # Configured cameras plus the "all" selector — still can't invent names.
+    assert set(enum) == {"front-porch", "back-door", "all"}
 
 
 def test_tool_definitions_recent_events_offers_any_wildcard():

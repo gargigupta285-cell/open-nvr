@@ -10,6 +10,20 @@ pattern of "OpenNVR camera as participant", not just camera as data
 source. The next milestone (v0.2) extends the same agent to join
 LiveKit rooms as a virtual participant.
 
+### Read in detail
+
+- [**Editions & models**](EDITIONS_AND_MODELS.md) — the lite/standard/full/cloud
+  editions, the efficient model picks, and run-on-any-hardware (laptop webcam,
+  Pi, drone). Start here.
+- [**Models & latency**](MODELS_AND_LATENCY.md) — how model choices were weighed
+  for CPU latency and good UX.
+- [**Alarms**](ALARMS.md) — ringing alarms, time windows, presets, and the
+  documented emergency-calling hook.
+- [**Notifications**](NOTIFICATIONS.md) — external webhook/push delivery.
+- [**Faces & watchlist**](FACES.md) — enrollment and watchlist matching.
+- [Architecture review (issue #82)](ARCHITECTURE_REVIEW_82.md) — design notes
+  behind the editions/topology work.
+
 ## What it does
 
 ```
@@ -122,6 +136,12 @@ Real-world limitations the example does NOT yet handle:
 
 ## Quick start
 
+**Fastest path (lite):** from the repo root, `examples/camera-agent/quickstart.sh`
+brings up a ~1–2 GB text agent in one command — no GPU, and you can click "Use
+this machine's camera" in the demo. The full six-adapter voice setup below is the
+heavy, opt-in path; see [Editions & models](EDITIONS_AND_MODELS.md) for the
+middle grounds.
+
 ```bash
 # 1. Start the adapters you need (in the ai-adapter repo). The
 #    agent uses six adapters total: Whisper, Ollama, Piper for
@@ -187,6 +207,8 @@ See `config.example.yml` for the full set. Key knobs:
 | `event_ring_size` | `256` | Per-camera ring buffer size for the `recent_events` tool. |
 | `nats_inference_url` | unset | Set this to enable `recent_events` against your inference bus. Without it the tool returns "no events". |
 | `cameras[].role` | `"(no role configured)"` | One-sentence role description per camera — gets baked into the system prompt so the LLM knows what each camera watches. |
+| `opennvr_cameras_url` | unset | When set and `cameras` is empty, fetches the camera roster from a running OpenNVR instance (`GET /api/v1/internal/camera-agent/cameras`). This means you never duplicate RTSP credentials in this file — OpenNVR owns the camera connection and returns MediaMTX tap URLs. |
+| `opennvr_api_key` | unset | API key for the `opennvr_cameras_url` endpoint. Must match `INTERNAL_API_KEY` in OpenNVR's `.env`. Falls back to `kaic_api_key` if unset. |
 
 ## Tests
 

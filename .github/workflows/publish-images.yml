@@ -33,7 +33,14 @@ on:
   # publishing. Build-on-every-main-push is cheap (BuildKit cache,
   # core changes rarely) and the alternative landmine is not worth it.
   push:
-    branches: [main]
+    # Every branch auto-builds + pushes an image tagged with the branch
+    # name (type=ref,event=branch → ghcr.io/open-nvr/core:<branch>) plus
+    # :sha-<short>, so a feature branch's changes get a pullable image
+    # without manually dispatching the workflow. The :latest and :main
+    # tags stay gated below to the default branch / release tags, so
+    # feature builds never clobber the release tags.
+    branches:
+      - "**"
     tags:
       - "v*"
   pull_request:

@@ -92,6 +92,11 @@ class CameraContext:
     def cameras(self) -> list[CameraSpec]:
         return list(self._cameras.values())
 
+    def add_camera(self, spec: CameraSpec) -> None:
+        """Register a camera at runtime (e.g. a local device discovered via
+        the demo's 'use this machine's camera' button)."""
+        self._cameras[spec.camera_id] = spec
+
     def known_camera(self, camera_id: str) -> bool:
         return camera_id in self._cameras
 

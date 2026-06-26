@@ -1,0 +1,47 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# CLOUD / HYBRID brain (issue #82). Vision (YOLOv8) stays local; the LLM runs
+# on any OpenAI-compatible API for stronger, lower-latency tool-calling with
+# NO local LLM RAM. Great for development, demos, and low-resource machines.
+#
+# NOT a sovereign profile — frames stay local but the chat/tool-call text goes
+# to your chosen provider. Set AI_SOVEREIGNTY accordingly on the server; this
+# is an explicit operator opt-in.
+#
+# Run:  python camera_agent.py --config config.cloud.yml
+
+text_mode: true
+
+kaic_url: http://127.0.0.1:8100
+kaic_api_key: REPLACE_WITH_INTERNAL_API_KEY
+
+# ── Cloud LLM brain (OpenAI-compatible) ──────────────────────────────
+# Works with OpenAI, Groq, Together, OpenRouter, or a local OpenAI-API
+# server (vLLM, llama.cpp, LM Studio, Ollama's /v1). base_url may be the
+# host, ".../v1", or the full ".../v1/chat/completions".
+llm_provider: openai
+llm_base_url: https://api.openai.com/v1
+llm_api_key: REPLACE_WITH_YOUR_API_KEY
+llm_model: gpt-4o-mini
+llm_temperature: 0.3
+llm_max_tokens: 256
+
+# Vision tools (local, via KAI-C). describe_camera falls back to the detector
+# if no caption adapter is registered.
+detection_adapter: default
+enabled_tools:
+  - detect_objects
+  - describe_camera
+  - recent_events
+  - create_monitor
+  - create_alarm
+
+host: 127.0.0.1
+port: 9100
+cameras: []
+
+system_prompt: |
+  You are a concise camera assistant. Answer ONLY from tool results — call a
+  tool before describing what any camera shows; never guess. Keep replies to
+  1-2 short sentences.

@@ -44,6 +44,7 @@ try:  # pragma: no cover — import-time only
     from pipecat.frames.frames import (
         Frame,
         InputAudioRawFrame,
+        OutputAudioRawFrame,
         StartFrame,
         TTSAudioRawFrame,
     )
@@ -55,6 +56,7 @@ except Exception:  # pragma: no cover
     # Test envs that haven't installed Pipecat get a no-op stub.
     Frame = object  # type: ignore
     InputAudioRawFrame = object  # type: ignore
+    OutputAudioRawFrame = object  # type: ignore
     StartFrame = object  # type: ignore
     TTSAudioRawFrame = object  # type: ignore
 
@@ -112,7 +114,7 @@ class RawPcmSerializer(FrameSerializer):
         # (system frames, LLM text frames, control frames) is
         # consumed entirely server-side — the demo browser doesn't
         # render transcripts. A production UI would extend this.
-        if isinstance(frame, TTSAudioRawFrame):
+        if isinstance(frame, (TTSAudioRawFrame, OutputAudioRawFrame)):
             audio = getattr(frame, "audio", None)
             if not isinstance(audio, (bytes, bytearray)) or not audio:
                 return None

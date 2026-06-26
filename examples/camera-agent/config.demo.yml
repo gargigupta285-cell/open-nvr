@@ -1,0 +1,52 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# DEMO mode — run the whole agent with NO cameras and NO vision adapters, for
+# recording the demo GIF or trying it on a bare machine. Cameras are scripted
+# `synth:` scenes that render a deterministic image AND carry their own ground
+# truth, and `synthetic_detection` makes the detector read that ground truth —
+# so "how many people at the door?" always answers "2 people". Clearly a DEMO:
+# it shows the UX and tool-calling, not live vision.
+#
+# You still need a local LLM (Ollama) for the conversation — the quickstart's
+# lite profile provides one. Requires Pillow on the host: pip install pillow
+# Run:  python camera_agent.py --config config.demo.yml
+#       then open http://localhost:9100/demo and TYPE a question.
+
+text_mode: true
+synthetic_detection: true
+
+kaic_url: http://127.0.0.1:8100      # unused in demo mode, but required field
+kaic_api_key: demo
+
+ollama_url: http://127.0.0.1:11434
+ollama_token:
+llm_model: qwen3:1.7b
+llm_think: false   # Qwen3: non-thinking for snappy tool-calling
+llm_temperature: 0.2
+llm_max_tokens: 120
+
+detection_adapter: default
+enabled_tools:
+  - detect_objects
+  - describe_camera
+  - recent_events
+  - create_monitor
+  - create_alarm
+
+# Scripted scenes. Edit the counts to script the demo answers.
+cameras:
+  - camera_id: front_door
+    frame_url: synth:people=2
+    role: the front door
+  - camera_id: driveway
+    frame_url: synth:cars=1,people=0
+    role: the driveway
+
+host: 127.0.0.1
+port: 9100
+
+system_prompt: |
+  You are a concise camera assistant. Answer ONLY from tool results — call a
+  tool before describing what any camera shows; never guess. Keep replies to
+  1-2 short sentences.

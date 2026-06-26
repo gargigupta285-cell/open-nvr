@@ -3,25 +3,16 @@
   Copyright (c) 2026 OpenNVR
   SPDX-License-Identifier: AGPL-3.0-or-later
 
-  Self-contained demo client for the camera-agent example.
+  OpenNVR Camera Agent front-end (vanilla JS, no build step).
 
-  No build step, no framework, no JS dependencies — ~200 lines of
-  vanilla JS. Connects to the FastAPI WebSocket endpoint and speaks
-  raw int16-PCM in both directions (pairs with the camera-agent's
-  RawPcmSerializer on the server side). The browser uses the Web
-  Audio API for capture (16 kHz mono) and playback (22 kHz mono,
-  Piper's default).
-
-  Honest caveats:
-  * Voice-only. Transcripts and agent text are not surfaced on the
-    page — the RawPcmSerializer drops every non-audio frame on the
-    wire so the demo stays vanilla. A production UI bundles
-    @pipecat-ai/client-js and the matching ProtobufFrameSerializer
-    on the server to get transcripts, control frames, and metrics
-    over the same WebSocket.
-  * No jitter buffer, no reconnect, no audio worklet — just the
-    simplest possible glue. Production deployments will outgrow
-    this; that's expected.
+  * The agent introduces itself (text + spoken via Piper) on enable. Its name
+    follows the configured voice (Shailaja / Sidhu) — fetched from /agent.
+  * Hands-free: client-side VAD detects each utterance and POSTs it to
+    /converse; idle auto-stops with an "Enable talking" button.
+  * Right rail: alarms, watches, and background tasks — each live-polled.
+  * Audio cues: a two-tone siren while any alarm rings, and a short chime when
+    a background task finishes or a watch notifies. All Web Audio, no assets.
+  * Camera selector supports one, several (checkboxes), or all cameras.
 -->
 <html lang="en">
 <head>
@@ -30,253 +21,466 @@
   <title>OpenNVR Camera Agent</title>
   <style>
     :root {
-      --bg: #0f1115;
-      --panel: #1a1f2a;
-      --text: #e6e6e6;
-      --muted: #8a93a3;
-      --accent: #4fd1c5;
-      --accent-strong: #38b2ac;
-      --danger: #e53e3e;
+      --bg:#0f1115; --panel:#1a1f2a; --panel2:#11151d; --text:#e6edf3; --muted:#8b98a9;
+      --accent:#4fd1c5; --accent-strong:#38b2ac; --danger:#e53e3e;
+      --user:#9ae6b4; --agent:#90cdf4; --border:rgba(255,255,255,0.10);
     }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 1.5rem;
-    }
-    main {
-      width: 100%;
-      max-width: 32rem;
-      background: var(--panel);
-      border-radius: 0.75rem;
-      padding: 2rem;
-      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
-    }
-    h1 { margin: 0 0 0.25rem 0; font-size: 1.5rem; }
-    p.lede { margin: 0 0 1.5rem 0; color: var(--muted); }
-    .row { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem; }
-    button {
-      background: var(--accent);
-      color: #062321;
-      border: none;
-      padding: 0.75rem 1.25rem;
-      border-radius: 0.5rem;
-      font-weight: 600;
-      cursor: pointer;
-      font-size: 0.95rem;
-    }
-    button:hover:not(:disabled) { background: var(--accent-strong); }
-    button:disabled { opacity: 0.4; cursor: not-allowed; }
-    button.danger { background: var(--danger); color: white; }
-    .status {
-      padding: 0.5rem 0.75rem;
-      border-radius: 0.375rem;
-      background: rgba(255, 255, 255, 0.04);
-      font-size: 0.85rem;
-      color: var(--muted);
-      flex: 1;
-    }
-    .status.active { color: var(--accent); }
-    .log {
-      margin-top: 1rem;
-      background: rgba(0, 0, 0, 0.25);
-      border-radius: 0.5rem;
-      padding: 0.75rem;
-      max-height: 12rem;
-      overflow-y: auto;
-      font-family: ui-monospace, "SF Mono", Menlo, monospace;
-      font-size: 0.8rem;
-      color: var(--muted);
-    }
-    .log-entry { margin: 0.15rem 0; }
-    .log-entry.error { color: var(--danger); }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+      background:var(--bg); color:var(--text); padding:1.5rem 1rem; }
+    .wrap { max-width:60rem; margin:0 auto; }
+    .alarmbar { display:flex; align-items:center; gap:0.6rem; background:var(--danger); color:#fff;
+      padding:0.7rem 0.9rem; border-radius:0.6rem; margin-bottom:1rem; font-weight:700;
+      animation:alarmflash 0.9s ease-in-out infinite; }
+    .alarmbar .ab-text { flex:1; }
+    .alarmbar .ab-btn { background:#fff; color:var(--danger); border:none; padding:0.4rem 0.85rem;
+      border-radius:0.4rem; font-weight:700; cursor:pointer; }
+    @keyframes alarmflash { 0%,100%{opacity:1;} 50%{opacity:0.72;} }
+
+    .app { display:grid; grid-template-columns:1fr 19rem; gap:1rem; align-items:start; }
+    @media (max-width:760px) { .app { grid-template-columns:1fr; } }
+    .card { background:var(--panel); border-radius:0.75rem; padding:1.25rem; }
+    .head { display:flex; align-items:center; gap:1rem; margin-bottom:1rem; }
+    h1 { margin:0; font-size:1.35rem; }
+    p.lede { margin:0.15rem 0 0 0; color:var(--muted); font-size:0.88rem; }
+
+    .ram { width:60px; height:60px; flex:0 0 auto; }
+    .ram svg { width:100%; height:100%; display:block; }
+    .ram .ring,.ram .iris { transform-origin:center; transform-box:fill-box; }
+    .ram.idle .ring{stroke:var(--muted);animation:breathe 3.5s ease-in-out infinite}.ram.idle .iris{fill:var(--muted)}
+    .ram.listening .ring{stroke:var(--accent);animation:pulse 1.4s ease-out infinite}.ram.listening .iris{fill:var(--accent)}
+    .ram.thinking .ring{stroke:#f6c453;stroke-dasharray:14 10;animation:spin 1.1s linear infinite}.ram.thinking .iris{fill:#f6c453}
+    .ram.speaking .ring{stroke:var(--agent);animation:bounce 0.7s ease-in-out infinite}.ram.speaking .iris{fill:var(--agent)}
+    @keyframes breathe{0%,100%{opacity:.55}50%{opacity:1}}
+    @keyframes pulse{0%{transform:scale(.85);opacity:1}100%{transform:scale(1.15);opacity:.25}}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @keyframes bounce{0%,100%{transform:scale(.92)}50%{transform:scale(1.12)}}
+
+    label.field { font-size:0.75rem; color:var(--muted); display:block; margin-bottom:0.35rem; }
+    .cambox { border:1px solid var(--border); border-radius:0.5rem; padding:0.5rem 0.6rem; margin-bottom:0.75rem;
+      display:flex; flex-wrap:wrap; gap:0.4rem 0.9rem; max-height:6.5rem; overflow-y:auto; }
+    .cambox label { display:flex; align-items:center; gap:0.35rem; font-size:0.85rem; cursor:pointer; }
+    .cambox input { accent-color:var(--accent); }
+    .talk { width:100%; background:var(--accent); color:#062321; border:none; padding:1.05rem 1.25rem;
+      border-radius:0.6rem; font-weight:700; cursor:pointer; font-size:1.05rem; transition:background .15s,transform .05s; }
+    .talk:hover:not(:disabled){background:var(--accent-strong);} .talk:active:not(:disabled){transform:scale(.99);}
+    .talk:disabled{opacity:.5;cursor:progress;}
+    .talk.listening{background:var(--danger);color:#fff;} .talk.listening::before{content:"● ";animation:blink 1s steps(2,start) infinite;}
+    @keyframes blink{to{visibility:hidden;}}
+    .row { display:flex; gap:0.5rem; align-items:center; margin:0.6rem 0 0; }
+    .status { padding:0.5rem 0.7rem; border-radius:0.375rem; background:rgba(255,255,255,0.04); color:var(--muted); font-size:0.83rem; flex:1; }
+    .status.active{color:var(--accent);} .status.error{color:var(--danger);}
+    .chip { font-size:0.72rem; padding:0.22rem 0.5rem; border-radius:999px; background:rgba(79,209,197,0.15); color:var(--accent); white-space:nowrap; }
+    .ghost { background:transparent; color:var(--muted); border:1px solid var(--border); padding:0.45rem 0.7rem; border-radius:0.375rem; cursor:pointer; font-size:0.8rem; }
+    .ghost:hover{color:var(--text);}
+    .log { margin-top:1rem; background:rgba(0,0,0,0.25); border-radius:0.5rem; padding:0.75rem; height:18rem; overflow-y:auto; font-size:0.9rem; line-height:1.45; }
+    .log:empty::after { content:"Your conversation will appear here."; color:var(--muted); font-size:0.82rem; }
+    .msg{margin:0.35rem 0;} .msg .who{font-weight:700;} .msg.user .who{color:var(--user);} .msg.agent .who{color:var(--agent);}
+    .msg.sys{color:var(--muted); font-size:0.8rem; font-style:italic;}
+
+    .side .card { padding:0.85rem 0.9rem; margin-bottom:1rem; }
+    .side h2 { font-size:0.72rem; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; margin:0 0 .5rem 0; }
+    .side .empty-note { color:var(--muted); font-size:0.78rem; }
+    .item { display:flex; align-items:center; gap:.5rem; padding:.4rem .5rem; background:var(--panel2); border-radius:8px; margin:.3rem 0; font-size:0.83rem; }
+    .item .badge{width:18px;text-align:center;flex:0 0 auto;} .item.running .badge{animation:spin 1.1s linear infinite;display:inline-block;}
+    .item .q{flex:1;} .item.done .q{color:var(--muted);} .item .count{color:var(--accent);font-variant-numeric:tabular-nums;}
+    .item .stop{background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:0.95rem;} .item .stop:hover{color:var(--danger);}
+    .item.ringing{background:rgba(229,62,62,0.14);} #alarmCard .item .badge{color:var(--danger);}
+    .presets{display:flex;flex-wrap:wrap;gap:0.4rem;margin-top:0.4rem;}
+    .presets .ghost{font-size:0.78rem;}
+    .notifyrow{display:flex;align-items:center;gap:0.5rem;margin-top:0.5rem;}
+    .notifyrow .empty-note{flex:1;}
+    .notifyrow .ghost{font-size:0.72rem;padding:0.3rem 0.55rem;}
+    .askrow{gap:0.4rem;}
+    .askrow input{flex:1;background:#0f1320;color:var(--text);border:1px solid rgba(255,255,255,0.12);
+      border-radius:0.5rem;padding:0.6rem 0.7rem;font-size:0.95rem;}
+    .askrow .ghost{background:var(--accent);color:#062321;border:none;font-weight:700;}
   </style>
 </head>
 <body>
-  <main>
-    <h1>OpenNVR Camera Agent</h1>
-    <p class="lede">
-      Click <strong>Start</strong>, then speak. The agent listens via
-      Silero VAD — no need to hold a button. Ask things like
-      <em>"What's on the front porch?"</em> or
-      <em>"Did anyone come to the door in the last hour?"</em>
-    </p>
-    <div class="row">
-      <button id="start" type="button">Start</button>
-      <button id="stop" type="button" class="danger" disabled>Stop</button>
-      <div class="status" id="status">Idle. Click Start.</div>
+  <div class="wrap">
+    <div class="alarmbar" id="alarmbar" hidden>
+      <span>🚨</span><span class="ab-text" id="alarmText">Alarm</span>
+      <button class="ab-btn" id="silence" type="button">Silence</button>
     </div>
-    <div class="log" id="log"></div>
-  </main>
+
+    <div class="app">
+      <div class="main-col">
+        <div class="card">
+          <div class="head">
+            <div class="ram idle" id="ram" aria-label="agent avatar">
+              <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+                <circle class="ring" cx="50" cy="50" r="40" fill="none" stroke-width="5"/>
+                <circle class="iris" cx="50" cy="50" r="16"/>
+              </svg>
+            </div>
+            <div>
+              <h1 id="title">Camera Agent</h1>
+              <p class="lede" id="lede">Tap <strong>Talk</strong>, then just speak — hands-free, answers aloud.</p>
+            </div>
+          </div>
+
+          <label class="field">Cameras</label>
+          <div class="cambox" id="cambox">
+            <label><input type="checkbox" id="cam-all" checked> All cameras</label>
+          </div>
+          <div class="row">
+            <button id="useLocalCam" class="ghost" type="button" title="Use a camera attached to this machine — webcam, USB, Pi or drone">📷 Use this machine's camera</button>
+          </div>
+
+          <button id="talk" class="talk" type="button">🎤 Talk</button>
+          <div class="row askrow">
+            <input id="askInput" type="text" placeholder="Type a question, e.g. how many people on cam1?" autocomplete="off">
+            <button id="askBtn" class="ghost" type="button">Send</button>
+          </div>
+          <div class="row">
+            <div class="status" id="status">Ready. Type a question or tap Talk.</div>
+            <span class="chip" id="working" hidden></span>
+            <span class="chip" id="lat" hidden title="Per-turn latency: STT · LLM · TTS · total"></span>
+            <button id="reset" class="ghost" type="button">Reset</button>
+          </div>
+
+          <div class="log" id="log"></div>
+        </div>
+      </div>
+
+      <div class="side">
+        <div class="card" id="alarmCard">
+          <h2>Alarms</h2>
+          <div class="presets">
+            <button class="ghost preset" data-name="Fire" data-target="fire" type="button">🔥 Fire</button>
+            <button class="ghost preset" data-name="After-hours person" data-target="person" data-after="18:00" type="button">🌙 After-hours</button>
+          </div>
+          <div class="notifyrow" id="notifyRow" hidden>
+            <span id="notifyStatus" class="empty-note"></span>
+            <button class="ghost" id="notifyTest" type="button">Test</button>
+          </div>
+          <div id="alarmList"></div>
+        </div>
+        <div class="card">
+          <h2>Watching</h2>
+          <div id="monitorList"></div>
+        </div>
+        <div class="card">
+          <h2>Background tasks</h2>
+          <div id="taskList"></div>
+        </div>
+        <div class="card">
+          <h2>Scheduled reports</h2>
+          <div id="reportList"></div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script>
-    // ── Minimal raw-PCM WebSocket client ────────────────────────────
-    //
-    // Pairs with examples/camera-agent/serializer.py (RawPcmSerializer).
-    // Both directions of the WebSocket carry bare int16 little-endian
-    // PCM samples — inbound at 16 kHz (Silero VAD's expected rate),
-    // outbound at the Piper TTS sample rate (typically 22 kHz). No
-    // framing, no protobuf, no JS dep — just bytes.
-    //
-    // Production UIs that want transcripts / control frames /
-    // metrics on the wire should swap to Pipecat's
-    // ProtobufFrameSerializer on the server and bundle
-    // @pipecat-ai/client-js in the browser.
+    const $ = (id) => document.getElementById(id);
+    const talkBtn=$("talk"), resetBtn=$("reset"), statusEl=$("status"), logEl=$("log");
+    const camboxEl=$("cambox"), ramEl=$("ram"), workingEl=$("working");
+    const alarmbarEl=$("alarmbar"), alarmTextEl=$("alarmText"), silenceBtn=$("silence");
+    const alarmListEl=$("alarmList"), monitorListEl=$("monitorList"), taskListEl=$("taskList"), reportListEl=$("reportList");
+    const titleEl=$("title"), ledeEl=$("lede");
 
-    const startBtn = document.getElementById("start");
-    const stopBtn = document.getElementById("stop");
-    const statusEl = document.getElementById("status");
-    const logEl = document.getElementById("log");
+    // VAD: START_RMS/SILENCE_RMS are FLOORS — the real gates adapt to the
+    // measured ambient noise floor (noiseFloor*MARGIN), so steady background
+    // noise won't trigger a turn but soft speech still does.
+    const START_RMS=0.022, SILENCE_RMS=0.013, START_FRAMES=3;
+    const SILENCE_MS=900, MIN_UTTER_MS=350, MAX_UTTER_MS=15000, TICK_MS=40;
+    const START_MARGIN=2.2, SILENCE_MARGIN=1.5, FLOOR_EMA=0.05;
+    let noiseFloor=0.01;
+    const IDLE_MS=25000, POLL_MS=3000;
 
-    let ws = null;
-    let audioCtx = null;
-    let mediaStream = null;
-    let workletNode = null;
-    let playbackQueue = [];
+    let agentName="the agent";
+    let mediaStream=null, audioCtx=null, analyser=null, floatBuf=null;
+    let recorder=null, chunks=[];
+    let sessionActive=false, capturing=false, speaking=false, busy=false, alarmRinging=false;
+    let loudFrames=0, captureStart=0, lastVoice=0, lastActivity=0;
+    let vadTimer=null, pollTimer=null, alarmTimer=null, workingTimer=null, introPlayed=false;
+    const knownTasks={}, seenNotes={}, seenAlarmEvents={}, seenReports={};
+    let sirenOsc=null, sirenGain=null, sirenInt=null;
 
-    function setStatus(text, active = false) {
-      statusEl.textContent = text;
-      statusEl.classList.toggle("active", active);
+    // ── audio: output ctx (for siren/chimes) + mic ctx share one AudioContext ──
+    function ensureOutputAudio() {
+      if (!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+      if (audioCtx.state === "suspended") audioCtx.resume();
     }
-
-    function log(msg, kind = "info") {
-      const entry = document.createElement("div");
-      entry.className = `log-entry ${kind}`;
-      const now = new Date().toLocaleTimeString();
-      entry.textContent = `[${now}] ${msg}`;
-      logEl.appendChild(entry);
-      logEl.scrollTop = logEl.scrollHeight;
+    async function ensureMic() {
+      ensureOutputAudio();
+      if (mediaStream) return;
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio:{channelCount:1,echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+      const src = audioCtx.createMediaStreamSource(mediaStream);
+      analyser = audioCtx.createAnalyser(); analyser.fftSize=1024; floatBuf=new Float32Array(analyser.fftSize);
+      src.connect(analyser);
     }
+    function rms(){ analyser.getFloatTimeDomainData(floatBuf); let s=0; for(let i=0;i<floatBuf.length;i++)s+=floatBuf[i]*floatBuf[i]; return Math.sqrt(s/floatBuf.length); }
+    function playChime(kind="done") {
+      if (!audioCtx) return;
+      const now=audioCtx.currentTime, notes = kind==="done" ? [660,880] : [520];
+      notes.forEach((f,i)=>{ const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+        o.type="sine"; o.frequency.value=f; o.connect(g); g.connect(audioCtx.destination);
+        const t=now+i*0.16; g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.25,t+0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001,t+0.18); o.start(t); o.stop(t+0.2); });
+    }
+    function startSiren() {
+      ensureOutputAudio();
+      if (sirenOsc || !audioCtx) return;
+      sirenOsc=audioCtx.createOscillator(); sirenGain=audioCtx.createGain(); sirenGain.gain.value=0.0001;
+      sirenOsc.type="square"; sirenOsc.connect(sirenGain); sirenGain.connect(audioCtx.destination); sirenOsc.start();
+      let hi=false; sirenInt=setInterval(()=>{ hi=!hi;
+        sirenOsc.frequency.setValueAtTime(hi?880:620,audioCtx.currentTime);
+        sirenGain.gain.setValueAtTime(0.16,audioCtx.currentTime); },500);
+    }
+    function stopSiren() {
+      if(sirenInt){clearInterval(sirenInt);sirenInt=null;}
+      if(sirenOsc){try{sirenOsc.stop();}catch{}sirenOsc.disconnect();sirenOsc=null;}
+      if(sirenGain){sirenGain.disconnect();sirenGain=null;}
+    }
+    function playWav(b64){ return new Promise(r=>{const a=new Audio("data:audio/wav;base64,"+b64); a.onended=r; a.onerror=r; a.play().catch(r);}); }
 
-    async function start() {
-      startBtn.disabled = true;
-      try {
-        mediaStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            channelCount: 1,
-            sampleRate: 16000,
-            echoCancellation: true,
-            noiseSuppression: true,
-          },
-        });
-      } catch (err) {
-        log(`Microphone access denied: ${err}`, "error");
-        setStatus("Microphone access denied.");
-        startBtn.disabled = false;
+    function setAvatar(s){ ramEl.className="ram "+s; }
+    function setStatus(t,k=""){ statusEl.textContent=t; statusEl.className="status"+(k?(" "+k):""); }
+    function addMsg(text,who){ const d=document.createElement("div"); d.className="msg "+who;
+      if(who==="sys"){d.textContent=text;} else { const label=who==="user"?"you":agentName;
+        d.innerHTML=`<span class="who">${label}:</span> `; d.appendChild(document.createTextNode(text)); }
+      logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight; }
+    function showLatency(t){ const el=$("lat"); if(!el||!t)return;
+      const ms=(t.total!=null?t.total:0); if(!ms){el.hidden=true;return;}
+      const parts=[]; if(t.stt!=null)parts.push("STT "+t.stt); if(t.llm!=null)parts.push("LLM "+t.llm);
+      if(t.tts!=null)parts.push("TTS "+t.tts);
+      el.textContent=(parts.length?parts.join(" · ")+" · ":"")+(ms/1000).toFixed(1)+"s";
+      el.hidden=false; }
+    function showWorking(cams){ if(workingTimer){clearTimeout(workingTimer);workingTimer=null;}
+      if(!cams||!cams.length){workingEl.hidden=true;return;}
+      workingEl.textContent = cams.length>2 ? `looked at ${cams.length} cameras` : "looked at "+cams.join(", ");
+      workingEl.hidden=false; workingTimer=setTimeout(()=>{workingEl.hidden=true;},6000); }
+
+    async function loadAgent(){ try{ const a=await (await fetch("/agent")).json();
+      if(a.name){ agentName=a.name; titleEl.textContent=agentName+" — OpenNVR Camera Agent"; }
+      if(a.text_mode){
+        // Lite/text profile: lead with typing; voice is optional.
+        document.getElementById("talk").style.display="none";
+        ledeEl.innerHTML=`Type a question to ${agentName} — e.g. <em>"how many people on cam1?"</em>`;
+        setStatus("Ready. Type a question.");
+      } else {
+        ledeEl.innerHTML=`Tap <strong>Talk</strong> and speak, or type below. ${agentName} answers from your cameras.`;
+      }
+    }catch{} }
+
+    // ── lite text turn ──
+    async function ask(){
+      const inp=$("askInput"), q=inp.value.trim(); if(!q) return;
+      inp.value=""; addMsg(q,"user"); setStatus("Thinking…"); setAvatar("thinking");
+      $("askBtn").disabled=true;
+      try{
+        const r=await fetch("/ask",{method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({text:q,camera:cameraParam()})});
+        const d=await r.json();
+        if(!r.ok){ addMsg("Error: "+(d.error||("HTTP "+r.status)),"sys"); }
+        else { if(d.reply) addMsg(d.reply,"agent"); showWorking(d.cameras_used); showLatency({total:d.latency_ms}); }
+        setStatus("Ready. Type a question.","");
+      }catch(err){ addMsg("Request failed: "+err.message,"sys"); setStatus("Error","error"); }
+      finally{ $("askBtn").disabled=false; setAvatar("idle"); }
+    }
+    async function loadCameras(){ try{ const r=await fetch("/cameras"); if(!r.ok)return;
+      for(const cam of ((await r.json()).cameras||[])){ const lab=document.createElement("label");
+        const role=(cam.role||"").trim(); const txt=role&&role!=="(no role configured)"?`${cam.camera_id} · ${role.slice(0,28)}`:cam.camera_id;
+        lab.innerHTML=`<input type="checkbox" class="cam-cb" value="${cam.camera_id}"> ${txt}`; camboxEl.appendChild(lab); }
+      const all=$("cam-all"), cbs=()=>[...document.querySelectorAll(".cam-cb")];
+      all.addEventListener("change",()=>{ if(all.checked) cbs().forEach(c=>{c.checked=false;}); });
+      camboxEl.addEventListener("change",(e)=>{ if(e.target.classList.contains("cam-cb")&&e.target.checked) all.checked=false;
+        if(!cbs().some(c=>c.checked)) all.checked=true; });
+    }catch{} }
+    async function useLocalCamera(){
+      const btn=$("useLocalCam"); if(btn) btn.disabled=true;
+      setStatus("Looking for a camera on this machine…");
+      try{
+        const r=await fetch("/devices/use",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})});
+        const data=await r.json();
+        const added=(data.added||[]);
+        if(!added.length){ setStatus("No new local camera found (it may already be in use).","error"); }
+        else{
+          for(const cam of added){ const lab=document.createElement("label");
+            lab.innerHTML=`<input type="checkbox" class="cam-cb" value="${cam.camera_id}" checked> ${cam.camera_id} · this machine`;
+            camboxEl.appendChild(lab); }
+          const all=$("cam-all"); if(all) all.checked=false;
+          setStatus(`Using this machine's camera (${added.map(c=>c.camera_id).join(", ")}). Ask a question!`,"ok");
+        }
+      }catch(err){ setStatus("Could not access a local camera: "+err.message,"error"); }
+      finally{ if(btn) btn.disabled=false; }
+    }
+    function cameraParam(){ const all=$("cam-all"); if(all&&all.checked) return "all";
+      const picked=[...document.querySelectorAll(".cam-cb:checked")].map(c=>c.value); return picked.length?picked.join(","):"all"; }
+
+    function pickMimeType(){ for(const t of ["audio/webm;codecs=opus","audio/webm","audio/ogg;codecs=opus","audio/mp4"])
+      if(window.MediaRecorder&&MediaRecorder.isTypeSupported(t))return t; return ""; }
+
+    async function playIntro(){ setStatus(agentName+" is introducing…"); setAvatar("speaking");
+      try{ const d=await (await fetch("/intro")).json(); if(d.name) agentName=d.name;
+        if(d.text) addMsg(d.text,"agent"); if(d.audio_b64){ speaking=true; await playWav(d.audio_b64); speaking=false; } }
+      catch{ addMsg("Hi, I'm "+agentName+", your OpenNVR camera agent.","agent"); } }
+
+    // ── listening loop ──
+    function vadTick(){ if(!sessionActive||speaking||busy||alarmRinging)return;
+      const now=performance.now();
+      if(!capturing && (now-lastActivity>IDLE_MS)){ pauseForIdle(); return; }
+      const level=rms();
+      // Gates adapt to ambient noise so background noise doesn't start a turn.
+      const startGate=Math.max(START_RMS, noiseFloor*START_MARGIN);
+      const silenceGate=Math.max(SILENCE_RMS, noiseFloor*SILENCE_MARGIN);
+      if(!capturing){
+        // Learn the ambient noise floor only from quiet frames (never from speech).
+        if(level<startGate){ noiseFloor=(1-FLOOR_EMA)*noiseFloor+FLOOR_EMA*level; }
+        loudFrames=level>startGate?loudFrames+1:0;
+        if(loudFrames>=START_FRAMES)startCapture();
         return;
       }
+      if(level>silenceGate){ lastVoice=now; lastActivity=now; }
+      const dur=now-captureStart;
+      if((now-lastVoice>SILENCE_MS && dur>MIN_UTTER_MS)||dur>MAX_UTTER_MS) stopCapture();
+    }
+    function startCapture(){ const m=pickMimeType(); chunks=[];
+      recorder=new MediaRecorder(mediaStream, m?{mimeType:m}:undefined);
+      recorder.ondataavailable=(e)=>{if(e.data&&e.data.size)chunks.push(e.data);}; recorder.onstop=onUtterance;
+      recorder.start(); capturing=true; captureStart=lastVoice=lastActivity=performance.now();
+      setAvatar("listening"); setStatus("Listening…","active"); }
+    function stopCapture(){ if(!recorder||recorder.state==="inactive")return; capturing=false; loudFrames=0;
+      setAvatar("thinking"); setStatus("Thinking…"); recorder.stop(); }
 
-      const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
-      ws = new WebSocket(wsUrl);
-      ws.binaryType = "arraybuffer";
-
-      ws.onopen = async () => {
-        setStatus("Connected. Listening — just speak.", true);
-        stopBtn.disabled = false;
-        log("WebSocket open");
-
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)({
-          sampleRate: 16000,
-        });
-        const source = audioCtx.createMediaStreamSource(mediaStream);
-
-        // ScriptProcessor is deprecated but works everywhere without
-        // an AudioWorklet build step. For v0.1 demo simplicity, fine.
-        const proc = audioCtx.createScriptProcessor(4096, 1, 1);
-        proc.onaudioprocess = (ev) => {
-          if (!ws || ws.readyState !== WebSocket.OPEN) return;
-          const f32 = ev.inputBuffer.getChannelData(0);
-          const i16 = floatToPcm16(f32);
-          ws.send(i16.buffer);
-        };
-        source.connect(proc);
-        proc.connect(audioCtx.destination);
-        workletNode = proc;
-      };
-
-      ws.onmessage = (ev) => {
-        if (typeof ev.data === "string") {
-          // Server-side transcript / status JSON messages.
-          try {
-            const msg = JSON.parse(ev.data);
-            if (msg.type === "transcript") {
-              log(`${msg.role === "user" ? "you" : "agent"}: ${msg.text}`);
-            }
-          } catch {
-            log(ev.data);
-          }
-        } else {
-          // Binary audio chunk — append to playback queue.
-          enqueuePlayback(new Int16Array(ev.data));
-        }
-      };
-
-      ws.onerror = () => log("WebSocket error", "error");
-      ws.onclose = () => {
-        setStatus("Disconnected.");
-        log("WebSocket closed");
-        cleanup();
-      };
+    async function onUtterance(){ const blob=new Blob(chunks,{type:recorder.mimeType||"audio/webm"});
+      if(blob.size<1200){ if(sessionActive){setAvatar("listening");setStatus("Listening…","active");} return; }
+      busy=true;
+      try{ const url="/converse?camera="+encodeURIComponent(cameraParam());
+        const resp=await fetch(url,{method:"POST",headers:{"Content-Type":"application/octet-stream"},body:blob});
+        if(!resp.ok){const e=await resp.json().catch(()=>({}));throw new Error(e.error||("HTTP "+resp.status));}
+        const data=await resp.json();
+        if(!data.transcript){ if(sessionActive){setAvatar("listening");setStatus("Didn't catch that — keep talking.","active");} return; }
+        addMsg(data.transcript,"user"); lastActivity=performance.now(); showWorking(data.cameras_used); showLatency(data.timings_ms);
+        if(data.reply) addMsg(data.reply,"agent");
+        if(data.audio_b64){ speaking=true; setAvatar("speaking"); await playWav(data.audio_b64); speaking=false; }
+        if(sessionActive){ setAvatar("listening"); setStatus("Listening…","active"); }
+      }catch(err){ addMsg("Request failed: "+err.message,"sys"); if(sessionActive){setAvatar("listening");setStatus("Error: "+err.message,"error");} }
+      finally{ busy=false; lastActivity=performance.now(); }
     }
 
-    function stop() {
-      setStatus("Stopping…");
-      if (ws && ws.readyState === WebSocket.OPEN) ws.close();
-      cleanup();
+    async function startSession(){ ensureOutputAudio();
+      try{ await ensureMic(); }catch(err){ setStatus("Microphone access denied.","error"); addMsg("Microphone access denied: "+err,"sys"); return; }
+      sessionActive=true; lastActivity=performance.now(); loudFrames=0;
+      talkBtn.textContent="⏹ Stop"; talkBtn.classList.add("listening");
+      if(!introPlayed){ introPlayed=true; await playIntro(); }
+      if(!sessionActive) return;
+      setAvatar("listening"); setStatus("Listening… just talk.","active");
+      if(!vadTimer) vadTimer=setInterval(vadTick,TICK_MS);
+      if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();},POLL_MS);
+      if(!alarmTimer) alarmTimer=setInterval(pollAlarms,2500);
     }
+    function stopSession(){ sessionActive=false; if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(capturing)stopCapture();
+      talkBtn.textContent="🎤 Talk"; talkBtn.classList.remove("listening"); setAvatar("idle"); setStatus("Stopped. Tap Talk to resume."); }
+    function pauseForIdle(){ sessionActive=false; if(vadTimer){clearInterval(vadTimer);vadTimer=null;}
+      talkBtn.textContent="🎙️ Enable talking"; talkBtn.classList.remove("listening"); setAvatar("idle");
+      setStatus("Paused — no conversation for a while. Tap Enable talking to resume.");
+      addMsg(agentName+" stopped listening after a quiet spell. Tap “Enable talking” to chat again.","sys"); }
 
-    function cleanup() {
-      if (workletNode) { workletNode.disconnect(); workletNode = null; }
-      if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; }
-      if (mediaStream) {
-        mediaStream.getTracks().forEach((t) => t.stop());
-        mediaStream = null;
-      }
-      ws = null;
-      startBtn.disabled = false;
-      stopBtn.disabled = true;
+    // ── tasks ──
+    async function pollTasks(){ let tasks; try{ tasks=(await (await fetch("/tasks")).json()).tasks||[]; }catch{ return; }
+      for(const t of tasks){ if((t.status==="done"||t.status==="error")&&knownTasks[t.id]!==t.status){
+        const msg=`Done with task #${t.id}: ${t.result||"no result"}`; addMsg(msg,"agent"); playChime("done"); await announce(msg); }
+        knownTasks[t.id]=t.status; }
+      renderTasks(tasks); }
+    function renderTasks(tasks){ const active=tasks.filter(t=>t.status==="queued"||t.status==="running");
+      const done=tasks.filter(t=>t.status==="done"||t.status==="error").slice(-3); const show=[...active,...done];
+      if(!show.length){ taskListEl.innerHTML='<div class="empty-note">No background tasks.</div>'; return; }
+      taskListEl.innerHTML="";
+      for(const t of show){ const running=t.status==="queued"||t.status==="running"; const d=document.createElement("div");
+        d.className="item "+(running?"running":"done"); d.innerHTML=`<span class="badge">${running?"⏳":(t.status==="error"?"⚠️":"✓")}</span>`;
+        const q=document.createElement("span"); q.className="q"; q.textContent=t.query+(running?" — working…":""); d.appendChild(q); taskListEl.appendChild(d); } }
+
+    async function announce(text){ if(!text||busy||speaking)return;
+      try{ const d=await (await fetch("/say",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text})})).json();
+        if(d.audio_b64){ speaking=true; setAvatar("speaking"); await playWav(d.audio_b64); speaking=false; if(sessionActive)setAvatar("listening"); } }catch{} }
+
+    // ── monitors ──
+    async function pollMonitors(){ let data; try{ data=await (await fetch("/monitors")).json(); }catch{ return; }
+      for(const n of (data.notifications||[])){ if(!seenNotes[n.id]){ seenNotes[n.id]=true; addMsg(n.text,"agent"); playChime("notify"); await announce(n.text); } }
+      renderMonitors(data.monitors||[]); }
+    function renderMonitors(monitors){ const active=monitors.filter(m=>m.active);
+      if(!active.length){ monitorListEl.innerHTML='<div class="empty-note">No active watches.</div>'; return; }
+      monitorListEl.innerHTML="";
+      for(const m of active){ const d=document.createElement("div"); d.className="item";
+        d.innerHTML=`<span class="badge">${m.kind==="count"?"🔢":"👁"}</span>`; const q=document.createElement("span"); q.className="q";
+        const cams=m.camera_ids.join(", ");
+        if(m.kind==="count"){ const cur=Object.values(m.current||{}).reduce((a,b)=>a+b,0), peak=Object.values(m.peak||{}).reduce((a,b)=>Math.max(a,b),0);
+          q.innerHTML=`${m.target} on ${cams} — <span class="count">now ${cur}, peak ${peak}</span>`; }
+        else { q.textContent=`${cams} for ${m.target}`; }
+        d.appendChild(q); const s=document.createElement("button"); s.className="stop"; s.title="Stop"; s.textContent="✕";
+        s.addEventListener("click",()=>stopMonitor(m.id)); d.appendChild(s); monitorListEl.appendChild(d); } }
+    async function stopMonitor(id){ try{ await fetch("/monitors/"+id,{method:"DELETE"}); }catch{} pollMonitors(); }
+
+    // ── scheduled reports ──
+    async function pollReports(){ let data; try{ data=await (await fetch("/reports")).json(); }catch{ return; }
+      for(const rep of (data.reports||[])){ if(!seenReports[rep.id]){ seenReports[rep.id]=true;
+        addMsg(`📋 ${rep.name}: ${rep.text}`,"agent"); playChime("done"); await announce(`${rep.name}. ${rep.text}`); } }
+      renderReports(data.schedules||[]); }
+    function renderReports(schedules){ const active=schedules.filter(s=>s.active);
+      if(!active.length){ reportListEl.innerHTML='<div class="empty-note">No scheduled reports.</div>'; return; }
+      reportListEl.innerHTML="";
+      for(const s of active){ const d=document.createElement("div"); d.className="item";
+        d.innerHTML='<span class="badge">📋</span>'; const q=document.createElement("span"); q.className="q";
+        q.textContent=`${s.name} · ${s.schedule}`; d.appendChild(q);
+        const x=document.createElement("button"); x.className="stop"; x.title="Cancel"; x.textContent="✕";
+        x.addEventListener("click",()=>stopReport(s.id)); d.appendChild(x); reportListEl.appendChild(d); } }
+    async function stopReport(id){ try{ await fetch("/reports/"+id,{method:"DELETE"}); }catch{} pollReports(); }
+
+    // ── alarms ──
+    async function pollAlarms(){ let data; try{ data=await (await fetch("/alarms")).json(); }catch{ return; }
+      for(const e of (data.events||[])){ if(!seenAlarmEvents[e.id]){ seenAlarmEvents[e.id]=true; addMsg("🚨 "+e.text,"agent"); } }
+      const names=(data.alarms||[]).filter(a=>a.triggered).map(a=>a.name);
+      if(data.ringing){ alarmRinging=true; alarmTextEl.textContent=names.length?("Alarm: "+names.join(", ")):"Alarm triggered";
+        alarmbarEl.hidden=false; setAvatar("speaking"); startSiren(); }
+      else { alarmRinging=false; alarmbarEl.hidden=true; stopSiren(); }
+      renderAlarms(data.alarms||[]); }
+    function renderAlarms(alarms){ const active=alarms.filter(a=>a.active);
+      if(!active.length){ alarmListEl.innerHTML='<div class="empty-note">No alarms armed.</div>'; return; }
+      alarmListEl.innerHTML="";
+      for(const a of active){ const d=document.createElement("div"); d.className="item"+(a.triggered?" ringing":"");
+        d.innerHTML=`<span class="badge">${a.triggered?"🚨":"🔔"}</span>`; const q=document.createElement("span"); q.className="q";
+        const when=a.window==="any time"?"":` · ${a.window}`; const contact=a.emergency_contact_configured?" · ☎":"";
+        q.textContent=`${a.name}: ${a.target} on ${a.camera_ids.join(", ")}${when}${contact}`; d.appendChild(q);
+        const s=document.createElement("button"); s.className="stop"; s.title="Disarm"; s.textContent="✕";
+        s.addEventListener("click",()=>disarmAlarm(a.id)); d.appendChild(s); alarmListEl.appendChild(d); } }
+    async function ackAlarms(){ ensureOutputAudio(); try{ await fetch("/alarms/ack",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});}catch{}
+      alarmRinging=false; alarmbarEl.hidden=true; stopSiren(); pollAlarms(); }
+    async function disarmAlarm(id){ try{ await fetch("/alarms/"+id,{method:"DELETE"});}catch{} pollAlarms(); }
+    async function addAlarm(body){ ensureOutputAudio();
+      try{ await fetch("/alarms",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}); addMsg(`Armed alarm: ${body.name}.`,"sys"); }catch{}
+      if(!alarmTimer) alarmTimer=setInterval(pollAlarms,2500); pollAlarms(); }
+
+    // ── wiring ──
+    silenceBtn.addEventListener("click", ackAlarms);
+    document.querySelectorAll(".preset").forEach(btn=>btn.addEventListener("click",()=>{
+      const body={name:btn.dataset.name,target:btn.dataset.target,camera_id:cameraParam()};
+      if(btn.dataset.after) body.after=btn.dataset.after; addAlarm(body); }));
+    $("askBtn").addEventListener("click", ask);
+    $("askInput").addEventListener("keydown",(e)=>{ if(e.key==="Enter") ask(); });
+    talkBtn.addEventListener("click",()=>{ ensureOutputAudio(); if(busy&&sessionActive)return; if(sessionActive)stopSession(); else startSession(); });
+    resetBtn.addEventListener("click",async()=>{ try{ await fetch("/reset",{method:"POST"}); logEl.innerHTML=""; addMsg("Conversation reset.","sys"); }catch{} });
+
+    async function loadNotify(){
+      try{ const s=await (await fetch("/notify")).json();
+        const row=$("notifyRow"), st=$("notifyStatus");
+        if(s.enabled){ st.textContent=`Alerts → ${s.channels} channel${s.channels===1?"":"s"}`; row.hidden=false; }
+        else { st.textContent="No external alert channels configured"; row.hidden=false; $("notifyTest").hidden=true; }
+      }catch{}
     }
+    $("notifyTest").addEventListener("click", async ()=>{
+      try{ const r=await fetch("/notify/test",{method:"POST"}); const d=await r.json();
+        addMsg(r.ok?`Test sent to ${d.delivered}/${d.channels} channel(s).`:("Test failed: "+(d.error||"")), "sys"); }catch{}
+    });
 
-    function floatToPcm16(f32) {
-      const out = new Int16Array(f32.length);
-      for (let i = 0; i < f32.length; i++) {
-        const s = Math.max(-1, Math.min(1, f32[i]));
-        out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-      }
-      return out;
-    }
-
-    // ── Playback (very small, single-shot per chunk) ────────────────
-    let playbackCtx = null;
-    let playbackTime = 0;
-    function enqueuePlayback(pcm16) {
-      if (!playbackCtx) {
-        playbackCtx = new (window.AudioContext || window.webkitAudioContext)({
-          sampleRate: 22050,  // Piper default
-        });
-        playbackTime = playbackCtx.currentTime;
-      }
-      const buf = playbackCtx.createBuffer(1, pcm16.length, playbackCtx.sampleRate);
-      const ch = buf.getChannelData(0);
-      for (let i = 0; i < pcm16.length; i++) {
-        ch[i] = pcm16[i] / 0x8000;
-      }
-      const node = playbackCtx.createBufferSource();
-      node.buffer = buf;
-      node.connect(playbackCtx.destination);
-      const startAt = Math.max(playbackCtx.currentTime, playbackTime);
-      node.start(startAt);
-      playbackTime = startAt + buf.duration;
-    }
-
-    startBtn.addEventListener("click", start);
-    stopBtn.addEventListener("click", stop);
+    const _ulc=$("useLocalCam"); if(_ulc) _ulc.addEventListener("click", useLocalCamera);
+    loadAgent(); loadCameras(); loadNotify(); setAvatar("idle");
+    renderTasks([]); renderMonitors([]); renderAlarms([]); renderReports([]);
+    alarmTimer = setInterval(pollAlarms, 2500);   // alarms ring even before Talk
   </script>
 </body>
 </html>
