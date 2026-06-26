@@ -117,6 +117,86 @@ services:
       retries: 20
 
   # ──────────────────────────────────────────────────────────────
+  # Moondream VLM adapter — visual Q&A + captioning (vs BLIP's caption-only).
+  # The LIGHTER, more capable caption adapter: quantized, no torch (~<1.5 GB vs
+  # BLIP's ~5.5 GB), and answers "what is he wearing/doing?". Swap to it by
+  # setting CAPTION_ADAPTER=moondream in .env — the register init below then
+  # registers THIS adapter and the agent uses it. (Image must be built/published
+  # first; see ai-adapter/adapters/moondream.) Runs in the same profiles so the
+  # swap is one flag; for the lightest setup, stop blip-adapter when using it.
+  moondream-adapter:
+    # Opt-in profile so the default Standard/Sentinel don't try to pull this
+    # (until it's published) or run both caption adapters. Use it with:
+    #   CAPTION_ADAPTER=moondream docker compose … \
+    #     --profile camera-agent-standard --profile caption-moondream up -d
+    profiles: [caption-moondream]
+    image: ghcr.io/open-nvr/moondream-adapter:${ADAPTER_TAG:-latest}
+    container_name: opennvr_moondream_adapter
+    restart: unless-stopped
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+    volumes:
+      - opennvr_moondream_models:/models
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9008/health', timeout=2).status_code == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 180s
+      retries: 20
+
+  # ──────────────────────────────────────────────────────────────
+  # Caption-adapter auto-registration (test-report S-5). On a clean install the
+  # caption adapter was NOT registered with KAI-C, so describe_camera silently
+  # fell back to the detector (Standard == Lite). This one-shot registers the
+  # chosen caption adapter so Standard/Sentinel actually use it. One flag:
+  # CAPTION_ADAPTER=blip (default) or moondream picks the name AND its URL.
+  # Profile-scoped so it never runs (or warns) in lite/demo.
+  # ──────────────────────────────────────────────────────────────
+  caption-adapter-register:
+    profiles: [camera-agent, camera-agent-standard]
+    image: alpine:3.20
+    container_name: opennvr_caption_register
+    restart: "no"
+    depends_on:
+      opennvr-core:
+        condition: service_healthy
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - CAPTION_ADAPTER=${CAPTION_ADAPTER:-blip}
+      - CAPTION_ADAPTER_URL=${CAPTION_ADAPTER_URL:-}
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        name="$${CAPTION_ADAPTER:-blip}"
+        url="$${CAPTION_ADAPTER_URL}"
+        if [ -z "$$url" ]; then
+          case "$$name" in
+            moondream) url="http://moondream-adapter:9008";;
+            *)         url="http://blip-adapter:9006";;
+          esac
+        fi
+        echo "Auto-registering caption adapter '$$name' -> $$url with KAI-C…"
+        i=0
+        while [ $$i -lt 30 ]; do
+          if wget -q -O- \
+               --header="Content-Type: application/json" \
+               --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
+               --post-data="{\"name\":\"$$name\",\"url\":\"$$url\"}" \
+               http://opennvr-core:8100/api/v1/adapters/register >/dev/null 2>&1; then
+            echo "Registered caption adapter '$$name'."; exit 0
+          fi
+          i=$$((i+1)); echo "register attempt $$i/30 failed (adapter warming up?); retry in 5s"; sleep 5
+        done
+        echo "WARN: could not register '$$name' after retries — describe_camera will fall back to the detector." >&2
+        exit 0
+    networks:
+      - opennvr_internal
+
+  # ──────────────────────────────────────────────────────────────
   # Ollama — local LLM runtime. We use the official upstream image
   # which is stable, well-maintained, and identical to what
   # developers run on their laptops today.
@@ -254,15 +334,18 @@ services:
         ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
         lhost=$$(sed_esc "$${CAMERA_AGENT_LISTEN_HOST}")
         omodel=$$(sed_esc "$${OLLAMA_MODEL}")
+        capa=$$(sed_esc "$${CAPTION_ADAPTER}")
         sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
             -e "s/[$$][{]CAMERA_AGENT_LISTEN_HOST[}]/$$lhost/g" \
             -e "s/[$$][{]OLLAMA_MODEL[}]/$$omodel/g" \
+            -e "s/[$$][{]CAPTION_ADAPTER[}]/$$capa/g" \
             < /template/config.docker.yml > /generated/config.yml
         echo "Wrote /generated/config.yml from template."
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen3:1.7b}
+      - CAPTION_ADAPTER=${CAPTION_ADAPTER:-blip}
     volumes:
       - ./examples/camera-agent:/template:ro
       - opennvr_camera_agent_config:/generated
@@ -384,14 +467,17 @@ services:
         ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
         lhost=$$(sed_esc "$${CAMERA_AGENT_LISTEN_HOST}")
         omodel=$$(sed_esc "$${OLLAMA_MODEL}")
+        capa=$$(sed_esc "$${CAPTION_ADAPTER}")
         sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
             -e "s/[$$][{]CAMERA_AGENT_LISTEN_HOST[}]/$$lhost/g" \
             -e "s/[$$][{]OLLAMA_MODEL[}]/$$omodel/g" \
+            -e "s/[$$][{]CAPTION_ADAPTER[}]/$$capa/g" \
             < /template/config.docker.standard.yml > /generated/config.yml
         echo "Wrote standard /generated/config.yml from template."
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
+      - CAPTION_ADAPTER=${CAPTION_ADAPTER:-blip}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen3:1.7b}
     volumes:
       - ./examples/camera-agent:/template:ro
@@ -517,6 +603,92 @@ services:
     networks:
       - opennvr_internal
 
+  # ──────────────────────────────────────────────────────────────
+  # llama.cpp brain — the LIGHT LLM path. The server image is a few
+  # hundred MB vs Ollama's ~10 GB (Ollama bundles CUDA/ROCm GPU libs).
+  # Serves an OpenAI-compatible API; the camera-agent uses its OpenAI
+  # client to talk to it — no Ollama, no model-pull.
+  #   docker compose -f docker-compose.tier0.yml \
+  #                  -f docker-compose.camera-agent.yml \
+  #                  --profile camera-agent-llamacpp up -d
+  # ``-hf`` auto-downloads the GGUF once (cached in a volume). For an
+  # OFFLINE/local_only build, pre-download the GGUF and mount it + swap
+  # the command to ``-m /models/<file>.gguf`` instead of ``-hf``.
+  # ──────────────────────────────────────────────────────────────
+  llamacpp:
+    profiles: [camera-agent-llamacpp]
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: opennvr_llamacpp
+    restart: unless-stopped
+    command:
+      - -hf
+      - ${LLAMACPP_HF_REPO:-Qwen/Qwen3-1.7B-GGUF:Q4_K_M}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --jinja            # enable the chat template — needed for tool-calling
+      - --ctx-size
+      - "4096"
+    volumes:
+      - opennvr_llamacpp_models:/root/.cache/llama.cpp
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 300s     # first run downloads the GGUF
+      retries: 30
+
+  camera-agent-config-init-llamacpp:
+    profiles: [camera-agent-llamacpp]
+    image: alpine:3.20
+    container_name: opennvr_camera_agent_config_init_llamacpp
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        sed_esc() { printf '%s' "$$1" | sed -e 's/\\/\\\\/g; s/&/\\&/g; s/\//\\\//g'; }
+        ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
+        lhost=$$(sed_esc "$${CAMERA_AGENT_LISTEN_HOST}")
+        sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
+            -e "s/[$$][{]CAMERA_AGENT_LISTEN_HOST[}]/$$lhost/g" \
+            < /template/config.docker.llamacpp.yml > /generated/config.yml
+        echo "Wrote llamacpp /generated/config.yml from template."
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
+    volumes:
+      - ./examples/camera-agent:/template:ro
+      - opennvr_camera_agent_config_llamacpp:/generated
+
+  camera-agent-llamacpp:
+    profiles: [camera-agent-llamacpp]
+    build:
+      context: .
+      dockerfile: examples/camera-agent/Dockerfile
+    image: opennvr/camera-agent:local-build
+    container_name: opennvr_camera_agent_llamacpp
+    restart: unless-stopped
+    depends_on:
+      camera-agent-config-init-llamacpp:
+        condition: service_completed_successfully
+      llamacpp:
+        condition: service_healthy
+      opennvr-core:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:9100:9100"  # demo UI (text chat)
+    volumes:
+      - opennvr_camera_agent_config_llamacpp:/app/config:ro
+    command:
+      - --config
+      - /app/config/config.yml
+    networks:
+      - opennvr_internal
+
 volumes:
   # Ollama model store — persisted so the LLM survives ``compose
   # down``. ``ollama-model-pull`` writes here once; subsequent
@@ -540,3 +712,10 @@ volumes:
   opennvr_camera_agent_config_standard:
   # Generated combined config.yml for the camera-agent-combined profile.
   opennvr_camera_agent_config_combined:
+  # Moondream quantized model cache (when baked it lives in the image; this
+  # persists any runtime-mounted model across restarts).
+  opennvr_moondream_models:
+  # llama.cpp GGUF cache (the -hf download persists across restarts).
+  opennvr_llamacpp_models:
+  # Generated llamacpp config.yml for the camera-agent-llamacpp profile.
+  opennvr_camera_agent_config_llamacpp:

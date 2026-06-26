@@ -56,6 +56,23 @@ Rule of thumb: **nano + text = lightest fully-local; cloud LLM = lightest on the
 local machine.** Below `qwen3:0.6b` there isn't a model that tool-calls reliably,
 so that's the floor.
 
+### Disk / image size (it's not "for CPU")
+
+Two images look huge but the size isn't a CPU requirement:
+
+- **`ollama/ollama` ~10 GB** — the official image **bundles NVIDIA CUDA + AMD
+  ROCm GPU libraries** so it *can* use a GPU. On a CPU box that's ~6–7 GB of
+  unused libs. **Lighter alternative: the `camera-agent-llamacpp` profile** runs
+  llama.cpp's server (a few hundred MB) serving a GGUF — same llama.cpp core,
+  ~9 GB less disk, talked to via the OpenAI client (`--profile
+  camera-agent-llamacpp`).
+- **`blip-adapter` ~5.5 GB** — PyTorch + transformers + baked weights (the torch
+  CPU wheel alone is ~2.5–3 GB). **Lighter alternative: the Moondream adapter**
+  (quantized, *no torch*) is well under 1.5 GB **and** adds visual Q&A.
+
+So the light, capable stack is **llama.cpp (brain) + Moondream (eyes) + YOLOv8n +
+faster-whisper** — a fraction of the disk of Ollama + BLIP, no GPU needed.
+
 ### Measuring it
 Every `/converse` turn returns a `timings_ms` breakdown
 (`transcode`/`stt`/`llm`/`tts`/`total`), and the text `/ask` turn returns

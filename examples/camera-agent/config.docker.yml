@@ -36,7 +36,7 @@ piper_token: ${INTERNAL_API_KEY}
 # their intended names so they light up automatically once registered.)
 detection_adapter: default
 recognition_adapter: insightface
-caption_adapter: blip
+caption_adapter: ${CAPTION_ADAPTER}   # blip (default) or moondream — auto-registered
 
 # Tools advertised to the LLM. Tier 0 only registers the YOLOv8 object
 # detector, so the demo exposes just the two tools that actually work:
