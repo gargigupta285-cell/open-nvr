@@ -21,12 +21,20 @@ Supports both WS-Security (via onvif-zeep) and HTTP Digest authentication.
 HTTP Digest is more compatible with Hikvision and similar devices.
 """
 
-from fastapi import APIRouter, HTTPException, Query
+import ipaddress
 
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+
+from core.auth import get_current_superuser
+from core.database import get_db
+from routers.network import get_camera_lan_subnet
 from services.onvif_digest_service import (
     connect_and_get_profiles,
     fetch_profiles_digest,
     get_stream_uri_digest,
+    get_system_datetime,
+    set_system_datetime,
 )
 
 # Import both services - digest is the preferred one for Hikvision compatibility
@@ -37,20 +45,75 @@ from services.onvif_service import (
     ptz_continuous_move,
     ptz_presets,
     ptz_stop,
+    scan_onvif_subnet,
 )
 
 router = APIRouter(tags=["onvif"])
 
 
 @router.get("/discover")
-async def discover():
+async def discover(
+    cidr: str | None = Query(
+        None,
+        description="Subnet CIDR to scan, e.g. 192.168.1.0/24. Must be within the configured Camera LAN subnet.",
+    ),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_superuser),
+):
+    """Discover ONVIF cameras via unicast subnet scan (works in Docker bridge mode).
+
+    Uses the Camera LAN subnet configured under Network settings as the scan boundary.
+    An optional narrower CIDR may be supplied but must fall within that range.
+    Multicast WS-Discovery is attempted as a best-effort fallback and merged with results.
+    """
+    configured_cidr = get_camera_lan_subnet(db)
+    if not configured_cidr:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No Camera LAN subnet configured. "
+                "Set subnet_cidr under Network → Camera LAN settings before running discovery."
+            ),
+        )
+
+    scan_cidr = configured_cidr
+    if cidr:
+        # Validate that the requested CIDR is a subnet of (or equal to) the configured range
+        try:
+            requested = ipaddress.ip_network(cidr, strict=False)
+            configured = ipaddress.ip_network(configured_cidr, strict=False)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid CIDR: {exc}")
+        if not requested.subnet_of(configured):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Requested CIDR {cidr} is not within the configured "
+                    f"Camera LAN subnet {configured_cidr}."
+                ),
+            )
+        scan_cidr = cidr
+
+    # Unicast scan — works across Docker bridge SNAT
     try:
-        devices = await discover_onvif_devices()
-        return {"devices": devices}
+        devices = await scan_onvif_subnet(scan_cidr)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    # Best-effort multicast fallback (works only in host-mode or on native LAN)
+    try:
+        multicast_devices = await discover_onvif_devices()
+        seen_ips = {d["ip"] for d in devices}
+        for md in multicast_devices:
+            if md.get("ip") and md["ip"] not in seen_ips:
+                devices.append(md)
+                seen_ips.add(md["ip"])
+    except Exception:
+        pass
+
+    return {"devices": devices, "scan_cidr": scan_cidr}
 
 
 @router.post("/connect")
@@ -157,6 +220,39 @@ async def camera_ptz_stop(
     try:
         result = await ptz_stop(ip, username, password, profile_token, port)
         return {"ip": ip, "profileToken": profile_token, "result": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/camera/{ip}/time")
+async def camera_get_time(
+    ip: str,
+    port: int = Query(80, ge=1, le=65535),
+):
+    """Read the camera clock via GetSystemDateAndTime (no credentials needed)."""
+    try:
+        result = await get_system_datetime(ip, port)
+        return {"ip": ip, **result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/camera/{ip}/time/sync")
+async def camera_sync_time(
+    ip: str,
+    port: int = Query(80, ge=1, le=65535),
+    username: str = Query(...),
+    password: str = Query(...),
+    current_user=Depends(get_current_superuser),
+):
+    """Push the NVR's current UTC time to the camera (superuser only)."""
+    try:
+        result = await set_system_datetime(ip, username, password, port)
+        return {"ip": ip, **result}
     except HTTPException:
         raise
     except Exception as e:

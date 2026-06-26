@@ -39,6 +39,15 @@ from services.audit_service import write_audit_log
 router = APIRouter(prefix="/network", tags=["network"])
 
 
+def get_camera_lan_subnet(db: Session) -> str | None:
+    """Return the operator-configured Camera LAN subnet CIDR, or None if not set."""
+    row = db.query(SecuritySetting).filter(SecuritySetting.key == "network_camera_lan").first()
+    if not row:
+        return None
+    cfg = {**_default_camera_lan(), **_load_json(row)}
+    return cfg.get("subnet_cidr") or cfg.get("ipv4_address") or None
+
+
 def _get_or_init(
     db: Session, key: str, default_value: dict[str, Any]
 ) -> SecuritySetting:
