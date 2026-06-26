@@ -178,11 +178,11 @@ _SOAP_ENVELOPE = """\
   </soap:Body>
 </soap:Envelope>"""
 
-_ONVIF_CANDIDATE_PORTS = (80, 8000, 8080)
+_ONVIF_CANDIDATE_PORTS = (80,)
 
 
 async def probe_onvif_device(
-    ip: str, port: int = 80, timeout: float = 2.0
+    ip: str, port: int = 80, timeout: float = 0.5
 ) -> dict[str, Any] | None:
     """Probe a single IP:port for an ONVIF device service (no auth needed).
 
@@ -216,7 +216,7 @@ async def probe_onvif_device(
 async def scan_onvif_subnet(
     cidr: str,
     ports: tuple[int, ...] = _ONVIF_CANDIDATE_PORTS,
-    concurrency: int = 32,
+    concurrency: int = 64,
 ) -> list[dict[str, Any]]:
     """Scan a CIDR for ONVIF devices using unicast TCP probes.
 

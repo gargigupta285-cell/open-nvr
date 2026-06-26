@@ -59,7 +59,7 @@ export const cameraService = {
   getCameraMediaMTXStatus: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}/mediamtx-status`),
 
   // ONVIF
-  onvifDiscover: (params?: { cidr?: string }) => api.get('/api/v1/discover', { params }),
+  onvifDiscover: (params?: { cidr?: string | string[] }) => api.get('/api/v1/discover', { params }),
   onvifConnect: (
     ip: string,
     params: { username: string; password: string; port?: number }

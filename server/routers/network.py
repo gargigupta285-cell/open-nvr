@@ -40,12 +40,28 @@ router = APIRouter(prefix="/network", tags=["network"])
 
 
 def get_camera_lan_subnet(db: Session) -> str | None:
-    """Return the operator-configured Camera LAN subnet CIDR, or None if not set."""
+    """Return the primary Camera LAN subnet CIDR, or None if not set."""
     row = db.query(SecuritySetting).filter(SecuritySetting.key == "network_camera_lan").first()
     if not row:
         return None
     cfg = {**_default_camera_lan(), **_load_json(row)}
     return cfg.get("subnet_cidr") or cfg.get("ipv4_address") or None
+
+
+def get_camera_lan_subnets(db: Session) -> list[str]:
+    """Return all configured Camera LAN scan subnets (primary + additional)."""
+    row = db.query(SecuritySetting).filter(SecuritySetting.key == "network_camera_lan").first()
+    if not row:
+        return []
+    cfg = {**_default_camera_lan(), **_load_json(row)}
+    subnets: list[str] = []
+    primary = cfg.get("subnet_cidr") or cfg.get("ipv4_address")
+    if primary:
+        subnets.append(primary)
+    for extra in cfg.get("scan_subnets") or []:
+        if extra and extra not in subnets:
+            subnets.append(extra)
+    return subnets
 
 
 def _get_or_init(
@@ -79,6 +95,7 @@ def _default_camera_lan() -> dict[str, Any]:
         "mtu": 1500,
         "description": "Isolated camera network (no internet).",
         "subnet_cidr": None,
+        "scan_subnets": [],
     }
 
 

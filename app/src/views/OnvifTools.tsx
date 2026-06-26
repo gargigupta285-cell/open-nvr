@@ -46,7 +46,7 @@ export function OnvifTools() {
       const res = await apiService.onvifDiscover(params)
       setDevices(res.data.devices || [])
       // Back-fill the CIDR field with the configured Camera LAN subnet on first run
-      if (!scanCidr && res.data.scan_cidr) setScanCidr(res.data.scan_cidr)
+      if (!scanCidr && res.data.scan_cidrs?.[0]) setScanCidr(res.data.scan_cidrs[0])
       // Select first ONVIF-looking device automatically
       const first = (res.data.devices || []).find((d: Device) => (d.service_urls || []).some((u: string) => u.toLowerCase().includes('/onvif')))
       if (first?.ip) setSelectedIp(first.ip)

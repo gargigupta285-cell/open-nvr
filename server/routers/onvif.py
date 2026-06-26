@@ -21,6 +21,7 @@ Supports both WS-Security (via onvif-zeep) and HTTP Digest authentication.
 HTTP Digest is more compatible with Hikvision and similar devices.
 """
 
+import asyncio
 import ipaddress
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -28,7 +29,7 @@ from sqlalchemy.orm import Session
 
 from core.auth import get_current_superuser
 from core.database import get_db
-from routers.network import get_camera_lan_subnet
+from routers.network import get_camera_lan_subnet, get_camera_lan_subnets
 from services.onvif_digest_service import (
     connect_and_get_profiles,
     fetch_profiles_digest,
@@ -53,67 +54,83 @@ router = APIRouter(tags=["onvif"])
 
 @router.get("/discover")
 async def discover(
-    cidr: str | None = Query(
+    cidr: list[str] | None = Query(
         None,
-        description="Subnet CIDR to scan, e.g. 192.168.1.0/24. Must be within the configured Camera LAN subnet.",
+        description="One or more subnet CIDRs to scan (e.g. cidr=192.168.1.0/24&cidr=10.0.0.0/24). "
+                    "Falls back to all subnets configured in Camera LAN settings.",
     ),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_superuser),
 ):
     """Discover ONVIF cameras via unicast subnet scan (works in Docker bridge mode).
 
-    Uses the Camera LAN subnet configured under Network settings as the scan boundary.
-    An optional narrower CIDR may be supplied but must fall within that range.
-    Multicast WS-Discovery is attempted as a best-effort fallback and merged with results.
+    Scans all configured Camera LAN subnets in parallel.  An optional cidr parameter
+    (repeatable) overrides the configured list; each must be within the primary subnet
+    when one is configured.  Multicast WS-Discovery runs as a best-effort fallback.
     """
-    configured_cidr = get_camera_lan_subnet(db)
-    if not configured_cidr:
+    configured_subnets = get_camera_lan_subnets(db)
+    primary_cidr = get_camera_lan_subnet(db)
+
+    if cidr:
+        scan_cidrs: list[str] = []
+        for c in cidr:
+            try:
+                requested = ipaddress.ip_network(c, strict=False)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid CIDR '{c}': {exc}")
+            if primary_cidr:
+                try:
+                    configured = ipaddress.ip_network(primary_cidr, strict=False)
+                    if not requested.subnet_of(configured):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"CIDR {c} is not within the configured Camera LAN subnet {primary_cidr}.",
+                        )
+                except HTTPException:
+                    raise
+                except ValueError:
+                    pass
+            scan_cidrs.append(c)
+    elif configured_subnets:
+        scan_cidrs = configured_subnets
+    else:
         raise HTTPException(
             status_code=400,
             detail=(
-                "No Camera LAN subnet configured. "
-                "Set subnet_cidr under Network → Camera LAN settings before running discovery."
+                "No Camera LAN subnet configured and no cidr parameter provided. "
+                "Either set subnet_cidr under Network → Camera LAN settings, "
+                "or pass a cidr query parameter (e.g. cidr=192.168.1.0/24)."
             ),
         )
 
-    scan_cidr = configured_cidr
-    if cidr:
-        # Validate that the requested CIDR is a subnet of (or equal to) the configured range
-        try:
-            requested = ipaddress.ip_network(cidr, strict=False)
-            configured = ipaddress.ip_network(configured_cidr, strict=False)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid CIDR: {exc}")
-        if not requested.subnet_of(configured):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Requested CIDR {cidr} is not within the configured "
-                    f"Camera LAN subnet {configured_cidr}."
-                ),
-            )
-        scan_cidr = cidr
-
-    # Unicast scan — works across Docker bridge SNAT
+    # Scan all subnets in parallel, deduplicate by IP
     try:
-        devices = await scan_onvif_subnet(scan_cidr)
-    except HTTPException:
-        raise
+        results_per_subnet = await asyncio.gather(
+            *[scan_onvif_subnet(c) for c in scan_cidrs],
+            return_exceptions=True,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+    seen_ips: set[str] = set()
+    devices: list[dict] = []
+    for result in results_per_subnet:
+        if isinstance(result, list):
+            for d in result:
+                if d.get("ip") and d["ip"] not in seen_ips:
+                    seen_ips.add(d["ip"])
+                    devices.append(d)
+
     # Best-effort multicast fallback (works only in host-mode or on native LAN)
     try:
-        multicast_devices = await discover_onvif_devices()
-        seen_ips = {d["ip"] for d in devices}
-        for md in multicast_devices:
+        for md in await discover_onvif_devices():
             if md.get("ip") and md["ip"] not in seen_ips:
-                devices.append(md)
                 seen_ips.add(md["ip"])
+                devices.append(md)
     except Exception:
         pass
 
-    return {"devices": devices, "scan_cidr": scan_cidr}
+    return {"devices": devices, "scan_cidrs": scan_cidrs}
 
 
 @router.post("/connect")
