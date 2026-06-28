@@ -242,6 +242,29 @@ def looks_like_noise(transcript: str) -> bool:
     return False
 
 
+def _humanize_for_speech(text: str, cameras=None) -> str:
+    """Make a raw tool-result string sound natural when spoken: refer to each
+    camera by its location ("the front door") instead of its raw id
+    ("front_door"), drop underscores, and turn the "name: detail" colon into a
+    comma. Used for the fallback reply so the user never hears
+    "On front_door colon 2 people"."""
+    s = text or ""
+    if cameras:
+        # Replace longer ids first so "front_door_2" isn't half-matched.
+        for cam in sorted(cameras, key=lambda c: len(c.camera_id), reverse=True):
+            role = (getattr(cam, "role", "") or "").strip()
+            if role and role != "(no role configured)":
+                s = s.replace(cam.camera_id, role)
+    return s.replace("_", " ").replace(": ", ", ")
+
+
+def _clean_for_speech(text: str) -> str:
+    """Strip markdown artifacts (``*`` ``#`` `` ` ``) a small model might emit,
+    so TTS doesn't read them aloud. Leaves underscores alone (handled where
+    camera ids are mapped to locations)."""
+    return re.sub(r"[*`#]+", "", text or "").strip()
+
+
 def agent_name_for(voice_gender: str | None) -> str:
     return AGENT_NAMES.get((voice_gender or DEFAULT_VOICE_GENDER).strip().lower(),
                            AGENT_NAMES[DEFAULT_VOICE_GENDER])
@@ -1535,6 +1558,7 @@ class CameraAgentRuntime:
             self.ollama = OllamaClient(
                 url=cfg.ollama_url, token=cfg.ollama_token, model=cfg.llm_model,
                 num_thread=cfg.llm_num_threads, num_ctx=cfg.llm_num_ctx,
+                think=cfg.llm_think,
             )
         self.piper = PiperClient(url=cfg.piper_url, token=cfg.piper_token)
 
@@ -2036,6 +2060,10 @@ class CameraAgentRuntime:
             f"Cameras available to you:\n{roster}\n\n"
             f"Always pass one of the camera_id values exactly as listed "
             f"when calling a tool.\n\n"
+            f"Your replies are SPOKEN ALOUD. Refer to each camera by its "
+            f"location (e.g. 'the front door'), never its raw id like "
+            f"'front_door'. Answer in 1-2 short, natural sentences a person "
+            f"would say out loud — no ids, colons, lists, or markdown.\n\n"
             f"You can look at ONE camera, SEVERAL, or 'all' of them — pass "
             f"camera_id='all' (or a camera_ids list) when the user asks about "
             f"every camera or more than one.\n\n"
@@ -2676,8 +2704,15 @@ _CAMERA_WORDS: tuple[str, ...] = (
     "anyone", "anybody", "someone", "somebody", "nobody",
     "person", "people", "man", "woman", "kid", "child", "face",
     "door", "porch", "outside", "yard", "driveway", "garage", "street",
+    # scene locations
+    "gate", "window", "fence", "entrance", "hallway", "room", "kitchen",
+    "lot", "lobby", "stairs", "balcony",
     "happening", "detect", "count", "package", "parcel", "delivery",
-    "dog", "cat", "animal", "car", "cars", "truck", "vehicle", "bike",
+    "dog", "dogs", "cat", "cats", "animal", "car", "cars", "truck", "trucks",
+    "vehicle", "bike", "people", "persons",
+    # visual-attribute verbs ("what is he wearing/doing?") — these are why a
+    # caption/VQA question still triggers grounding instead of a fabrication
+    "wearing", "wear", "dressed", "holding", "carrying", "doing",
     "visible", "present", "moving", "movement", "motion",
 )
 _CAMERA_RE = re.compile(r"\b(" + "|".join(_CAMERA_WORDS) + r")\b", re.IGNORECASE)
@@ -2716,6 +2751,13 @@ _DESCRIBE_WORDS: tuple[str, ...] = (
 )
 _DESCRIBE_RE = re.compile(r"\b(" + "|".join(_DESCRIBE_WORDS) + r")\b", re.IGNORECASE)
 
+# Presence / count phrasing ("how many…", "are there any…", "is there a…",
+# "count…") → the detector, even when the object noun is a plural the detection
+# vocab doesn't list ("dogs"), or absent entirely ("are there any?").
+_COUNT_RE = re.compile(
+    r"\b(how many|how much|are there|is there|number of|count|anyone|anybody|"
+    r"\bany\b)\b", re.IGNORECASE)
+
 
 def _pick_forced_tool(text: str) -> str:
     """Choose the forced-grounding tool by question type. Description/attribute/
@@ -2727,7 +2769,7 @@ def _pick_forced_tool(text: str) -> str:
     t = text or ""
     if _DESCRIBE_RE.search(t):
         return "describe_camera"
-    if _DETECTION_RE.search(t):
+    if _COUNT_RE.search(t) or _DETECTION_RE.search(t):
         return "detect_objects"
     return "describe_camera"
 
@@ -2816,6 +2858,10 @@ async def _run_conversation_turn(
     final = ""
     grounded = False   # did any tool actually run this turn?
     forced = False     # have we already injected a forced detection?
+    last_tool_result = ""  # most recent tool output — used as a fallback when
+    #                        the model returns empty content on the compose turn
+    #                        (small/thinking models sometimes do), so the user
+    #                        gets the real detection/caption instead of "Sorry".
     for iteration in range(max_iterations):
         response = await runtime.ollama.chat(
             messages=messages,
@@ -2839,6 +2885,7 @@ async def _run_conversation_turn(
             for call in tool_calls:
                 name, result = await _invoke_tool(runtime, call)
                 logger.info("converse: tool %s -> %s", name, result[:120])
+                last_tool_result = result or last_tool_result
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call.get("id", ""),
@@ -2879,6 +2926,7 @@ async def _run_conversation_turn(
             }
             name, result = await _invoke_tool(runtime, call)
             logger.info("converse: FORCED grounding on %s -> %s", cam, result[:120])
+            last_tool_result = result or last_tool_result
             messages.append({"role": "assistant", "content": "", "tool_calls": [call]})
             messages.append({
                 "role": "tool", "tool_call_id": "forced-0",
@@ -2892,7 +2940,15 @@ async def _run_conversation_turn(
     else:
         logger.warning("converse: tool loop exhausted")
 
-    return final or "Sorry, I'm having trouble answering that right now."
+    # Prefer the model's composed reply; if it returned empty content but a tool
+    # actually ran, surface that result (humanised for speech) so the user gets
+    # the real answer instead of an apology (test-report: agent always replied
+    # "Sorry…").
+    if final:
+        return _clean_for_speech(final)
+    if last_tool_result:
+        return _humanize_for_speech(last_tool_result, runtime.cfg.cameras)
+    return "Sorry, I'm having trouble answering that right now."
 
 
 def _load_demo_html() -> str:
