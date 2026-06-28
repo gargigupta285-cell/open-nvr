@@ -135,6 +135,10 @@ services:
     restart: unless-stopped
     environment:
       - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+      # The published image is code-only; supply the int8 model. Easiest:
+      # set MOONDREAM_MODEL_URL in .env → downloaded once into the volume below.
+      # For strict local_only, drop the .mf.gz into the volume or bake it instead.
+      - OPENNVR_MOONDREAM_MODEL_URL=${MOONDREAM_MODEL_URL:-}
     volumes:
       - opennvr_moondream_models:/models
     networks:
