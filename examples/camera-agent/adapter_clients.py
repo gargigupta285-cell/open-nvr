@@ -259,6 +259,18 @@ class OllamaClient(_ReusableClientMixin):
         # prompt; keep this comfortably above the adapter-side timeout so the
         # first turn completes instead of being cut off.
         timeout_seconds: float = 300.0,
+        # Limited-hardware knobs. num_thread caps CPU cores Ollama uses (None =
+        # all cores; set e.g. 2 to keep the rest of the machine responsive).
+        # num_ctx sizes the context window: 4096 holds the full tool prompt;
+        # lower it (e.g. 2048, when enabled_tools keeps the prompt short) to
+        # save RAM and speed up prefill on weak boxes.
+        num_thread: int | None = None,
+        num_ctx: int = 4096,
+        # Reasoning toggle for thinking models (Qwen3). None = don't send the
+        # field (non-thinking models). False = disable thinking so the model
+        # spends its token budget on the ANSWER, not a hidden <think> block
+        # (which otherwise leaves message.content empty → "Sorry…").
+        think: bool | None = None,
     ) -> None:
         # Talk to Ollama's NATIVE chat API. The deployment points
         # ``ollama_url`` at the raw ollama runtime (http://ollama:11434),
@@ -270,6 +282,9 @@ class OllamaClient(_ReusableClientMixin):
         self._token = token
         self._model = model
         self._timeout = timeout_seconds
+        self._num_thread = num_thread
+        self._num_ctx = num_ctx
+        self._think = think
 
     async def chat(
         self,
@@ -308,15 +323,27 @@ class OllamaClient(_ReusableClientMixin):
                 # re-prefill (~110s) on EVERY call instead of reusing cache.
                 # 4096 holds the whole prompt so the prefix stays stable and
                 # the prewarm + iter0→iter1 cache reuse actually kick in.
-                "num_ctx": 4096,
+                "num_ctx": self._num_ctx,
             },
         }
+        if self._num_thread:
+            # Cap CPU cores so the LLM doesn't peg a limited machine.
+            body["options"]["num_thread"] = self._num_thread
+        if self._think is not None:
+            # Top-level (NOT under options) for Ollama's thinking models.
+            body["think"] = self._think
         if tools:
             # Native /api/chat decides tool use automatically; there is no
             # ``tool_choice`` field (it would be ignored). Just advertise
             # the tools.
             body["tools"] = tools
         resp = await self._client().post(self._url, json=body, headers=headers)
+        if "think" in body and getattr(resp, "status_code", 200) >= 400:
+            # Some Ollama versions / non-thinking models reject the ``think``
+            # field. Retry once without it rather than failing the turn.
+            logger.info("ollama: request rejected with think=%s; retrying without it", body["think"])
+            body.pop("think", None)
+            resp = await self._client().post(self._url, json=body, headers=headers)
         resp.raise_for_status()
         return resp.json()
 
