@@ -67,15 +67,25 @@ def build_tool_definitions(
             "function": {
                 "name": "describe_camera",
                 "description": (
-                    "Describe what's currently visible on one camera, several "
-                    "cameras, or all of them. Use for 'what's on the porch?' / "
-                    "'what do you see on all cameras?'."
+                    "Describe what's visible on one camera, several, or all of "
+                    "them, OR answer a specific question about the scene. Use "
+                    "for 'what's on the porch?', 'what is the person wearing?', "
+                    "'what is he doing?', 'is the gate open?'. Pass the user's "
+                    "actual question in 'question' so the vision model can answer "
+                    "it directly."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "camera_id": _camera_prop,
                         "camera_ids": _camera_ids_prop,
+                        "question": {
+                            "type": "string",
+                            "description": (
+                                "Optional: the specific question to answer about "
+                                "the scene, e.g. 'what is the person wearing?'."
+                            ),
+                        },
                     },
                     "required": ["camera_id"],
                 },
@@ -225,26 +235,37 @@ class CameraTools:
         cams = self._resolve_cameras(args)
         if isinstance(cams, str):  # ERROR
             return cams
-        clauses = [await self._describe_one(c) for c in cams]
+        # Optional VQA question ("what is he wearing?", "is the gate open?").
+        # A vision-language adapter (Moondream / SmolVLM / Qwen-VL) answers it
+        # grounded in the frame; a plain captioner (BLIP) ignores it and still
+        # returns a scene caption. Either way the agent gets a real answer
+        # instead of guessing (test-report S-6).
+        question = str(args.get("question") or "").strip() or None
+        clauses = [await self._describe_one(c, question) for c in cams]
         return self._join_clauses(clauses)
 
-    async def _describe_one(self, camera_id: str) -> str:
+    async def _describe_one(self, camera_id: str, question: str | None = None) -> str:
         try:
             frame = await self._ctx.get_frame(camera_id)
         except LookupError:
             return f"{camera_id} is not configured"
         except FrameSourceError as exc:
-            logger.info("%s: frame fetch failed (camera offline?): %s", camera_id, exc)
+            logger.warning("VISION DEGRADED: %s frame fetch failed (camera offline / bad RTSP path?): %s", camera_id, exc)
             return f"{camera_id} appears to be offline"
-        # Prefer a real scene caption when the caption adapter is
+        # Prefer a real scene caption / VQA answer when the caption adapter is
         # available. Send the task explicitly for symmetry with
         # recognize_faces and so the wire shape is legible in audit logs.
         try:
-            response = await self._caption.infer(
-                frame_jpeg=frame,
-                extra={"task": "scene_caption"},
-            )
-            caption = ((response.get("result") or {}).get("caption") or "").strip()
+            extra: dict[str, Any] = {"task": "scene_caption"}
+            if question:
+                # Forward the question both ways so any VQA adapter naming picks
+                # it up; captioners that don't understand it simply ignore it.
+                extra["question"] = question
+                extra["prompt"] = question
+            response = await self._caption.infer(frame_jpeg=frame, extra=extra)
+            result = response.get("result") or {}
+            # VQA adapters return ``answer``; captioners return ``caption``.
+            caption = (result.get("answer") or result.get("caption") or "").strip()
             if caption:
                 return f"{camera_id}: {caption}"
         except Exception:
@@ -252,9 +273,10 @@ class CameraTools:
             # only the object detector). Fall back to describing the scene
             # from detected objects so the user still gets a useful answer
             # instead of an error.
-            logger.info(
-                "describe_camera: caption adapter unavailable, "
-                "falling back to object detection"
+            logger.warning(
+                "VISION DEGRADED: describe_camera caption adapter unavailable for %s "
+                "(not registered with KAI-C?); falling back to object detection",
+                camera_id,
             )
         return await self._describe_via_detection(camera_id, frame)
 
@@ -371,7 +393,7 @@ class CameraTools:
         except LookupError:
             return f"{camera_id} is not configured"
         except FrameSourceError as exc:
-            logger.info("%s: frame fetch failed (camera offline?): %s", camera_id, exc)
+            logger.warning("VISION DEGRADED: %s frame fetch failed (camera offline / bad RTSP path?): %s", camera_id, exc)
             return f"{camera_id} appears to be offline"
         try:
             response = await self._detect.infer(frame_jpeg=frame)
@@ -398,7 +420,7 @@ class CameraTools:
         except LookupError:
             return f"{camera_id} is not configured"
         except FrameSourceError as exc:
-            logger.info("%s: frame fetch failed (camera offline?): %s", camera_id, exc)
+            logger.warning("VISION DEGRADED: %s frame fetch failed (camera offline / bad RTSP path?): %s", camera_id, exc)
             return f"{camera_id} appears to be offline"
         try:
             response = await self._recognise.infer(
@@ -406,7 +428,7 @@ class CameraTools:
                 extra={"task": "face_recognition"},
             )
         except Exception:
-            logger.info("recognize_faces: recognition adapter unavailable")
+            logger.warning("VISION DEGRADED: recognize_faces recognition adapter unavailable (not registered?)")
             return f"{camera_id}: face recognition isn't enabled"
         result = response.get("result") or {}
         if result.get("recognized"):

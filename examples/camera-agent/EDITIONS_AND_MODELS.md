@@ -67,8 +67,8 @@ and weight every choice by CPU latency because that *is* the user experience.
 | **Object detection** | **YOLOv8n** (ONNX) | The workhorse — counts people/cars/etc. Tiny, fast, runs everywhere | ~6 MB · ~20–40 ms/frame CPU |
 | Detection (accuracy opt) | YOLO11m | When nano misses small/distant objects | ~40 MB |
 | **Open-vocab find** | **OWLv2-base** (existing `vlm` adapter) | "Find the red truck / a person on a bicycle" — no retraining, query in plain text | ~600 MB |
-| **Scene description / VQA** | **BLIP-base** now → **Moondream2** next | BLIP captions today; Moondream2 (~1.8B) adds real *visual Q&A* ("is the gate open?") at edge size — a feature unlock, not just a caption | BLIP ~990 MB · Moondream2 ~1.7 GB |
-| **Speech-to-text** | **faster-whisper `base.en`** (CTranslate2) | ~4× faster than vanilla Whisper on CPU at equal accuracy; English-only avoids foreign-token hallucination | ~140 MB · near-real-time |
+| **Scene understanding / VQA** | **a VLM**: Moondream2 (CPU/edge), SmolVLM-2B or Qwen2.5-VL-3B (richer, **video-capable**) — replacing BLIP | This is the key model for *conversations about video*. BLIP only *captions* ("a man at a desk") and can't answer "what is he wearing/doing?" (test-report S-6). A VLM does real **visual Q&A + dialogue**, and SmolVLM/Qwen-VL take **video frames** directly. All **Apache-2.0** | Moondream2 0.5B ~0.5 GB / 2B ~1.7 GB · SmolVLM-2B ~2 GB · Qwen2.5-VL-3B ~3 GB |
+| **Speech-to-text** | **faster-whisper `base.en`** (CTranslate2; `tiny.en` for low power, `small.en` for max accuracy) | Accurate on natural speech AND fewer silence hallucinations than tiny; ~4× faster than vanilla Whisper on CPU; English-only avoids foreign-token hallucination | ~140 MB · near-real-time |
 | **Text-to-speech** | **Piper** (`en_US-libritts-high`, `-low` for snappier first audio) | Already the most efficient quality TTS for local; sub-second synthesis | ~60 MB |
 | **Brain — default** | **Qwen3-1.7B** (non-thinking) | Per Qwen, ~Qwen2.5-3B quality with better tool-calling, at ~half the RAM; the default across editions. Run non-thinking (`llm_think: false`) for snappy replies | ~1.5–2 GB · ~10–20 tok/s CPU |
 | **Brain — nano** | **Qwen3-0.6B** | The floor that still tool-calls; `quickstart.sh --nano`. Misses more tool calls (forced-grounding mitigates) — for demo / very low-RAM boxes | **~0.5 GB** |
@@ -89,6 +89,39 @@ open?") from Moondream2, **open-vocabulary search** ("tell me if a red truck
 shows up") from OWLv2, **hands-free voice with a named persona** from
 faster-whisper + Piper, and **reliable standing monitors & alarms** from
 Qwen2.5's tool-calling. None of these requires training anything.
+
+## Best models for the purpose: no hallucination + good video conversation
+
+Two goals deserve a direct answer, because they drove the picks above:
+
+**No hallucination.** This is handled *structurally*, not just by hoping the
+model behaves:
+- **Forced grounding** — the agent injects a real tool result and re-asks, so
+  the model literally *cannot* answer a camera question from imagination; if it
+  tries, the tool result overrides it (shipped).
+- **Qwen3 tool-adherence** — Qwen3 calls the tool on the first pass far more
+  often than Qwen2.5/Llama-3.2 did, so the override fires less. For near-zero
+  hallucination, `qwen3:4b` or a cloud model calls tools every time (the live
+  test confirmed gpt-4o-mini never fabricated).
+- **STT noise filter + base.en** — drops Whisper's silence hallucinations so
+  noise can't start a phantom turn.
+- **Routing fix** — "describe/what's-he-doing/wearing" now goes to the VLM, not
+  the object detector, so answers are about the *actual* attributes.
+
+**Good conversations about video.** The single biggest lever is replacing the
+BLIP *captioner* with a **vision-language model** (Moondream2 / SmolVLM /
+Qwen2.5-VL — all Apache-2.0). A captioner can only say "a man at a desk"; a VLM
+*answers questions* ("what is he wearing?", "is the gate open?", "what just
+happened?") and SmolVLM/Qwen-VL ingest **video frames**, not just stills. The
+agent is already wired for this: `describe_camera` forwards the user's question
+to the vision adapter, uses its `answer`, and degrades gracefully to a caption
+when only BLIP is present. Register a VLM adapter as the caption adapter and
+video Q&A works end-to-end — no agent changes.
+
+Pairing: **Qwen3 (brain) + a VLM (eyes) + faster-whisper base.en (ears) + Piper
+(voice)** — all small, all Apache-2.0, all CPU-runnable — is the
+no-hallucination, video-capable, sovereign stack. The one piece still to build
+is the VLM adapter itself (the agent side is ready).
 
 ## Run on the hardware you already have — zero camera provisioning
 

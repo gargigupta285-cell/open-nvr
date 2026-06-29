@@ -101,6 +101,11 @@ class AppConfig:
     # non-thinking models (no effect). Set False to force snappy, non-thinking
     # tool-calling (appends Qwen3's ``/no_think`` switch); True to allow it.
     llm_think: bool | None = None
+    # Limited-hardware knobs (local Ollama only). llm_num_threads caps CPU cores
+    # (None = all). llm_num_ctx sizes the context window (lower = less RAM /
+    # faster prefill, but must hold the prompt).
+    llm_num_threads: int | None = None
+    llm_num_ctx: int = 4096
 
     # Lite/text mode: the UI defaults to a text box (no mic) and the voice
     # adapters (Whisper/Piper) aren't required. The fast, low-resource on-ramp
@@ -235,6 +240,50 @@ def looks_like_noise(transcript: str) -> bool:
     if len(words) <= 2 and all(w in _STT_NOISE_PHRASES for w in words):
         return True
     return False
+
+
+def _humanize_for_speech(text: str, cameras=None) -> str:
+    """Make a raw tool-result string sound natural when spoken: refer to each
+    camera by its location ("the front door") instead of its raw id
+    ("front_door"), drop underscores, and turn the "name: detail" colon into a
+    comma. Used for the fallback reply so the user never hears
+    "On front_door colon 2 people"."""
+    s = text or ""
+    if cameras:
+        # Replace longer ids first so "front_door_2" isn't half-matched.
+        for cam in sorted(cameras, key=lambda c: len(c.camera_id), reverse=True):
+            role = (getattr(cam, "role", "") or "").strip()
+            if role and role != "(no role configured)":
+                s = s.replace(cam.camera_id, role)
+    return s.replace("_", " ").replace(": ", ", ")
+
+
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_THINK_OPEN_RE = re.compile(r"<think>.*$", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_think(text: str) -> str:
+    """Remove Qwen3-style ``<think>…</think>`` reasoning so it never reaches the
+    user/TTS. Handles a *truncated* block too (the model ran out of tokens
+    mid-thought, leaving an unclosed ``<think>`` with no answer after it).
+    Returns whatever real answer remains (often empty when all the budget went
+    to thinking — the caller then falls back to the tool result)."""
+    s = _THINK_BLOCK_RE.sub("", text or "")
+    s = _THINK_OPEN_RE.sub("", s)
+    return re.sub(r"</?think>", "", s, flags=re.IGNORECASE)
+
+
+def _clean_for_speech(text: str, cameras=None) -> str:
+    """Make an LLM reply speakable: strip ``<think>`` reasoning + markdown, and
+    map any raw camera id the model echoed ("cam1") to its location."""
+    s = _strip_think(text or "")
+    s = re.sub(r"[*`#]+", "", s)
+    if cameras:
+        for cam in sorted(cameras, key=lambda c: len(c.camera_id), reverse=True):
+            role = (getattr(cam, "role", "") or "").strip()
+            if role and role != "(no role configured)":
+                s = s.replace(cam.camera_id, role)
+    return s.strip()
 
 
 def agent_name_for(voice_gender: str | None) -> str:
@@ -1405,6 +1454,8 @@ def load_config(path: str | Path) -> AppConfig:
         llm_base_url=raw.get("llm_base_url"),
         llm_api_key=raw.get("llm_api_key"),
         llm_think=(None if raw.get("llm_think") is None else bool(raw.get("llm_think"))),
+        llm_num_threads=(int(raw["llm_num_threads"]) if raw.get("llm_num_threads") else None),
+        llm_num_ctx=int(raw.get("llm_num_ctx") or 4096),
         piper_url=_str("piper_url", "http://127.0.0.1:9001"),
         piper_token=_str("piper_token", ""),
         llm_model=_str("llm_model", "llama3.2:3b"),
@@ -1525,8 +1576,16 @@ class CameraAgentRuntime:
             logger.info("LLM brain: OpenAI-compatible at %s (model=%s)",
                         cfg.llm_base_url or cfg.ollama_url, cfg.llm_model)
         else:
+            # Auto-disable thinking for Qwen3 (a thinking model) unless the
+            # operator set llm_think explicitly — on CPU, thinking burns the
+            # token budget and leaves no answer. Non-thinking models: send nothing.
+            _think = cfg.llm_think
+            if _think is None and "qwen3" in (cfg.llm_model or "").lower():
+                _think = False
             self.ollama = OllamaClient(
                 url=cfg.ollama_url, token=cfg.ollama_token, model=cfg.llm_model,
+                num_thread=cfg.llm_num_threads, num_ctx=cfg.llm_num_ctx,
+                think=_think,
             )
         self.piper = PiperClient(url=cfg.piper_url, token=cfg.piper_token)
 
@@ -1600,6 +1659,16 @@ class CameraAgentRuntime:
             _list_people_tool(),
             _forget_face_tool(),
         ]
+        # Honour enabled_tools across ALL advertised tools (base + control) —
+        # not just the base set. Previously the control tools (monitor/alarm/
+        # report/face/background) were appended unconditionally, so enabled_tools
+        # had "no effect" (test-report #4). Fewer tools = shorter prompt + far
+        # fewer wrong-tool picks by small models.
+        if cfg.enabled_tools is not None:
+            allow = set(cfg.enabled_tools)
+            self.tool_definitions = [
+                t for t in self.tool_definitions if t["function"]["name"] in allow
+            ]
         self.tool_handlers = {
             "describe_camera": self.tools.describe_camera,
             "detect_objects": self.tools.detect_objects,
@@ -2011,11 +2080,20 @@ class CameraAgentRuntime:
         )
         prompt = (
             f"Your name is {self.agent_name}. You are the OpenNVR camera agent. "
-            f"When you introduce yourself, use the name {self.agent_name}.\n\n"
+            f"Speak in the FIRST person — say 'I see…', 'I'm watching…', never "
+            f"'{self.agent_name} sees…' in the third person. Only use the name "
+            f"{self.agent_name} when you introduce yourself.\n\n"
             f"{self.cfg.system_prompt.strip()}\n\n"
             f"Cameras available to you:\n{roster}\n\n"
             f"Always pass one of the camera_id values exactly as listed "
             f"when calling a tool.\n\n"
+            f"Your replies are SPOKEN ALOUD. Refer to each camera by its "
+            f"location (e.g. 'the front door'), never its raw id like "
+            f"'front_door'. Answer in 1-2 short, natural sentences a person "
+            f"would say out loud — no ids, colons, lists, or markdown.\n"
+            f"Give the ANSWER directly. Never reply with filler like 'I'll "
+            f"check', 'let me see', or 'one moment' — if you need to look, call "
+            f"the tool and then state what you found.\n\n"
             f"You can look at ONE camera, SEVERAL, or 'all' of them — pass "
             f"camera_id='all' (or a camera_ids list) when the user asks about "
             f"every camera or more than one.\n\n"
@@ -2140,7 +2218,9 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         return {
             "status": "ok",
             "cameras": [cam.camera_id for cam in runtime.cfg.cameras],
-            "tools": list(runtime.tool_handlers.keys()),
+            # The tools actually ADVERTISED to the LLM (honours enabled_tools),
+            # not every registered handler (test-report #4).
+            "tools": [t["function"]["name"] for t in runtime.tool_definitions],
             "llm_model": runtime.cfg.llm_model,
         }
 
@@ -2654,8 +2734,15 @@ _CAMERA_WORDS: tuple[str, ...] = (
     "anyone", "anybody", "someone", "somebody", "nobody",
     "person", "people", "man", "woman", "kid", "child", "face",
     "door", "porch", "outside", "yard", "driveway", "garage", "street",
+    # scene locations
+    "gate", "window", "fence", "entrance", "hallway", "room", "kitchen",
+    "lot", "lobby", "stairs", "balcony",
     "happening", "detect", "count", "package", "parcel", "delivery",
-    "dog", "cat", "animal", "car", "cars", "truck", "vehicle", "bike",
+    "dog", "dogs", "cat", "cats", "animal", "car", "cars", "truck", "trucks",
+    "vehicle", "bike", "people", "persons",
+    # visual-attribute verbs ("what is he wearing/doing?") — these are why a
+    # caption/VQA question still triggers grounding instead of a fabrication
+    "wearing", "wear", "dressed", "holding", "carrying", "doing",
     "visible", "present", "moving", "movement", "motion",
 )
 _CAMERA_RE = re.compile(r"\b(" + "|".join(_CAMERA_WORDS) + r")\b", re.IGNORECASE)
@@ -2682,12 +2769,39 @@ _DETECTION_WORDS: tuple[str, ...] = (
 )
 _DETECTION_RE = re.compile(r"\b(" + "|".join(_DETECTION_WORDS) + r")\b", re.IGNORECASE)
 
+# Attribute / activity / appearance questions ("what is he WEARING?", "what's
+# he DOING?", "DESCRIBE the scene", "what's HAPPENING?") want a scene
+# description (BLIP caption, or a VQA model), NOT the object detector — even
+# though they usually also contain an object noun like "man" that would
+# otherwise match _DETECTION_RE. These take precedence (test-report S-4/L-3/V-3).
+_DESCRIBE_WORDS: tuple[str, ...] = (
+    "describe", "description", "detail", "details", "wearing", "wear", "dressed",
+    "doing", "holding", "carrying", "looks like", "look like", "looking",
+    "appearance", "happening", "going on", "scene", "activity", "colour", "color",
+)
+_DESCRIBE_RE = re.compile(r"\b(" + "|".join(_DESCRIBE_WORDS) + r")\b", re.IGNORECASE)
+
+# Presence / count phrasing ("how many…", "are there any…", "is there a…",
+# "count…") → the detector, even when the object noun is a plural the detection
+# vocab doesn't list ("dogs"), or absent entirely ("are there any?").
+_COUNT_RE = re.compile(
+    r"\b(how many|how much|are there|is there|number of|count|anyone|anybody|"
+    r"\bany\b)\b", re.IGNORECASE)
+
 
 def _pick_forced_tool(text: str) -> str:
-    """Choose the forced-grounding tool by question type: ``detect_objects``
-    (yolov8) for object presence/count asks, else ``describe_camera`` (BLIP
-    scene caption, which itself falls back to detection if BLIP is down)."""
-    return "detect_objects" if _DETECTION_RE.search(text or "") else "describe_camera"
+    """Choose the forced-grounding tool by question type. Description/attribute/
+    activity questions → ``describe_camera`` (BLIP caption / VQA, which falls
+    back to the detector if no caption adapter is registered). Object presence/
+    count questions → ``detect_objects`` (yolov8). Describe takes precedence so
+    'what is the man wearing?' isn't routed to the detector just because it
+    contains 'man'."""
+    t = text or ""
+    if _DESCRIBE_RE.search(t):
+        return "describe_camera"
+    if _COUNT_RE.search(t) or _DETECTION_RE.search(t):
+        return "detect_objects"
+    return "describe_camera"
 
 
 # Questions about the camera ROSTER / system config ("how many cameras are
@@ -2774,6 +2888,11 @@ async def _run_conversation_turn(
     final = ""
     grounded = False   # did any tool actually run this turn?
     forced = False     # have we already injected a forced detection?
+    tools_called = 0   # how many tool calls ran (for the turn-outcome log)
+    last_tool_result = ""  # most recent tool output — used as a fallback when
+    #                        the model returns empty content on the compose turn
+    #                        (small/thinking models sometimes do), so the user
+    #                        gets the real detection/caption instead of "Sorry".
     for iteration in range(max_iterations):
         response = await runtime.ollama.chat(
             messages=messages,
@@ -2797,6 +2916,8 @@ async def _run_conversation_turn(
             for call in tool_calls:
                 name, result = await _invoke_tool(runtime, call)
                 logger.info("converse: tool %s -> %s", name, result[:120])
+                tools_called += 1
+                last_tool_result = result or last_tool_result
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call.get("id", ""),
@@ -2836,7 +2957,10 @@ async def _run_conversation_turn(
                              "arguments": {"camera_id": cam}},
             }
             name, result = await _invoke_tool(runtime, call)
-            logger.info("converse: FORCED grounding on %s -> %s", cam, result[:120])
+            logger.info("converse: FORCED grounding (%s) on %s -> %s",
+                        tool_name, cam, result[:120])
+            tools_called += 1
+            last_tool_result = result or last_tool_result
             messages.append({"role": "assistant", "content": "", "tool_calls": [call]})
             messages.append({
                 "role": "tool", "tool_call_id": "forced-0",
@@ -2850,7 +2974,80 @@ async def _run_conversation_turn(
     else:
         logger.warning("converse: tool loop exhausted")
 
-    return final or "Sorry, I'm having trouble answering that right now."
+    # Prefer the model's composed reply (stripped of <think> reasoning + ids).
+    # If it's empty after stripping (a thinking model burned its budget on
+    # reasoning) but a tool ran, surface that result. For camera-roster/config
+    # questions, answer deterministically — small models often just deflect
+    # ("I'll check…") and there's no tool to ground them.
+    cleaned = _clean_for_speech(final, runtime.cfg.cameras)
+    if cleaned and not _is_deflection(cleaned):
+        reply, source = cleaned, "llm"
+    elif _is_config_question(user_text):
+        reply, source = _roster_answer(runtime.cfg.cameras), "roster"
+    elif last_tool_result:
+        reply, source = _humanize_for_speech(last_tool_result, runtime.cfg.cameras), "tool_fallback"
+    else:
+        reply, source = (cleaned or "Sorry, I'm having trouble answering that right now."), "none"
+
+    # One structured line that explains WHY the reply was what it was — so a bad
+    # answer is diagnosable from the logs (camera offline, adapter down, the LLM
+    # not calling tools, a deflection, etc.) without re-running.
+    degraded = _degradation_reasons(last_tool_result, final, cleaned,
+                                    grounded, tools_called)
+    log = logger.warning if degraded else logger.info
+    log("converse: TURN reply_source=%s grounded=%s forced=%s tools=%d "
+        "issues=%s reply=%r", source, grounded, forced, tools_called,
+        ",".join(degraded) or "none", reply[:90])
+    return reply
+
+
+# Hollow "acknowledgement" replies a small model emits instead of answering
+# ("I see… I'll check the camera.") — treat as no-answer so we ground/fallback.
+_DEFLECTION_RE = re.compile(
+    r"^(i see\b.*)?(i'?ll|let me|i will|i am going to|i'?m going to|checking|"
+    r"one moment|hold on|give me a)\b", re.IGNORECASE)
+
+
+def _is_deflection(text: str) -> bool:
+    t = (text or "").strip().lower().lstrip(".… ")
+    return bool(_DEFLECTION_RE.match(t)) and len(t) < 80
+
+
+def _degradation_reasons(last_tool_result: str, final: str, cleaned: str,
+                         grounded: bool, tools_called: int) -> list[str]:
+    """Classify why a turn might have produced a poor answer, for the TURN log.
+    Returns short tags (camera_offline, adapter_unavailable, llm_think_only, …)
+    so a bad reply is diagnosable straight from the logs."""
+    issues: list[str] = []
+    lt = (last_tool_result or "").lower()
+    if "appears to be offline" in lt:
+        issues.append("camera_offline")
+    if "is not configured" in lt:
+        issues.append("camera_not_configured")
+    if any(s in lt for s in ("unavailable", "isn't enabled",
+                             "not yet", "couldn't", "can't be reached")):
+        issues.append("adapter_unavailable")
+    if (final or "").strip() and not (cleaned or "").strip():
+        issues.append("llm_think_only")       # whole token budget went to <think>
+    elif not (final or "").strip() and not grounded:
+        issues.append("llm_empty")
+    elif cleaned and _is_deflection(cleaned):
+        issues.append("llm_deflection")
+    return issues
+
+
+def _roster_answer(cameras) -> str:
+    """Deterministic answer for 'how many cameras / which cameras' — never
+    relies on the model."""
+    cams = list(cameras or [])
+    if not cams:
+        return "No cameras are configured yet."
+    names = [(getattr(c, "role", "") or c.camera_id) for c in cams]
+    names = [n for n in names if n and n != "(no role configured)"] or \
+            [c.camera_id for c in cams]
+    if len(cams) == 1:
+        return f"There is one camera: {names[0]}."
+    return f"There are {len(cams)} cameras: {', '.join(names)}."
 
 
 def _load_demo_html() -> str:
