@@ -80,6 +80,11 @@ class AppConfig:
     # silence hallucinations ("Thank you.", "you", "Thanks for watching") so
     # ambient noise doesn't start a spurious conversation turn.
     stt_noise_filter: bool = True
+    # Wake-word gate (voice only). When True, the agent only answers an
+    # utterance that's addressed to it by name ("Hey Shailaja, …") — so it
+    # doesn't respond to the TV, a side conversation, or its own echoed reply.
+    # The UI exposes a per-session toggle that overrides this default.
+    wake_word_required: bool = True
     ollama_url: str = "http://127.0.0.1:9004"
     ollama_token: str = ""
 
@@ -289,6 +294,57 @@ def _clean_for_speech(text: str, cameras=None) -> str:
 def agent_name_for(voice_gender: str | None) -> str:
     return AGENT_NAMES.get((voice_gender or DEFAULT_VOICE_GENDER).strip().lower(),
                            AGENT_NAMES[DEFAULT_VOICE_GENDER])
+
+
+# ── Wake-word gating (voice) ────────────────────────────────────────
+# Only treat a spoken utterance as a question when it's addressed to the
+# agent by name ("Hey Shailaja, what's at the door?"). Without this, ANY
+# speech in the room — the TV, a side conversation, or the agent re-hearing
+# its own reply through the speakers — becomes a turn, which is the single
+# biggest cause of spurious/looping/"hallucinated" answers in a live room.
+# Transcript-side: reuses Whisper, adds no model, stays fully local.
+
+# Common Whisper mis-hearings of each persona name → all count as the wake word.
+_WAKE_ALIASES = {
+    "shailaja": ["shailaja", "shailja", "shailaj", "shailu", "shyla", "shaila"],
+    "sidhu": ["sidhu", "sidh", "sid"],
+}
+# Optional address prefix the user might say before the name.
+_WAKE_LEAD = r"(?:hey|hi|hello|ok|okay|yo|hai)?[\s,]*"
+
+
+def wake_phrases(agent_name: str) -> list[str]:
+    """Lowercase names that invoke the agent (persona name + known aliases)."""
+    base = (agent_name or "").strip().lower()
+    names = list(_WAKE_ALIASES.get(base, []))
+    if base and base not in names:
+        names.insert(0, base)
+    return names
+
+
+def match_wake(transcript: str, agent_name: str) -> tuple[bool, str]:
+    """Return ``(invoked, question)``.
+
+    ``invoked`` is True when the transcript opens (within the first couple of
+    words) by addressing the agent by name. ``question`` is the remainder with
+    the wake phrase + any leading "hey"/punctuation stripped — '' when the user
+    said only the name ("Hey Shailaja"). Uses word boundaries so a name that is
+    a short string (e.g. "sid") doesn't match inside another word ("consider").
+    """
+    t = (transcript or "").strip()
+    if not t:
+        return False, ""
+    low = t.lower()
+    for name in wake_phrases(agent_name):
+        m = re.search(_WAKE_LEAD + r"\b" + re.escape(name) + r"\b", low)
+        # Require the address at the very start (allow a short lead-in like
+        # "hey "), so the name mid-sentence doesn't trigger.
+        if not m or m.start() > 6:
+            continue
+        rest = t[m.end():]
+        rest = re.sub(r"^[\s,.:;!?-]+", "", rest)  # drop punctuation after name
+        return True, rest.strip()
+    return False, ""
 
 
 def greeting_for(name: str) -> str:
@@ -1448,6 +1504,7 @@ def load_config(path: str | Path) -> AppConfig:
         whisper_url=_str("whisper_url", "http://127.0.0.1:9003"),
         whisper_token=_str("whisper_token", ""),
         stt_noise_filter=bool(raw.get("stt_noise_filter", True)),
+        wake_word_required=bool(raw.get("wake_word_required", True)),
         ollama_url=_str("ollama_url", "http://127.0.0.1:9004"),
         ollama_token=_str("ollama_token", ""),
         llm_provider=_str("llm_provider", "ollama"),
@@ -2492,6 +2549,9 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         import time as _t
         t0 = _t.perf_counter()
         runtime.tools.last_cameras_used = []
+        # Fresh frame per question (see /converse): each turn sees the current
+        # moment, not a frame cached from a question seconds ago.
+        runtime.context.invalidate_frame_cache()
         try:
             reply = await _run_conversation_turn(
                 runtime, demo_history, text, preferred_camera=camera_hint
@@ -2571,22 +2631,52 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             return JSONResponse({"transcript": "", "reply": "", "audio_b64": None,
                                  "timings_ms": timings, "noise": bool(transcript)})
 
-        # 3) LLM tool-calling loop.
+        # 3) Wake-word gate (voice only). Unless the UI turned it off, only
+        #    respond when the utterance is addressed to the agent by name — so
+        #    it ignores the TV, side-chatter, and its own echoed reply (the main
+        #    source of spurious/looping answers in a live room).
+        wake_q = request.query_params.get("wake")
+        require_wake = (
+            runtime.cfg.wake_word_required if wake_q is None
+            else wake_q.strip().lower() not in ("0", "false", "off", "no")
+        )
+        question = transcript
+        if require_wake:
+            invoked, stripped = match_wake(transcript, runtime.agent_name)
+            if not invoked:
+                logger.info("converse: not addressed to %s; ignoring %r",
+                            runtime.agent_name, transcript)
+                timings["total"] = int((_t.perf_counter() - t0) * 1000)
+                return JSONResponse({"transcript": transcript, "reply": "",
+                                     "audio_b64": None, "timings_ms": timings,
+                                     "invoked": False})
+            question = stripped
+
+        # 4) Answer. A bare wake word ("Hey Shailaja") with no question gets a
+        #    quick spoken acknowledgement instead of spending the LLM.
         runtime.tools.last_cameras_used = []
-        try:
-            reply = await _run_conversation_turn(
-                runtime, demo_history, transcript, preferred_camera=camera_hint
-            )
-        except Exception:
-            logger.exception("converse: LLM turn failed")
-            return JSONResponse({"error": "assistant failed"}, status_code=502)
+        if require_wake and not question:
+            reply = "Yes? How can I help?"
+        else:
+            # Fresh frame per question: drop any cached frame so each turn sees
+            # the current moment, not a frame cached seconds ago (a cause of the
+            # same answer repeating when the scene has actually changed).
+            runtime.context.invalidate_frame_cache()
+            try:
+                reply = await _run_conversation_turn(
+                    runtime, demo_history, question, preferred_camera=camera_hint
+                )
+            except Exception:
+                logger.exception("converse: LLM turn failed")
+                return JSONResponse({"error": "assistant failed"}, status_code=502)
         t3 = _mark("llm", t2)
         logger.info("converse: reply=%r", reply[:160])
 
-        # Persist this turn's text (bounded).
-        demo_history.append({"role": "user", "content": transcript})
-        demo_history.append({"role": "assistant", "content": reply})
-        del demo_history[:-_MAX_HISTORY_TURNS]
+        # Persist this turn's text (bounded). Skip the bare-wake-word ack.
+        if question:
+            demo_history.append({"role": "user", "content": question})
+            demo_history.append({"role": "assistant", "content": reply})
+            del demo_history[:-_MAX_HISTORY_TURNS]
 
         # 4) Synthesise the reply.
         audio_b64 = None
@@ -2602,7 +2692,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         return JSONResponse({
             "transcript": transcript, "reply": reply, "audio_b64": audio_b64,
             "cameras_used": list(runtime.tools.last_cameras_used),
-            "timings_ms": timings,
+            "timings_ms": timings, "invoked": True,
         })
 
     @app.websocket("/ws")

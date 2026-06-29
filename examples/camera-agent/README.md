@@ -14,8 +14,14 @@ OpenAI-compatible endpoint — bring your own (see `config.cloud.yml`).
 
 This is the agent example for OpenNVR v0.1. It demonstrates the
 pattern of "OpenNVR camera as participant", not just camera as data
-source. The next milestone (v0.2) extends the same agent to join
-LiveKit rooms as a virtual participant.
+source.
+
+**Where this is headed:** today the agent lives on its own demo page.
+The next milestone extends the *same* agent to join **LiveKit rooms**
+(and similar real-time/voice surfaces) as a participant — so you can
+reach it from a phone, a meeting, or a kiosk, not just the local web
+UI. One sovereign agent, widely available, with no change to the tools
+or the local-first brain.
 
 ### Run it
 

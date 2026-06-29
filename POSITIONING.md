@@ -111,6 +111,11 @@ We know the friction. The roadmap is about *removing doors*, not adding rooms:
    lets any provider be the brain; make it a one-line setting in the UI.
 4. **Home Assistant / NVR integrations** so it slots into setups people already
    run.
+5. **The agent goes where people already are.** Today it lives on its own demo
+   page. Next: let the same camera-agent join **LiveKit rooms** (and similar
+   real-time/voice surfaces) as a participant — so it's reachable from a phone, a
+   meeting, or a kiosk, not just the local web UI. One sovereign agent, widely
+   available.
 
 ---
 

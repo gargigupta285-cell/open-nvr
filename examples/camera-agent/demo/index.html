@@ -55,6 +55,17 @@
     @keyframes pulse{0%{transform:scale(.85);opacity:1}100%{transform:scale(1.15);opacity:.25}}
     @keyframes spin{to{transform:rotate(360deg)}}
     @keyframes bounce{0%,100%{transform:scale(.92)}50%{transform:scale(1.12)}}
+    /* Gated: session live but waiting to be addressed by name (wake word on). */
+    .ram.gated .ring{stroke:var(--muted);opacity:.45;animation:breathe 3.5s ease-in-out infinite}
+    .ram.gated .iris{fill:var(--muted);opacity:.45}
+    /* Mouth: hidden unless speaking; its height is driven by the TTS amplitude. */
+    .ram .mouth{fill:var(--agent);opacity:0;transition:opacity .15s;}
+    .ram.speaking .mouth{opacity:.92;}
+    .ram.speaking .iris{opacity:.85;}
+    .micdot{display:inline-flex;align-items:center;gap:.3rem;font-size:.72rem;color:var(--danger);margin-top:.25rem;}
+    .micdot::before{content:"";width:.5rem;height:.5rem;border-radius:50%;background:var(--danger);animation:blink 1.2s steps(2,start) infinite;}
+    .waketoggle{display:flex;align-items:center;gap:.4rem;font-size:.8rem;color:var(--muted);margin:.55rem 0 0;cursor:pointer;user-select:none;}
+    .waketoggle input{accent-color:var(--accent);}
 
     label.field { font-size:0.75rem; color:var(--muted); display:block; margin-bottom:0.35rem; }
     .cambox { border:1px solid var(--border); border-radius:0.5rem; padding:0.5rem 0.6rem; margin-bottom:0.75rem;
@@ -111,12 +122,14 @@
             <div class="ram idle" id="ram" aria-label="agent avatar">
               <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
                 <circle class="ring" cx="50" cy="50" r="40" fill="none" stroke-width="5"/>
-                <circle class="iris" cx="50" cy="50" r="16"/>
+                <circle class="iris" cx="50" cy="44" r="13"/>
+                <ellipse class="mouth" id="mouth" cx="50" cy="68" rx="11" ry="2"/>
               </svg>
             </div>
             <div>
               <h1 id="title">Camera Agent</h1>
               <p class="lede" id="lede">Tap <strong>Talk</strong>, then just speak — hands-free, answers aloud.</p>
+              <div class="micdot" id="micdot" hidden>mic live</div>
             </div>
           </div>
 
@@ -129,6 +142,10 @@
           </div>
 
           <button id="talk" class="talk" type="button">🎤 Talk</button>
+          <label class="waketoggle" id="wakeWrap" title="When on, the agent only answers when you address it by name first.">
+            <input type="checkbox" id="wakeToggle" checked>
+            <span id="wakeLabel">Require “Hey&nbsp;…” before each question</span>
+          </label>
           <div class="row askrow">
             <input id="askInput" type="text" placeholder="Type a question, e.g. how many people on cam1?" autocomplete="off">
             <button id="askBtn" class="ghost" type="button">Send</button>
@@ -180,6 +197,7 @@
     const alarmbarEl=$("alarmbar"), alarmTextEl=$("alarmText"), silenceBtn=$("silence");
     const alarmListEl=$("alarmList"), monitorListEl=$("monitorList"), taskListEl=$("taskList"), reportListEl=$("reportList");
     const titleEl=$("title"), ledeEl=$("lede");
+    const mouthEl=$("mouth"), micdotEl=$("micdot"), wakeToggle=$("wakeToggle"), wakeLabel=$("wakeLabel");
 
     // VAD: START_RMS/SILENCE_RMS are FLOORS — the real gates adapt to the
     // measured ambient noise floor (noiseFloor*MARGIN), so steady background
@@ -198,6 +216,7 @@
     let vadTimer=null, pollTimer=null, alarmTimer=null, workingTimer=null, introPlayed=false;
     const knownTasks={}, seenNotes={}, seenAlarmEvents={}, seenReports={};
     let sirenOsc=null, sirenGain=null, sirenInt=null;
+    let playbackAnalyser=null, currentSource=null, mouthRAF=null;
 
     // ── audio: output ctx (for siren/chimes) + mic ctx share one AudioContext ──
     function ensureOutputAudio() {
@@ -238,6 +257,43 @@
     }
     function playWav(b64){ return new Promise(r=>{const a=new Audio("data:audio/wav;base64,"+b64); a.onended=r; a.onerror=r; a.play().catch(r);}); }
 
+    // ── Audio-reactive speaking + barge-in ──
+    // Decode the TTS WAV, route it through an analyser, and drive the avatar's
+    // mouth from the live amplitude — so she visibly "speaks". If the user talks
+    // clearly over her (mic well above the room floor), playback stops so they
+    // can ask straight away (barge-in).
+    function setMouth(amp){ if(mouthEl) mouthEl.setAttribute("ry",(2+Math.min(1,amp*4)*14).toFixed(1)); }
+    function stopSpeaking(){ if(currentSource){ try{currentSource.stop();}catch{} currentSource=null; }
+      if(mouthRAF){ cancelAnimationFrame(mouthRAF); mouthRAF=null; } setMouth(0); }
+    async function speak(b64){
+      ensureOutputAudio();
+      let buf; try{ const bytes=Uint8Array.from(atob(b64),c=>c.charCodeAt(0)); buf=await audioCtx.decodeAudioData(bytes.buffer); }
+      catch{ return playWav(b64); }                 // fallback: plain playback, no mouth
+      return new Promise(resolve=>{
+        let done=false; const fin=()=>{ if(done)return; done=true; setMouth(0); resolve(); };
+        if(!playbackAnalyser){ playbackAnalyser=audioCtx.createAnalyser(); playbackAnalyser.fftSize=512; }
+        const an=playbackAnalyser, abuf=new Float32Array(an.fftSize);
+        const src=audioCtx.createBufferSource(); src.buffer=buf;
+        src.connect(an); an.connect(audioCtx.destination); currentSource=src; let bargeFrames=0;
+        const tick=()=>{
+          if(currentSource!==src){ fin(); return; }       // stopped (barge-in / reset)
+          an.getFloatTimeDomainData(abuf); let s=0; for(let i=0;i<abuf.length;i++)s+=abuf[i]*abuf[i];
+          setMouth(Math.sqrt(s/abuf.length));
+          if(analyser && sessionActive){                   // barge-in detection
+            const mic=rms(), gate=Math.max(START_RMS,noiseFloor*START_MARGIN)*1.7;
+            bargeFrames = mic>gate ? bargeFrames+1 : 0;
+            if(bargeFrames>=4){ stopSpeaking(); fin(); return; }
+          }
+          mouthRAF=requestAnimationFrame(tick);
+        };
+        src.onended=()=>{ if(currentSource===src)currentSource=null; fin(); };
+        src.start(); mouthRAF=requestAnimationFrame(tick);
+      });
+    }
+    function wakeOn(){ return !!(wakeToggle && wakeToggle.checked); }
+    function restingAvatar(){ setAvatar(wakeOn() && sessionActive ? "gated" : "listening"); }
+    function listenHint(){ return wakeOn() ? ('Say “Hey '+agentName+'” to ask.') : "Listening…"; }
+
     function setAvatar(s){ ramEl.className="ram "+s; }
     function setStatus(t,k=""){ statusEl.textContent=t; statusEl.className="status"+(k?(" "+k):""); }
     function addMsg(text,who){ const d=document.createElement("div"); d.className="msg "+who;
@@ -256,10 +312,12 @@
       workingEl.hidden=false; workingTimer=setTimeout(()=>{workingEl.hidden=true;},6000); }
 
     async function loadAgent(){ try{ const a=await (await fetch("/agent")).json();
-      if(a.name){ agentName=a.name; titleEl.textContent=agentName+" — OpenNVR Camera Agent"; }
+      if(a.name){ agentName=a.name; titleEl.textContent=agentName+" — OpenNVR Camera Agent";
+        if(wakeLabel) wakeLabel.innerHTML=`Require “Hey&nbsp;${agentName}” before each question`; }
       if(a.text_mode){
-        // Lite/text profile: lead with typing; voice is optional.
+        // Text/chat profile: lead with typing; voice (and wake word) don't apply.
         document.getElementById("talk").style.display="none";
+        const w=document.getElementById("wakeWrap"); if(w) w.style.display="none";
         ledeEl.innerHTML=`Type a question to ${agentName} — e.g. <em>"how many people on cam1?"</em>`;
         setStatus("Ready. Type a question.");
       } else {
@@ -317,7 +375,7 @@
 
     async function playIntro(){ setStatus(agentName+" is introducing…"); setAvatar("speaking");
       try{ const d=await (await fetch("/intro")).json(); if(d.name) agentName=d.name;
-        if(d.text) addMsg(d.text,"agent"); if(d.audio_b64){ speaking=true; await playWav(d.audio_b64); speaking=false; } }
+        if(d.text) addMsg(d.text,"agent"); if(d.audio_b64){ speaking=true; setAvatar("speaking"); await speak(d.audio_b64); speaking=false; } }
       catch{ addMsg("Hi, I'm "+agentName+", your OpenNVR camera agent.","agent"); } }
 
     // ── listening loop ──
@@ -350,16 +408,23 @@
     async function onUtterance(){ const blob=new Blob(chunks,{type:recorder.mimeType||"audio/webm"});
       if(blob.size<1200){ if(sessionActive){setAvatar("listening");setStatus("Listening…","active");} return; }
       busy=true;
-      try{ const url="/converse?camera="+encodeURIComponent(cameraParam());
+      try{ const url="/converse?camera="+encodeURIComponent(cameraParam())+"&wake="+(wakeOn()?"1":"0");
         const resp=await fetch(url,{method:"POST",headers:{"Content-Type":"application/octet-stream"},body:blob});
         if(!resp.ok){const e=await resp.json().catch(()=>({}));throw new Error(e.error||("HTTP "+resp.status));}
         const data=await resp.json();
-        if(!data.transcript){ if(sessionActive){setAvatar("listening");setStatus("Didn't catch that — keep talking.","active");} return; }
+        if(!data.transcript){ if(sessionActive){restingAvatar();setStatus("Didn't catch that — "+listenHint(),"active");} return; }
+        if(data.invoked===false){
+          // Heard speech, but it wasn't addressed to her — show it faintly and
+          // keep waiting, instead of answering the room.
+          if(sessionActive){ restingAvatar();
+            setStatus('Heard “'+data.transcript.slice(0,40)+'” — say “Hey '+agentName+'” to ask.',""); }
+          lastActivity=performance.now(); return;
+        }
         addMsg(data.transcript,"user"); lastActivity=performance.now(); showWorking(data.cameras_used); showLatency(data.timings_ms);
         if(data.reply) addMsg(data.reply,"agent");
-        if(data.audio_b64){ speaking=true; setAvatar("speaking"); await playWav(data.audio_b64); speaking=false; }
-        if(sessionActive){ setAvatar("listening"); setStatus("Listening…","active"); }
-      }catch(err){ addMsg("Request failed: "+err.message,"sys"); if(sessionActive){setAvatar("listening");setStatus("Error: "+err.message,"error");} }
+        if(data.audio_b64){ speaking=true; setAvatar("speaking"); await speak(data.audio_b64); speaking=false; }
+        if(sessionActive){ restingAvatar(); setStatus(listenHint(),"active"); }
+      }catch(err){ addMsg("Request failed: "+err.message,"sys"); if(sessionActive){restingAvatar();setStatus("Error: "+err.message,"error");} }
       finally{ busy=false; lastActivity=performance.now(); }
     }
 
@@ -369,14 +434,17 @@
       talkBtn.textContent="⏹ Stop"; talkBtn.classList.add("listening");
       if(!introPlayed){ introPlayed=true; await playIntro(); }
       if(!sessionActive) return;
-      setAvatar("listening"); setStatus("Listening… just talk.","active");
+      micdotEl.hidden=false; restingAvatar();
+      setStatus(wakeOn()?('Listening — say “Hey '+agentName+'” to ask.'):"Listening… just talk.","active");
       if(!vadTimer) vadTimer=setInterval(vadTick,TICK_MS);
       if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();},POLL_MS);
       if(!alarmTimer) alarmTimer=setInterval(pollAlarms,2500);
     }
     function stopSession(){ sessionActive=false; if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(capturing)stopCapture();
+      stopSpeaking(); micdotEl.hidden=true;
       talkBtn.textContent="🎤 Talk"; talkBtn.classList.remove("listening"); setAvatar("idle"); setStatus("Stopped. Tap Talk to resume."); }
     function pauseForIdle(){ sessionActive=false; if(vadTimer){clearInterval(vadTimer);vadTimer=null;}
+      stopSpeaking(); micdotEl.hidden=true;
       talkBtn.textContent="🎙️ Enable talking"; talkBtn.classList.remove("listening"); setAvatar("idle");
       setStatus("Paused — no conversation for a while. Tap Enable talking to resume.");
       addMsg(agentName+" stopped listening after a quiet spell. Tap “Enable talking” to chat again.","sys"); }
@@ -463,7 +531,9 @@
     $("askBtn").addEventListener("click", ask);
     $("askInput").addEventListener("keydown",(e)=>{ if(e.key==="Enter") ask(); });
     talkBtn.addEventListener("click",()=>{ ensureOutputAudio(); if(busy&&sessionActive)return; if(sessionActive)stopSession(); else startSession(); });
-    resetBtn.addEventListener("click",async()=>{ try{ await fetch("/reset",{method:"POST"}); logEl.innerHTML=""; addMsg("Conversation reset.","sys"); }catch{} });
+    resetBtn.addEventListener("click",async()=>{ stopSpeaking(); try{ await fetch("/reset",{method:"POST"}); logEl.innerHTML=""; addMsg("Conversation reset.","sys"); }catch{} });
+    if(wakeToggle) wakeToggle.addEventListener("change",()=>{
+      if(sessionActive && !capturing && !speaking && !busy){ restingAvatar(); setStatus(listenHint(),"active"); } });
 
     async function loadNotify(){
       try{ const s=await (await fetch("/notify")).json();

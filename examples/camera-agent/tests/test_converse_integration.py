@@ -47,6 +47,10 @@ def harness(monkeypatch):
         kaic_url="http://kaic", kaic_api_key="k",
         whisper_url="http://w", ollama_url="http://o", piper_url="http://p",
         system_prompt="test",
+        # These tests exercise the STT→LLM→tool→TTS pipeline, not the wake-word
+        # gate (which has its own tests). Turn it off so a plain transcript is
+        # answered; the gate is tested explicitly with ?wake=1 below.
+        wake_word_required=False,
         cameras=[
             CameraSpec(camera_id="cam1", frame_url="http://x/1.jpg", role="front door"),
             CameraSpec(camera_id="cam2", frame_url="http://x/2.jpg", role="back yard"),
@@ -190,3 +194,59 @@ def test_converse_empty_transcript_returns_blank(harness):
     data = client.post("/converse", content=_wav_blob()).json()
     assert data["transcript"] == "" and data["reply"] == "" and data["audio_b64"] is None
     assert called["chat"] is False
+
+
+# ── wake-word gate (voice): only answer when addressed by name ─────────
+
+
+def test_converse_wake_gate_ignores_unaddressed(harness):
+    client, state = harness
+    state["transcript"] = "what do you see"   # no wake word
+
+    called = {"chat": False}
+
+    async def chat(**kw):
+        called["chat"] = True
+        return {"message": {"role": "assistant", "content": "should not run"}}
+    state["set_chat"](chat)
+
+    # ?wake=1 forces the gate on for this request (harness default is off).
+    data = client.post("/converse?wake=1", content=_wav_blob()).json()
+    assert data["invoked"] is False
+    assert data["reply"] == "" and data["audio_b64"] is None
+    assert data["transcript"] == "what do you see"   # still echoed for the UI
+    assert called["chat"] is False                   # LLM never spent
+
+
+def test_converse_wake_gate_answers_when_addressed(harness):
+    client, state = harness
+    # Sidhu is the default persona (AppConfig voice_gender defaults to 'male').
+    state["transcript"] = "hey Sidhu, what do you see"
+
+    async def chat(*, messages, tools=None, temperature=0.4, max_tokens=256, **kw):
+        # The wake phrase must be stripped before the model sees the question.
+        user = [m for m in messages if m.get("role") == "user"][-1]["content"].lower()
+        assert "sidhu" not in user and user.strip() == "what do you see"
+        return {"message": {"role": "assistant", "content": "I see the front door."}}
+    state["set_chat"](chat)
+
+    data = client.post("/converse?wake=1", content=_wav_blob()).json()
+    assert data["invoked"] is True
+    assert "front door" in data["reply"]
+
+
+def test_converse_bare_wake_word_acks_without_llm(harness):
+    client, state = harness
+    state["transcript"] = "Hey Sidhu"   # just the name, no question
+
+    called = {"chat": False}
+
+    async def chat(**kw):
+        called["chat"] = True
+        return {"message": {"role": "assistant", "content": "x"}}
+    state["set_chat"](chat)
+
+    data = client.post("/converse?wake=1", content=_wav_blob()).json()
+    assert data["invoked"] is True
+    assert data["reply"]                 # a spoken acknowledgement
+    assert called["chat"] is False       # but no LLM spend
