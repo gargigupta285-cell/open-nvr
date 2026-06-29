@@ -250,7 +250,7 @@ class CameraTools:
         except LookupError:
             return f"{camera_id} is not configured"
         except FrameSourceError as exc:
-            logger.info("%s: frame fetch failed (camera offline?): %s", camera_id, exc)
+            logger.warning("VISION DEGRADED: %s frame fetch failed (camera offline / bad RTSP path?): %s", camera_id, exc)
             return f"{camera_id} appears to be offline"
         # Prefer a real scene caption / VQA answer when the caption adapter is
         # available. Send the task explicitly for symmetry with
@@ -273,9 +273,10 @@ class CameraTools:
             # only the object detector). Fall back to describing the scene
             # from detected objects so the user still gets a useful answer
             # instead of an error.
-            logger.info(
-                "describe_camera: caption adapter unavailable, "
-                "falling back to object detection"
+            logger.warning(
+                "VISION DEGRADED: describe_camera caption adapter unavailable for %s "
+                "(not registered with KAI-C?); falling back to object detection",
+                camera_id,
             )
         return await self._describe_via_detection(camera_id, frame)
 
@@ -392,7 +393,7 @@ class CameraTools:
         except LookupError:
             return f"{camera_id} is not configured"
         except FrameSourceError as exc:
-            logger.info("%s: frame fetch failed (camera offline?): %s", camera_id, exc)
+            logger.warning("VISION DEGRADED: %s frame fetch failed (camera offline / bad RTSP path?): %s", camera_id, exc)
             return f"{camera_id} appears to be offline"
         try:
             response = await self._detect.infer(frame_jpeg=frame)
@@ -419,7 +420,7 @@ class CameraTools:
         except LookupError:
             return f"{camera_id} is not configured"
         except FrameSourceError as exc:
-            logger.info("%s: frame fetch failed (camera offline?): %s", camera_id, exc)
+            logger.warning("VISION DEGRADED: %s frame fetch failed (camera offline / bad RTSP path?): %s", camera_id, exc)
             return f"{camera_id} appears to be offline"
         try:
             response = await self._recognise.infer(
@@ -427,7 +428,7 @@ class CameraTools:
                 extra={"task": "face_recognition"},
             )
         except Exception:
-            logger.info("recognize_faces: recognition adapter unavailable")
+            logger.warning("VISION DEGRADED: recognize_faces recognition adapter unavailable (not registered?)")
             return f"{camera_id}: face recognition isn't enabled"
         result = response.get("result") or {}
         if result.get("recognized"):

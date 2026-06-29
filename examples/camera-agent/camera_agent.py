@@ -258,11 +258,32 @@ def _humanize_for_speech(text: str, cameras=None) -> str:
     return s.replace("_", " ").replace(": ", ", ")
 
 
-def _clean_for_speech(text: str) -> str:
-    """Strip markdown artifacts (``*`` ``#`` `` ` ``) a small model might emit,
-    so TTS doesn't read them aloud. Leaves underscores alone (handled where
-    camera ids are mapped to locations)."""
-    return re.sub(r"[*`#]+", "", text or "").strip()
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_THINK_OPEN_RE = re.compile(r"<think>.*$", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_think(text: str) -> str:
+    """Remove Qwen3-style ``<think>…</think>`` reasoning so it never reaches the
+    user/TTS. Handles a *truncated* block too (the model ran out of tokens
+    mid-thought, leaving an unclosed ``<think>`` with no answer after it).
+    Returns whatever real answer remains (often empty when all the budget went
+    to thinking — the caller then falls back to the tool result)."""
+    s = _THINK_BLOCK_RE.sub("", text or "")
+    s = _THINK_OPEN_RE.sub("", s)
+    return re.sub(r"</?think>", "", s, flags=re.IGNORECASE)
+
+
+def _clean_for_speech(text: str, cameras=None) -> str:
+    """Make an LLM reply speakable: strip ``<think>`` reasoning + markdown, and
+    map any raw camera id the model echoed ("cam1") to its location."""
+    s = _strip_think(text or "")
+    s = re.sub(r"[*`#]+", "", s)
+    if cameras:
+        for cam in sorted(cameras, key=lambda c: len(c.camera_id), reverse=True):
+            role = (getattr(cam, "role", "") or "").strip()
+            if role and role != "(no role configured)":
+                s = s.replace(cam.camera_id, role)
+    return s.strip()
 
 
 def agent_name_for(voice_gender: str | None) -> str:
@@ -1555,10 +1576,16 @@ class CameraAgentRuntime:
             logger.info("LLM brain: OpenAI-compatible at %s (model=%s)",
                         cfg.llm_base_url or cfg.ollama_url, cfg.llm_model)
         else:
+            # Auto-disable thinking for Qwen3 (a thinking model) unless the
+            # operator set llm_think explicitly — on CPU, thinking burns the
+            # token budget and leaves no answer. Non-thinking models: send nothing.
+            _think = cfg.llm_think
+            if _think is None and "qwen3" in (cfg.llm_model or "").lower():
+                _think = False
             self.ollama = OllamaClient(
                 url=cfg.ollama_url, token=cfg.ollama_token, model=cfg.llm_model,
                 num_thread=cfg.llm_num_threads, num_ctx=cfg.llm_num_ctx,
-                think=cfg.llm_think,
+                think=_think,
             )
         self.piper = PiperClient(url=cfg.piper_url, token=cfg.piper_token)
 
@@ -2063,7 +2090,10 @@ class CameraAgentRuntime:
             f"Your replies are SPOKEN ALOUD. Refer to each camera by its "
             f"location (e.g. 'the front door'), never its raw id like "
             f"'front_door'. Answer in 1-2 short, natural sentences a person "
-            f"would say out loud — no ids, colons, lists, or markdown.\n\n"
+            f"would say out loud — no ids, colons, lists, or markdown.\n"
+            f"Give the ANSWER directly. Never reply with filler like 'I'll "
+            f"check', 'let me see', or 'one moment' — if you need to look, call "
+            f"the tool and then state what you found.\n\n"
             f"You can look at ONE camera, SEVERAL, or 'all' of them — pass "
             f"camera_id='all' (or a camera_ids list) when the user asks about "
             f"every camera or more than one.\n\n"
@@ -2858,6 +2888,7 @@ async def _run_conversation_turn(
     final = ""
     grounded = False   # did any tool actually run this turn?
     forced = False     # have we already injected a forced detection?
+    tools_called = 0   # how many tool calls ran (for the turn-outcome log)
     last_tool_result = ""  # most recent tool output — used as a fallback when
     #                        the model returns empty content on the compose turn
     #                        (small/thinking models sometimes do), so the user
@@ -2885,6 +2916,7 @@ async def _run_conversation_turn(
             for call in tool_calls:
                 name, result = await _invoke_tool(runtime, call)
                 logger.info("converse: tool %s -> %s", name, result[:120])
+                tools_called += 1
                 last_tool_result = result or last_tool_result
                 messages.append({
                     "role": "tool",
@@ -2925,7 +2957,9 @@ async def _run_conversation_turn(
                              "arguments": {"camera_id": cam}},
             }
             name, result = await _invoke_tool(runtime, call)
-            logger.info("converse: FORCED grounding on %s -> %s", cam, result[:120])
+            logger.info("converse: FORCED grounding (%s) on %s -> %s",
+                        tool_name, cam, result[:120])
+            tools_called += 1
             last_tool_result = result or last_tool_result
             messages.append({"role": "assistant", "content": "", "tool_calls": [call]})
             messages.append({
@@ -2940,15 +2974,80 @@ async def _run_conversation_turn(
     else:
         logger.warning("converse: tool loop exhausted")
 
-    # Prefer the model's composed reply; if it returned empty content but a tool
-    # actually ran, surface that result (humanised for speech) so the user gets
-    # the real answer instead of an apology (test-report: agent always replied
-    # "Sorry…").
-    if final:
-        return _clean_for_speech(final)
-    if last_tool_result:
-        return _humanize_for_speech(last_tool_result, runtime.cfg.cameras)
-    return "Sorry, I'm having trouble answering that right now."
+    # Prefer the model's composed reply (stripped of <think> reasoning + ids).
+    # If it's empty after stripping (a thinking model burned its budget on
+    # reasoning) but a tool ran, surface that result. For camera-roster/config
+    # questions, answer deterministically — small models often just deflect
+    # ("I'll check…") and there's no tool to ground them.
+    cleaned = _clean_for_speech(final, runtime.cfg.cameras)
+    if cleaned and not _is_deflection(cleaned):
+        reply, source = cleaned, "llm"
+    elif _is_config_question(user_text):
+        reply, source = _roster_answer(runtime.cfg.cameras), "roster"
+    elif last_tool_result:
+        reply, source = _humanize_for_speech(last_tool_result, runtime.cfg.cameras), "tool_fallback"
+    else:
+        reply, source = (cleaned or "Sorry, I'm having trouble answering that right now."), "none"
+
+    # One structured line that explains WHY the reply was what it was — so a bad
+    # answer is diagnosable from the logs (camera offline, adapter down, the LLM
+    # not calling tools, a deflection, etc.) without re-running.
+    degraded = _degradation_reasons(last_tool_result, final, cleaned,
+                                    grounded, tools_called)
+    log = logger.warning if degraded else logger.info
+    log("converse: TURN reply_source=%s grounded=%s forced=%s tools=%d "
+        "issues=%s reply=%r", source, grounded, forced, tools_called,
+        ",".join(degraded) or "none", reply[:90])
+    return reply
+
+
+# Hollow "acknowledgement" replies a small model emits instead of answering
+# ("I see… I'll check the camera.") — treat as no-answer so we ground/fallback.
+_DEFLECTION_RE = re.compile(
+    r"^(i see\b.*)?(i'?ll|let me|i will|i am going to|i'?m going to|checking|"
+    r"one moment|hold on|give me a)\b", re.IGNORECASE)
+
+
+def _is_deflection(text: str) -> bool:
+    t = (text or "").strip().lower().lstrip(".… ")
+    return bool(_DEFLECTION_RE.match(t)) and len(t) < 80
+
+
+def _degradation_reasons(last_tool_result: str, final: str, cleaned: str,
+                         grounded: bool, tools_called: int) -> list[str]:
+    """Classify why a turn might have produced a poor answer, for the TURN log.
+    Returns short tags (camera_offline, adapter_unavailable, llm_think_only, …)
+    so a bad reply is diagnosable straight from the logs."""
+    issues: list[str] = []
+    lt = (last_tool_result or "").lower()
+    if "appears to be offline" in lt:
+        issues.append("camera_offline")
+    if "is not configured" in lt:
+        issues.append("camera_not_configured")
+    if any(s in lt for s in ("unavailable", "isn't enabled",
+                             "not yet", "couldn't", "can't be reached")):
+        issues.append("adapter_unavailable")
+    if (final or "").strip() and not (cleaned or "").strip():
+        issues.append("llm_think_only")       # whole token budget went to <think>
+    elif not (final or "").strip() and not grounded:
+        issues.append("llm_empty")
+    elif cleaned and _is_deflection(cleaned):
+        issues.append("llm_deflection")
+    return issues
+
+
+def _roster_answer(cameras) -> str:
+    """Deterministic answer for 'how many cameras / which cameras' — never
+    relies on the model."""
+    cams = list(cameras or [])
+    if not cams:
+        return "No cameras are configured yet."
+    names = [(getattr(c, "role", "") or c.camera_id) for c in cams]
+    names = [n for n in names if n and n != "(no role configured)"] or \
+            [c.camera_id for c in cams]
+    if len(cams) == 1:
+        return f"There is one camera: {names[0]}."
+    return f"There are {len(cams)} cameras: {', '.join(names)}."
 
 
 def _load_demo_html() -> str:

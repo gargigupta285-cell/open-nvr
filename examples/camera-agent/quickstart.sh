@@ -34,14 +34,14 @@ for arg in "$@"; do
     --voice|--full) PROFILE="camera-agent"; EDITION="Sentinel (full · hands-free voice · ~6-12 GB)";;
     --demo) PROFILE="camera-agent-demo"; EDITION="Demo (no camera · scripted scenes · instant)";;
     --lite|--spotter) PROFILE="camera-agent-lite";;
-    --nano) PROFILE="camera-agent-lite"; NANO=1; EDITION="Nano (lite · tiniest LLM qwen3:0.6b · ~2-3 GB)";;
+    --nano) PROFILE="camera-agent-lite"; NANO=1; EDITION="Nano (lite · tiniest LLM qwen2.5:0.5b · ~2-3 GB)";;
     --down|--stop) ACTION="down";;
     -h|--help)
       cat <<'EOF'
 OpenNVR Camera Agent — one-command quickstart (run from repo root)
 
   examples/camera-agent/quickstart.sh            Spotter (lite · text · ~1-2 GB)
-  examples/camera-agent/quickstart.sh --nano     Nano: tiniest LLM qwen3:0.6b (~2-3 GB, low-RAM boxes)
+  examples/camera-agent/quickstart.sh --nano     Nano: tiniest LLM qwen2.5:0.5b (~2-3 GB, low-RAM boxes)
   examples/camera-agent/quickstart.sh --demo     Demo: no camera, scripted scenes (instant try / GIF)
   examples/camera-agent/quickstart.sh --standard Watch  (+ scene description · ~3-4 GB)
   examples/camera-agent/quickstart.sh --voice    Sentinel (full hands-free voice)
@@ -87,7 +87,7 @@ fi
 # Docker Compose use it for BOTH the model pull and the rendered config (shell
 # env overrides the .env value), so they stay in sync.
 if [ "${NANO}" = "1" ]; then
-  export OLLAMA_MODEL="${OLLAMA_MODEL:-qwen3:0.6b}"
+  export OLLAMA_MODEL="${OLLAMA_MODEL:-qwen2.5:0.5b}"
   say "Nano mode: OLLAMA_MODEL=${OLLAMA_MODEL}"
 fi
 
