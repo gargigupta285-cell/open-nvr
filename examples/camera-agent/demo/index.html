@@ -44,7 +44,10 @@
     h1 { margin:0; font-size:1.35rem; }
     p.lede { margin:0.15rem 0 0 0; color:var(--muted); font-size:0.88rem; }
 
-    .ram { width:60px; height:60px; flex:0 0 auto; }
+    .ram { width:68px; height:68px; flex:0 0 auto; position:relative; }
+    .avatar-video { position:absolute; inset:0; width:100%; height:100%; border-radius:50%; object-fit:cover; display:none; }
+    .ram.has-video .avatar-video { display:block; }
+    .ram.has-video svg { display:none; }
     .ram svg { width:100%; height:100%; display:block; }
     .ram .ring,.ram .iris { transform-origin:center; transform-box:fill-box; }
     .ram.idle .ring{stroke:var(--muted);animation:breathe 3.5s ease-in-out infinite}.ram.idle .iris{fill:var(--muted)}
@@ -72,8 +75,10 @@
       display:flex; flex-wrap:wrap; gap:0.4rem 0.9rem; max-height:6.5rem; overflow-y:auto; }
     .cambox label { display:flex; align-items:center; gap:0.35rem; font-size:0.85rem; cursor:pointer; }
     .cambox input { accent-color:var(--accent); }
+    .ic { width:1.05em; height:1.05em; vertical-align:-0.16em; flex:0 0 auto; }
     .talk { width:100%; background:var(--accent); color:#062321; border:none; padding:1.05rem 1.25rem;
-      border-radius:0.6rem; font-weight:700; cursor:pointer; font-size:1.05rem; transition:background .15s,transform .05s; }
+      border-radius:0.6rem; font-weight:700; cursor:pointer; font-size:1.05rem; transition:background .15s,transform .05s;
+      display:flex; align-items:center; justify-content:center; gap:0.5rem; }
     .talk:hover:not(:disabled){background:var(--accent-strong);} .talk:active:not(:disabled){transform:scale(.99);}
     .talk:disabled{opacity:.5;cursor:progress;}
     .talk.listening{background:var(--danger);color:#fff;} .talk.listening::before{content:"● ";animation:blink 1s steps(2,start) infinite;}
@@ -84,10 +89,20 @@
     .chip { font-size:0.72rem; padding:0.22rem 0.5rem; border-radius:999px; background:rgba(79,209,197,0.15); color:var(--accent); white-space:nowrap; }
     .ghost { background:transparent; color:var(--muted); border:1px solid var(--border); padding:0.45rem 0.7rem; border-radius:0.375rem; cursor:pointer; font-size:0.8rem; }
     .ghost:hover{color:var(--text);}
-    .log { margin-top:1rem; background:rgba(0,0,0,0.25); border-radius:0.5rem; padding:0.75rem; height:18rem; overflow-y:auto; font-size:0.9rem; line-height:1.45; }
+    .log { margin-top:1rem; background:rgba(0,0,0,0.25); border-radius:0.5rem; padding:0.75rem; height:18rem; overflow-y:auto; font-size:0.9rem; line-height:1.45; display:flex; flex-direction:column; gap:0.3rem; }
     .log:empty::after { content:"Your conversation will appear here."; color:var(--muted); font-size:0.82rem; }
-    .msg{margin:0.35rem 0;} .msg .who{font-weight:700;} .msg.user .who{color:var(--user);} .msg.agent .who{color:var(--agent);}
-    .msg.sys{color:var(--muted); font-size:0.8rem; font-style:italic;}
+    .msg{max-width:86%;} .msg .who{font-weight:500; font-size:0.72rem; display:block; margin-bottom:2px;}
+    .msg.user{align-self:flex-end; background:#1d2740; border-radius:11px 11px 3px 11px; padding:0.45rem 0.65rem;} .msg.user .who{color:var(--user);}
+    .msg.agent{align-self:flex-start; background:var(--panel2); border:1px solid var(--border); border-radius:11px 11px 11px 3px; padding:0.45rem 0.65rem;} .msg.agent .who{color:var(--agent);}
+    .msg.sys{align-self:center; max-width:100%; text-align:center; color:var(--muted); font-size:0.78rem; font-style:italic;}
+    .frames{display:flex; gap:6px; flex-wrap:wrap; margin-top:6px;}
+    .frame-thumb{width:128px; max-width:42vw; border-radius:7px; border:1px solid var(--border); cursor:pointer; display:block;}
+    .frame-thumb:hover{border-color:var(--accent);}
+    .frame-cap{font-size:0.68rem; color:var(--muted); margin-top:2px;}
+    .lightbox{display:none; position:fixed; inset:0; background:rgba(0,0,0,0.82); z-index:50; align-items:center; justify-content:center; padding:2rem; cursor:zoom-out;}
+    .lightbox.show{display:flex;}
+    .lightbox img{max-width:90vw; max-height:80vh; border-radius:10px;}
+    .lightbox figcaption{color:#cbd5e1; text-align:center; margin-top:0.5rem; font-size:0.85rem;}
 
     .side .card { padding:0.85rem 0.9rem; margin-bottom:1rem; }
     .side h2 { font-size:0.72rem; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; margin:0 0 .5rem 0; }
@@ -111,7 +126,7 @@
 <body>
   <div class="wrap">
     <div class="alarmbar" id="alarmbar" hidden>
-      <span>🚨</span><span class="ab-text" id="alarmText">Alarm</span>
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6"/><path d="M10 19a2 2 0 0 0 4 0"/></svg><span class="ab-text" id="alarmText">Alarm</span>
       <button class="ab-btn" id="silence" type="button">Silence</button>
     </div>
 
@@ -125,6 +140,7 @@
                 <circle class="iris" cx="50" cy="44" r="13"/>
                 <ellipse class="mouth" id="mouth" cx="50" cy="68" rx="11" ry="2"/>
               </svg>
+              <video class="avatar-video" id="avatarVideo" muted loop playsinline preload="auto" aria-hidden="true"></video>
             </div>
             <div>
               <h1 id="title">Camera Agent</h1>
@@ -138,10 +154,10 @@
             <label><input type="checkbox" id="cam-all" checked> All cameras</label>
           </div>
           <div class="row">
-            <button id="useLocalCam" class="ghost" type="button" title="Use a camera attached to this machine — webcam, USB, Pi or drone">📷 Use this machine's camera</button>
+            <button id="useLocalCam" class="ghost" type="button" title="Use a camera attached to this machine — webcam, USB, Pi or drone"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h3l2-2h8l2 2h3v12H3z"/><circle cx="12" cy="13" r="3.5"/></svg> Use this machine's camera</button>
           </div>
 
-          <button id="talk" class="talk" type="button">🎤 Talk</button>
+          <button id="talk" class="talk" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg> Talk</button>
           <label class="waketoggle" id="wakeWrap" title="When on, the agent only answers when you address it by name first.">
             <input type="checkbox" id="wakeToggle" checked>
             <span id="wakeLabel">Require “Hey&nbsp;…” before each question</span>
@@ -165,8 +181,8 @@
         <div class="card" id="alarmCard">
           <h2>Alarms</h2>
           <div class="presets">
-            <button class="ghost preset" data-name="Fire" data-target="fire" type="button">🔥 Fire</button>
-            <button class="ghost preset" data-name="After-hours person" data-target="person" data-after="18:00" type="button">🌙 After-hours</button>
+            <button class="ghost preset" data-name="Fire" data-target="fire" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 2c1 3 4 4 4 8a4 4 0 0 1-8 0c0-2 1-3 2-4 0 2 2 2 2 0 0-2-2-2-2-4z"/></svg> Fire</button>
+            <button class="ghost preset" data-name="After-hours person" data-target="person" data-after="18:00" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A8 8 0 1 1 11.2 3 6 6 0 0 0 21 12.8z"/></svg> After-hours</button>
           </div>
           <div class="notifyrow" id="notifyRow" hidden>
             <span id="notifyStatus" class="empty-note"></span>
@@ -198,6 +214,11 @@
     const alarmListEl=$("alarmList"), monitorListEl=$("monitorList"), taskListEl=$("taskList"), reportListEl=$("reportList");
     const titleEl=$("title"), ledeEl=$("lede");
     const mouthEl=$("mouth"), micdotEl=$("micdot"), wakeToggle=$("wakeToggle"), wakeLabel=$("wakeLabel");
+    // Inline SVG icons (no webfont, no external assets — works fully offline).
+    const IC={
+      mic:'<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg>',
+      stop:'<svg class="ic" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
+      bell:'<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6"/><path d="M10 19a2 2 0 0 0 4 0"/></svg>'};
 
     // VAD: START_RMS/SILENCE_RMS are FLOORS — the real gates adapt to the
     // measured ambient noise floor (noiseFloor*MARGIN), so steady background
@@ -271,10 +292,11 @@
       catch{ return playWav(b64); }                 // fallback: plain playback, no mouth
       return new Promise(resolve=>{
         let done=false; const fin=()=>{ if(done)return; done=true; setMouth(0); resolve(); };
-        if(!playbackAnalyser){ playbackAnalyser=audioCtx.createAnalyser(); playbackAnalyser.fftSize=512; }
+        if(!playbackAnalyser){ playbackAnalyser=audioCtx.createAnalyser(); playbackAnalyser.fftSize=512;
+          playbackAnalyser.connect(audioCtx.destination); }   // wire to speakers once
         const an=playbackAnalyser, abuf=new Float32Array(an.fftSize);
         const src=audioCtx.createBufferSource(); src.buffer=buf;
-        src.connect(an); an.connect(audioCtx.destination); currentSource=src; let bargeFrames=0;
+        src.connect(an); currentSource=src; let bargeFrames=0;
         const tick=()=>{
           if(currentSource!==src){ fin(); return; }       // stopped (barge-in / reset)
           an.getFloatTimeDomainData(abuf); let s=0; for(let i=0;i<abuf.length;i++)s+=abuf[i]*abuf[i];
@@ -294,12 +316,43 @@
     function restingAvatar(){ setAvatar(wakeOn() && sessionActive ? "gated" : "listening"); }
     function listenHint(){ return wakeOn() ? ('Say “Hey '+agentName+'” to ask.') : "Listening…"; }
 
-    function setAvatar(s){ ramEl.className="ram "+s; }
+    // Talking-avatar VIDEO: an idle loop, and a 'speaking' loop while she talks.
+    // Bundled clips are placeholders — swap in your own (or a HeyGen/render
+    // export) by replacing demo/avatar/{idle,speaking}.{webm,mp4}. If the video
+    // can't load, we silently fall back to the animated SVG face above.
+    const avatarVideo=$("avatarVideo"); let avatarVideoOk=false, avClip="";
+    const AV={ idle:{webm:"/demo/avatar/idle.webm",mp4:"/demo/avatar/idle.mp4"},
+               speaking:{webm:"/demo/avatar/speaking.webm",mp4:"/demo/avatar/speaking.mp4"} };
+    function avSrc(kind){ const c=AV[kind];
+      return (avatarVideo.canPlayType&&avatarVideo.canPlayType("video/webm").replace("no",""))?c.webm:c.mp4; }
+    function setAvatarClip(kind){ if(!avatarVideo||avClip===kind)return; avClip=kind;
+      avatarVideo.src=avSrc(kind); avatarVideo.play().catch(()=>{}); }
+    if(avatarVideo){
+      avatarVideo.addEventListener("loadeddata",()=>{ if(!avatarVideoOk){ avatarVideoOk=true; ramEl.classList.add("has-video"); } });
+      avatarVideo.addEventListener("error",()=>{ avatarVideoOk=false; ramEl.classList.remove("has-video"); });
+      setAvatarClip("idle");
+    }
+    function setAvatar(s){ ramEl.className="ram "+(avatarVideoOk?"has-video ":"")+s;
+      if(avatarVideoOk) setAvatarClip(s==="speaking"?"speaking":"idle"); }
     function setStatus(t,k=""){ statusEl.textContent=t; statusEl.className="status"+(k?(" "+k):""); }
-    function addMsg(text,who){ const d=document.createElement("div"); d.className="msg "+who;
+    function addMsg(text,who,frames){ const d=document.createElement("div"); d.className="msg "+who;
       if(who==="sys"){d.textContent=text;} else { const label=who==="user"?"you":agentName;
-        d.innerHTML=`<span class="who">${label}:</span> `; d.appendChild(document.createTextNode(text)); }
+        d.innerHTML=`<span class="who">${label}</span>`; d.appendChild(document.createTextNode(text));
+        // Show the frame(s) the agent actually looked at, inline in the bubble.
+        if(frames&&frames.length){ const fr=document.createElement("div"); fr.className="frames";
+          frames.forEach(f=>{ const wrap=document.createElement("div");
+            const im=document.createElement("img"); im.className="frame-thumb";
+            im.src="data:image/jpeg;base64,"+f.jpeg_b64; im.alt=im.title=f.role||f.camera_id;
+            im.addEventListener("click",()=>openLightbox(im.src,f.role||f.camera_id));
+            const cap=document.createElement("div"); cap.className="frame-cap"; cap.textContent=f.role||f.camera_id;
+            wrap.appendChild(im); wrap.appendChild(cap); fr.appendChild(wrap); });
+          d.appendChild(fr); } }
       logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight; }
+    function openLightbox(src,label){ let ov=document.getElementById("lightbox");
+      if(!ov){ ov=document.createElement("div"); ov.id="lightbox"; ov.className="lightbox";
+        ov.addEventListener("click",()=>ov.classList.remove("show")); document.body.appendChild(ov); }
+      ov.innerHTML=`<figure style="margin:0"><img src="${src}" alt="${label||""}"><figcaption>${label||""}</figcaption></figure>`;
+      ov.classList.add("show"); }
     function showLatency(t){ const el=$("lat"); if(!el||!t)return;
       const ms=(t.total!=null?t.total:0); if(!ms){el.hidden=true;return;}
       const parts=[]; if(t.stt!=null)parts.push("STT "+t.stt); if(t.llm!=null)parts.push("LLM "+t.llm);
@@ -335,7 +388,7 @@
           body:JSON.stringify({text:q,camera:cameraParam()})});
         const d=await r.json();
         if(!r.ok){ addMsg("Error: "+(d.error||("HTTP "+r.status)),"sys"); }
-        else { if(d.reply) addMsg(d.reply,"agent"); showWorking(d.cameras_used); showLatency({total:d.latency_ms}); }
+        else { if(d.reply) addMsg(d.reply,"agent",d.frames); showWorking(d.cameras_used); showLatency({total:d.latency_ms}); }
         setStatus("Ready. Type a question.","");
       }catch(err){ addMsg("Request failed: "+err.message,"sys"); setStatus("Error","error"); }
       finally{ $("askBtn").disabled=false; setAvatar("idle"); }
@@ -421,7 +474,7 @@
           lastActivity=performance.now(); return;
         }
         addMsg(data.transcript,"user"); lastActivity=performance.now(); showWorking(data.cameras_used); showLatency(data.timings_ms);
-        if(data.reply) addMsg(data.reply,"agent");
+        if(data.reply) addMsg(data.reply,"agent",data.frames);
         if(data.audio_b64){ speaking=true; setAvatar("speaking"); await speak(data.audio_b64); speaking=false; }
         if(sessionActive){ restingAvatar(); setStatus(listenHint(),"active"); }
       }catch(err){ addMsg("Request failed: "+err.message,"sys"); if(sessionActive){restingAvatar();setStatus("Error: "+err.message,"error");} }
@@ -431,7 +484,7 @@
     async function startSession(){ ensureOutputAudio();
       try{ await ensureMic(); }catch(err){ setStatus("Microphone access denied.","error"); addMsg("Microphone access denied: "+err,"sys"); return; }
       sessionActive=true; lastActivity=performance.now(); loudFrames=0;
-      talkBtn.textContent="⏹ Stop"; talkBtn.classList.add("listening");
+      talkBtn.innerHTML=IC.stop+" Stop"; talkBtn.classList.add("listening");
       if(!introPlayed){ introPlayed=true; await playIntro(); }
       if(!sessionActive) return;
       micdotEl.hidden=false; restingAvatar();
@@ -442,10 +495,10 @@
     }
     function stopSession(){ sessionActive=false; if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(capturing)stopCapture();
       stopSpeaking(); micdotEl.hidden=true;
-      talkBtn.textContent="🎤 Talk"; talkBtn.classList.remove("listening"); setAvatar("idle"); setStatus("Stopped. Tap Talk to resume."); }
+      talkBtn.innerHTML=IC.mic+" Talk"; talkBtn.classList.remove("listening"); setAvatar("idle"); setStatus("Stopped. Tap Talk to resume."); }
     function pauseForIdle(){ sessionActive=false; if(vadTimer){clearInterval(vadTimer);vadTimer=null;}
       stopSpeaking(); micdotEl.hidden=true;
-      talkBtn.textContent="🎙️ Enable talking"; talkBtn.classList.remove("listening"); setAvatar("idle");
+      talkBtn.innerHTML=IC.mic+" Enable talking"; talkBtn.classList.remove("listening"); setAvatar("idle");
       setStatus("Paused — no conversation for a while. Tap Enable talking to resume.");
       addMsg(agentName+" stopped listening after a quiet spell. Tap “Enable talking” to chat again.","sys"); }
 
@@ -501,7 +554,7 @@
 
     // ── alarms ──
     async function pollAlarms(){ let data; try{ data=await (await fetch("/alarms")).json(); }catch{ return; }
-      for(const e of (data.events||[])){ if(!seenAlarmEvents[e.id]){ seenAlarmEvents[e.id]=true; addMsg("🚨 "+e.text,"agent"); } }
+      for(const e of (data.events||[])){ if(!seenAlarmEvents[e.id]){ seenAlarmEvents[e.id]=true; addMsg("Alarm: "+e.text,"agent"); } }
       const names=(data.alarms||[]).filter(a=>a.triggered).map(a=>a.name);
       if(data.ringing){ alarmRinging=true; alarmTextEl.textContent=names.length?("Alarm: "+names.join(", ")):"Alarm triggered";
         alarmbarEl.hidden=false; setAvatar("speaking"); startSiren(); }
@@ -511,7 +564,7 @@
       if(!active.length){ alarmListEl.innerHTML='<div class="empty-note">No alarms armed.</div>'; return; }
       alarmListEl.innerHTML="";
       for(const a of active){ const d=document.createElement("div"); d.className="item"+(a.triggered?" ringing":"");
-        d.innerHTML=`<span class="badge">${a.triggered?"🚨":"🔔"}</span>`; const q=document.createElement("span"); q.className="q";
+        d.innerHTML=`<span class="badge">${IC.bell}</span>`; const q=document.createElement("span"); q.className="q";
         const when=a.window==="any time"?"":` · ${a.window}`; const contact=a.emergency_contact_configured?" · ☎":"";
         q.textContent=`${a.name}: ${a.target} on ${a.camera_ids.join(", ")}${when}${contact}`; d.appendChild(q);
         const s=document.createElement("button"); s.className="stop"; s.title="Disarm"; s.textContent="✕";

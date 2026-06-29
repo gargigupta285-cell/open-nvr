@@ -27,6 +27,13 @@ ollama_token:
 piper_url: http://piper-adapter:9001
 piper_token: ${INTERNAL_API_KEY}
 
+# Wake word (voice only). When true, the agent answers a spoken utterance only
+# when it's addressed by name ("Hey Shailaja, …") — so it ignores the TV, a side
+# conversation, or its own reply echoed back through the speakers. The demo UI
+# also exposes a per-session toggle that overrides this. Set false for a
+# continuous, always-listening turn-taker.
+wake_word_required: true
+
 # Vision tools — routed through KAI-C by the registered adapter NAME.
 # The Tier 0 stack registers ONLY the YOLOv8 object detector, under the
 # name ``default`` — so detect_objects must target ``default``.

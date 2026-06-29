@@ -30,6 +30,12 @@ ollama_token: REPLACE_WITH_OPENNVR_ADAPTER_TOKEN
 piper_url: http://127.0.0.1:9001
 piper_token: REPLACE_WITH_OPENNVR_ADAPTER_TOKEN
 
+# Wake word (voice only). When true, the agent answers only when addressed by
+# name ("Hey Shailaja, …"), so it ignores ambient speech and its own echoed
+# reply. The demo UI has a per-session toggle that overrides this. Set false
+# for a continuous, always-listening turn-taker.
+wake_word_required: true
+
 # Names of the vision adapters used by tool calls. The agent calls
 # these THROUGH KAI-C (auditable, since they're event-driven not
 # streaming).

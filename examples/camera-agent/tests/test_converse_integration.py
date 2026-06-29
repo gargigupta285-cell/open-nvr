@@ -250,3 +250,19 @@ def test_converse_bare_wake_word_acks_without_llm(harness):
     assert data["invoked"] is True
     assert data["reply"]                 # a spoken acknowledgement
     assert called["chat"] is False       # but no LLM spend
+
+
+# ── talking-avatar clips are served (whitelisted) ─────────────────────
+
+
+def test_avatar_clip_served(harness):
+    client, _ = harness
+    r = client.get("/demo/avatar/idle.webm")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("video/")
+
+
+def test_avatar_unknown_name_404(harness):
+    client, _ = harness
+    assert client.get("/demo/avatar/evil.sh").status_code == 404
+    assert client.get("/demo/avatar/secrets.yml").status_code == 404

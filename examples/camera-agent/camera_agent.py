@@ -42,7 +42,7 @@ from typing import Any
 
 import yaml
 from fastapi import FastAPI, Request, WebSocket
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from adapter_clients import (
     KaicAdapterClient,
@@ -345,6 +345,34 @@ def match_wake(transcript: str, agent_name: str) -> tuple[bool, str]:
         rest = re.sub(r"^[\s,.:;!?-]+", "", rest)  # drop punctuation after name
         return True, rest.strip()
     return False, ""
+
+
+def _frames_for(runtime, max_frames: int = 3) -> list[dict]:
+    """The JPEG frame(s) the tools actually looked at this turn, base64-encoded,
+    so the UI can SHOW what the agent saw in the chat. Reads the per-turn frame
+    cache (populated by the vision tools) for the cameras in last_cameras_used —
+    no extra fetch. Capped in count and size to keep the response small."""
+    roles = {c.camera_id: c.role for c in runtime.cfg.cameras}
+    out: list[dict] = []
+    seen: set[str] = set()
+    for cid in getattr(runtime.tools, "last_cameras_used", []) or []:
+        if cid in seen:
+            continue
+        seen.add(cid)
+        try:
+            frame = runtime.context.get_cached_frame(cid)
+        except Exception:
+            frame = None
+        if not frame or len(frame) > 2_000_000:   # skip missing / oversized
+            continue
+        out.append({
+            "camera_id": cid,
+            "role": roles.get(cid, cid),
+            "jpeg_b64": base64.b64encode(frame).decode("ascii"),
+        })
+        if len(out) >= max_frames:
+            break
+    return out
 
 
 def greeting_for(name: str) -> str:
@@ -2324,6 +2352,22 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         return {"name": runtime.agent_name, "voice_gender": runtime.cfg.voice_gender,
                 "text_mode": runtime.cfg.text_mode}
 
+    @app.get("/demo/avatar/{name}")
+    async def _demo_avatar(name: str) -> Response:
+        """Serve the bundled talking-avatar clips (idle/speaking · webm/mp4).
+        Whitelisted names only — no path traversal, no arbitrary file read. The
+        clips are placeholders; replace the files to use your own avatar."""
+        from fastapi.responses import FileResponse
+        allowed = {
+            "idle.webm": "video/webm", "idle.mp4": "video/mp4",
+            "speaking.webm": "video/webm", "speaking.mp4": "video/mp4",
+        }
+        media = allowed.get(name)
+        path = Path(__file__).parent / "demo" / "avatar" / name
+        if media is None or not path.is_file():
+            return Response(status_code=404)
+        return FileResponse(path, media_type=media)
+
     @app.get("/notify")
     async def _notify_status() -> dict[str, Any]:
         """External-notification status (channel count + recent deliveries)."""
@@ -2567,6 +2611,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         return JSONResponse({
             "reply": reply,
             "cameras_used": list(runtime.tools.last_cameras_used),
+            "frames": _frames_for(runtime),
             "latency_ms": int((_t.perf_counter() - t0) * 1000),
         })
 
@@ -2692,6 +2737,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         return JSONResponse({
             "transcript": transcript, "reply": reply, "audio_b64": audio_b64,
             "cameras_used": list(runtime.tools.last_cameras_used),
+            "frames": _frames_for(runtime),
             "timings_ms": timings, "invoked": True,
         })
 
@@ -3070,10 +3116,15 @@ async def _run_conversation_turn(
     # questions, answer deterministically — small models often just deflect
     # ("I'll check…") and there's no tool to ground them.
     cleaned = _clean_for_speech(final, runtime.cfg.cameras)
-    if cleaned and not _is_deflection(cleaned):
-        reply, source = cleaned, "llm"
-    elif _is_config_question(user_text):
+    if _is_config_question(user_text):
+        # Roster/config questions ("how many cameras are configured?") are
+        # answered deterministically and FIRST — the model can't reliably count
+        # the configured cameras and often narrates a tool it never called
+        # ("…calling detect_objects to check…"). The roster is authoritative, so
+        # don't let that narration through as the answer.
         reply, source = _roster_answer(runtime.cfg.cameras), "roster"
+    elif cleaned and not _is_deflection(cleaned):
+        reply, source = cleaned, "llm"
     elif last_tool_result:
         reply, source = _humanize_for_speech(last_tool_result, runtime.cfg.cameras), "tool_fallback"
     else:
@@ -3094,7 +3145,8 @@ async def _run_conversation_turn(
 # Hollow "acknowledgement" replies a small model emits instead of answering
 # ("I see… I'll check the camera.") — treat as no-answer so we ground/fallback.
 _DEFLECTION_RE = re.compile(
-    r"^(i see\b.*)?(i'?ll|let me|i will|i am going to|i'?m going to|checking|"
+    r"^(i see\b.*?)?(i'?ll|let me|i will|i am going to|i'?m going to|checking|"
+    r"i'?m calling|calling|going to call|let me call|i need to|trying to|"
     r"one moment|hold on|give me a)\b", re.IGNORECASE)
 
 
