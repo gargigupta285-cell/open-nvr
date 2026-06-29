@@ -35,10 +35,13 @@ A real CPU-only test (Win 11, 11.5 GiB) gave the numbers that drive this advice:
 
 So, in order, for limited hardware:
 
-1. **Use the nano tier (smallest model, text mode):**
-   `examples/camera-agent/quickstart.sh --nano` → `qwen3:0.6b` (~0.5 GB, the
-   fastest tool-caller) + text chat (no Whisper/Piper/BLIP). ~2–3 GB total.
-2. **Cap CPU + context in config** so the LLM doesn't peg the box:
+1. **Run chat instead of voice:** `examples/camera-agent/quickstart.sh --chat`
+   skips the CPU-heavy Piper TTS (and Whisper) entirely — the single biggest
+   CPU win on a weak box.
+2. **Use a smaller LLM:** `OLLAMA_MODEL=qwen2.5:0.5b examples/camera-agent/quickstart.sh --chat`
+   (~0.5 GB, the smallest model that still tool-calls reliably). Default is
+   `qwen2.5:1.5b` (~1 GB); below `0.5b` grounding gets unreliable, so that's the floor.
+3. **Cap CPU + context in config** so the LLM doesn't peg the box:
    ```yaml
    llm_num_threads: 2     # leave cores for the rest of the machine
    llm_num_ctx: 2048      # smaller window = less RAM + faster prefill
@@ -46,15 +49,13 @@ So, in order, for limited hardware:
    and in `.env`, `OLLAMA_KEEP_ALIVE=5m` frees the model's RAM when idle (at the
    cost of a cold reload on the next turn). The compose already sets
    `OLLAMA_MAX_LOADED_MODELS=1` and `OLLAMA_NUM_PARALLEL=1`.
-3. **Or offload the brain to the cloud** (lightest *local* footprint): the
-   Sentinel-Cloud path runs vision locally but the LLM on your key — ~0 local
-   LLM RAM/CPU, ~1 s replies, no hallucination (see the comparison below). Not
-   sovereign — an explicit opt-in.
-4. **Stay in text mode** unless you need voice — it skips the CPU-heavy TTS.
+4. **Or offload the brain to the cloud** (lightest *local* footprint): point the
+   agent at any OpenAI-compatible endpoint (`config.cloud.yml`) — vision stays
+   local, the LLM runs on your key — ~0 local LLM RAM/CPU, ~1 s replies, no
+   hallucination. Not sovereign — an explicit opt-in.
 
-Rule of thumb: **nano + text = lightest fully-local; cloud LLM = lightest on the
-local machine.** Below `qwen3:0.6b` there isn't a model that tool-calls reliably,
-so that's the floor.
+Rule of thumb: **chat + small local model = lightest fully-local; cloud LLM =
+lightest on the local machine.**
 
 ### Disk / image size (it's not "for CPU")
 
@@ -62,16 +63,15 @@ Two images look huge but the size isn't a CPU requirement:
 
 - **`ollama/ollama` ~10 GB** — the official image **bundles NVIDIA CUDA + AMD
   ROCm GPU libraries** so it *can* use a GPU. On a CPU box that's ~6–7 GB of
-  unused libs. **Lighter alternative: the `camera-agent-llamacpp` profile** runs
-  llama.cpp's server (a few hundred MB) serving a GGUF — same llama.cpp core,
-  ~9 GB less disk, talked to via the OpenAI client (`--profile
-  camera-agent-llamacpp`).
+  unused libs. If disk is tight, point the agent at any OpenAI-compatible LLM
+  endpoint instead (e.g. a llama.cpp server, a few hundred MB) via
+  `config.cloud.yml` — the LLM client doesn't care what's behind the URL.
 - **`blip-adapter` ~5.5 GB** — PyTorch + transformers + baked weights (the torch
-  CPU wheel alone is ~2.5–3 GB). **Lighter alternative: the Moondream adapter**
-  (quantized, *no torch*) is well under 1.5 GB **and** adds visual Q&A.
+  CPU wheel alone is ~2.5–3 GB). It's the heaviest single piece of the stack;
+  the `--chat` path still uses it for scene description.
 
-So the light, capable stack is **llama.cpp (brain) + Moondream (eyes) + YOLOv8n +
-faster-whisper** — a fraction of the disk of Ollama + BLIP, no GPU needed.
+Neither size is a *CPU* requirement — both are disk, and the LLM image shrinks if
+you swap the backing service. The defaults favour a one-command local run.
 
 ### Measuring it
 Every `/converse` turn returns a `timings_ms` breakdown
@@ -108,7 +108,7 @@ and (b) doesn't react to room noise. Two layers handle this:
 
 | Role | Default (snappy) | Upgrade (quality, slower) | Why |
 |------|------------------|---------------------------|-----|
-| LLM | `qwen3:1.7b` (non-thinking) | `qwen3:4b` / `llama3.1:8b-instruct` | Must support tool-calling. 1.7B answers tool calls in ~1–2 s warm on CPU; 8B is noticeably slower. All Qwen3 dense models are Apache-2.0. |
+| LLM | `qwen2.5:1.5b` (non-thinking) | `qwen2.5:3b` / `llama3.1:8b-instruct` | Must support tool-calling. 1.5B answers tool calls in ~1–2 s warm on CPU; bigger is slower. Qwen2.5 dense models are Apache-2.0. `qwen2.5:0.5b` is the low-RAM floor. |
 | STT | faster-whisper `base.en` | `small.en` | `.en` is English-only — faster and far fewer hallucinated tokens on quiet audio than multilingual. |
 | TTS | Piper `en_US-libritts-high` | (voice of choice) | Piper is fast and CPU-friendly; pick the voice to match the persona gender. |
 | Detect | YOLOv8n (`yolov8n.onnx`) | YOLOv8s/m | n is the fastest; larger nets cost latency per frame and per poll. |

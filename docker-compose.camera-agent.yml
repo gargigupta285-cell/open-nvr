@@ -2,39 +2,45 @@
 # OpenNVR — camera-agent overlay
 # ==========================================
 #
-# Adds the voice-agent demo on top of Tier 0. Lets you ask your
-# cameras out loud — "is there a person at the front door?" — and
-# hear the answer spoken back. Built on Pipecat + Silero VAD +
-# Whisper STT + Ollama LLM + Piper TTS, all CPU-friendly.
+# The camera-agent in two ways to run, same app:
 #
-# Quickstart (assumes Tier 0 is already configured):
+#   * camera-agent        VOICE — ask out loud, hear the answer spoken back.
+#                         Pipecat + Silero VAD + Whisper STT + Ollama LLM +
+#                         Piper TTS + YOLOv8/BLIP vision. The flagship.
+#   * camera-agent-chat   CHAT — type your question, read the answer. Same
+#                         tools and scene description (YOLOv8 + BLIP), no
+#                         microphone/speaker, so it's lighter (no Whisper/Piper).
 #
-#     # Pull the Ollama model the agent uses (one-time, ~2GB):
+# Both run a small local LLM by default. To use a cloud / bring-your-own brain
+# instead (OpenAI-compatible), see examples/camera-agent/config.cloud.yml.
+#
+# Quickstart (from the repo root):
+#
+#     examples/camera-agent/quickstart.sh          # voice (default)
+#     examples/camera-agent/quickstart.sh --chat   # text chat
+#     examples/camera-agent/quickstart.sh --down   # stop
+#
+# Or drive Compose directly:
+#
 #     docker compose -f docker-compose.tier0.yml \
 #                    -f docker-compose.camera-agent.yml \
-#                    --profile camera-agent \
-#                    run --rm ollama-model-pull
+#                    --profile camera-agent up -d      # or --profile camera-agent-chat
 #
-#     # Bring up the overlay:
-#     docker compose -f docker-compose.tier0.yml \
-#                    -f docker-compose.camera-agent.yml \
-#                    --profile camera-agent up -d
-#
-# Open http://localhost:9100/demo, click "Start", and speak.
+# The Ollama model is pulled automatically on first ``up``. Open
+# http://localhost:9100/demo.
 #
 # ── A note on packaging maturity ───────────────────────────────
 #
-# v0.1 ships the camera-agent service ``build:``-from-source.
-# The speech adapters are already published as per-adapter GHCR images,
-# matching Tier 0's pull-first posture. The LLM path talks directly to
-# the local Ollama service until a dedicated ghcr.io/open-nvr/ollama-
-# adapter image is published.
+# v0.1 ships the camera-agent service ``build:``-from-source. The speech and
+# vision adapters are already published as per-adapter GHCR images, matching
+# Tier 0's pull-first posture. The LLM path talks directly to the local Ollama
+# service until a dedicated ghcr.io/open-nvr/ollama-adapter image is published.
 # ==========================================
 
 services:
   # ──────────────────────────────────────────────────────────────
-  # Whisper STT — pulled from GHCR. The image eagerly loads the selected
-  # model on boot; first run may download faster-whisper weights into
+  # Whisper STT — VOICE only. Pulled from GHCR. The image eagerly loads the
+  # selected model on boot; first run may download faster-whisper weights into
   # the persisted cache, then later boots reuse them.
   # ──────────────────────────────────────────────────────────────
   whisper-adapter:
@@ -59,8 +65,8 @@ services:
       retries: 20
 
   # ──────────────────────────────────────────────────────────────
-  # Piper TTS — pulled from GHCR. The default voice files live in the
-  # sibling ai-adapter checkout and are mounted where the current
+  # Piper TTS — VOICE only. Pulled from GHCR. The default voice files live in
+  # the sibling ai-adapter checkout and are mounted where the current
   # PiperService resolves MODEL_WEIGHTS_DIR/piper.
   # ──────────────────────────────────────────────────────────────
   piper-adapter:
@@ -83,23 +89,19 @@ services:
       retries: 10
 
   # ──────────────────────────────────────────────────────────────
-  # BLIP scene-caption adapter — pulled from GHCR. Powers the
-  # camera-agent's ``describe_camera`` tool with real natural-language
-  # scene captions ("a person sitting at a desk"). Without it,
-  # describe_camera falls back to the YOLOv8 object detector (class
-  # labels only). NOT auto-registered with KAI-C by ADAPTER_URL —
-  # register it at runtime once healthy:
-  #   docker compose ... exec/POST /api/v1/adapters/register
-  #   {"name":"blip","url":"http://blip-adapter:9006"}
-  # (config.docker.yml already routes caption_adapter -> "blip").
+  # BLIP scene-caption adapter — VOICE + CHAT. Pulled from GHCR. Powers the
+  # camera-agent's ``describe_camera`` tool with real natural-language scene
+  # captions ("a person sitting at a desk"). Without it, describe_camera falls
+  # back to the YOLOv8 object detector (class labels only). The
+  # ``caption-adapter-register`` one-shot registers it with KAI-C once healthy.
   #
-  # The published blip-adapter image ships with the ~990 MB BLIP weights
-  # baked in (issue #79), so it captions offline under local_only — no
-  # first-run HuggingFace download and no need to relax sovereignty. The
-  # hf-cache volume below just persists the runtime cache across restarts.
+  # The published blip-adapter image ships with the ~990 MB BLIP weights baked
+  # in (issue #79), so it captions offline under local_only — no first-run
+  # HuggingFace download and no need to relax sovereignty. The hf-cache volume
+  # below just persists the runtime cache across restarts.
   # ──────────────────────────────────────────────────────────────
   blip-adapter:
-    profiles: [camera-agent, camera-agent-standard]
+    profiles: [camera-agent, camera-agent-chat]
     image: ghcr.io/open-nvr/blip-adapter:${ADAPTER_TAG:-latest}
     container_name: opennvr_blip_adapter
     restart: unless-stopped
@@ -117,49 +119,13 @@ services:
       retries: 20
 
   # ──────────────────────────────────────────────────────────────
-  # Moondream VLM adapter — visual Q&A + captioning (vs BLIP's caption-only).
-  # The LIGHTER, more capable caption adapter: quantized, no torch (~<1.5 GB vs
-  # BLIP's ~5.5 GB), and answers "what is he wearing/doing?". Swap to it by
-  # setting CAPTION_ADAPTER=moondream in .env — the register init below then
-  # registers THIS adapter and the agent uses it. (Image must be built/published
-  # first; see ai-adapter/adapters/moondream.) Runs in the same profiles so the
-  # swap is one flag; for the lightest setup, stop blip-adapter when using it.
-  moondream-adapter:
-    # Opt-in profile so the default Standard/Sentinel don't try to pull this
-    # (until it's published) or run both caption adapters. Use it with:
-    #   CAPTION_ADAPTER=moondream docker compose … \
-    #     --profile camera-agent-standard --profile caption-moondream up -d
-    profiles: [caption-moondream]
-    image: ghcr.io/open-nvr/moondream-adapter:${ADAPTER_TAG:-latest}
-    container_name: opennvr_moondream_adapter
-    restart: unless-stopped
-    environment:
-      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
-      # The published image is code-only; supply the int8 model. Easiest:
-      # set MOONDREAM_MODEL_URL in .env → downloaded once into the volume below.
-      # For strict local_only, drop the .mf.gz into the volume or bake it instead.
-      - OPENNVR_MOONDREAM_MODEL_URL=${MOONDREAM_MODEL_URL:-}
-    volumes:
-      - opennvr_moondream_models:/models
-    networks:
-      - opennvr_internal
-    healthcheck:
-      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9008/health', timeout=2).status_code == 200 else 1)"]
-      interval: 15s
-      timeout: 5s
-      start_period: 180s
-      retries: 20
-
-  # ──────────────────────────────────────────────────────────────
-  # Caption-adapter auto-registration (test-report S-5). On a clean install the
-  # caption adapter was NOT registered with KAI-C, so describe_camera silently
-  # fell back to the detector (Standard == Lite). This one-shot registers the
-  # chosen caption adapter so Standard/Sentinel actually use it. One flag:
-  # CAPTION_ADAPTER=blip (default) or moondream picks the name AND its URL.
-  # Profile-scoped so it never runs (or warns) in lite/demo.
+  # Caption-adapter auto-registration (test-report S-5) — VOICE + CHAT. On a
+  # clean install the caption adapter was NOT registered with KAI-C, so
+  # describe_camera silently fell back to the detector. This one-shot registers
+  # BLIP so the agent actually uses real scene captions.
   # ──────────────────────────────────────────────────────────────
   caption-adapter-register:
-    profiles: [camera-agent, camera-agent-standard]
+    profiles: [camera-agent, camera-agent-chat]
     image: alpine:3.20
     container_name: opennvr_caption_register
     restart: "no"
@@ -168,21 +134,13 @@ services:
         condition: service_healthy
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
-      - CAPTION_ADAPTER=${CAPTION_ADAPTER:-blip}
-      - CAPTION_ADAPTER_URL=${CAPTION_ADAPTER_URL:-}
     command:
       - sh
       - -c
       - |
         set -e
-        name="$${CAPTION_ADAPTER:-blip}"
-        url="$${CAPTION_ADAPTER_URL}"
-        if [ -z "$$url" ]; then
-          case "$$name" in
-            moondream) url="http://moondream-adapter:9008";;
-            *)         url="http://blip-adapter:9006";;
-          esac
-        fi
+        name="blip"
+        url="http://blip-adapter:9006"
         echo "Auto-registering caption adapter '$$name' -> $$url with KAI-C…"
         i=0
         while [ $$i -lt 30 ]; do
@@ -201,48 +159,12 @@ services:
       - opennvr_internal
 
   # ──────────────────────────────────────────────────────────────
-  # Ollama — local LLM runtime. We use the official upstream image
-  # which is stable, well-maintained, and identical to what
-  # developers run on their laptops today.
+  # Ollama — local LLM runtime (VOICE + CHAT). Official upstream image: stable,
+  # well-maintained, identical to what developers run on their laptops today.
   # ──────────────────────────────────────────────────────────────
-  # ──────────────────────────────────────────────────────────────
-  # Combined voice adapter (issue #82) — Whisper + Piper + BLIP in ONE
-  # container, each on its existing port with the same /infer contract.
-  # Used by the camera-agent-combined profile instead of the three
-  # separate adapter services. One image to pull, one container to run.
-  #
-  # NOTE (test-report V-1): this image is published by the ai-adapter CI
-  # matrix but may not exist on GHCR yet. Until it does, the DEFAULT Sentinel
-  # path is the modular ``camera-agent`` profile (3 separate adapters). To use
-  # this profile before the image is published, build it yourself from the
-  # ai-adapter repo:
-  #   docker build -f adapters/voice-bundle/Dockerfile \
-  #     -t ghcr.io/open-nvr/voice-adapter:latest .
-  # ──────────────────────────────────────────────────────────────
-  voice-adapter:
-    profiles: [camera-agent-combined]
-    image: ghcr.io/open-nvr/voice-adapter:${ADAPTER_TAG:-latest}
-    container_name: opennvr_voice_adapter
-    restart: unless-stopped
-    environment:
-      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
-      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-base.en}
-    volumes:
-      - opennvr_whisper_models:/app/model_weights/whisper
-      - ../ai-adapter/model_weights/piper:/app/model_weights/piper:ro
-      - opennvr_blip_hf_cache:/root/.cache/huggingface
-    networks:
-      - opennvr_internal
-    healthcheck:
-      test: ["CMD", "python", "-c", "import httpx,sys; sys.exit(0 if all(httpx.get(f'http://127.0.0.1:{p}/health', timeout=2).status_code==200 for p in (9001,9003,9006)) else 1)"]
-      interval: 15s
-      timeout: 5s
-      start_period: 300s
-      retries: 20
-
   ollama:
-    profiles: [camera-agent, camera-agent-lite, camera-agent-standard, camera-agent-combined, camera-agent-demo]
-    image: ollama/ollama:0.21.2  # >=0.6.6 required to pull qwen3 (test-report I-1)
+    profiles: [camera-agent, camera-agent-chat]
+    image: ollama/ollama:0.21.2
     container_name: opennvr_ollama
     restart: unless-stopped
     environment:
@@ -269,19 +191,15 @@ services:
       retries: 5
 
   # ──────────────────────────────────────────────────────────────
-  # Ollama model pull — one-shot. Runs AUTOMATICALLY on ``up`` because
-  # camera-agent depends_on it (service_completed_successfully), so the
-  # model is guaranteed present before the agent starts — no manual step.
-  # (You can still run it on its own: ``docker compose ... run --rm
-  # ollama-model-pull``.) Model = OLLAMA_MODEL in .env (default qwen2.5:1.5b).
+  # Ollama model pull — one-shot (VOICE + CHAT). Runs AUTOMATICALLY on ``up``
+  # because the agent depends_on it (service_completed_successfully), so the
+  # model is present before the agent starts. Model = OLLAMA_MODEL in .env
+  # (default qwen2.5:1.5b).
   # ──────────────────────────────────────────────────────────────
   ollama-model-pull:
-    profiles: [camera-agent, camera-agent-lite, camera-agent-standard, camera-agent-combined, camera-agent-demo]
-    image: ollama/ollama:0.21.2  # >=0.6.6 required to pull qwen3 (test-report I-1)
+    profiles: [camera-agent, camera-agent-chat]
+    image: ollama/ollama:0.21.2
     container_name: opennvr_ollama_pull
-    # One-shot: pull the model, then exit 0. `restart: no` keeps it a true
-    # one-shot so camera-agent's `service_completed_successfully` dependency
-    # below can gate on it finishing (model present before the agent starts).
     restart: "no"
     depends_on:
       ollama:
@@ -303,12 +221,9 @@ services:
       - opennvr_internal
 
   # ──────────────────────────────────────────────────────────────
-  # camera-agent — the voice loop. Built from local source for
-  # v0.1; v0.1.1 will pull ghcr.io/open-nvr/camera-agent.
-  #
-  # The agent's config.yml is generated from a template by the
-  # ``camera-agent-config-init`` init container below so secrets
-  # come from .env, not the repo.
+  # VOICE — the hands-free agent. Built from local source for v0.1.
+  # config.yml is generated from config.docker.yml by the init container so
+  # secrets come from .env, not the repo.
   # ──────────────────────────────────────────────────────────────
   camera-agent-config-init:
     profiles: [camera-agent]
@@ -319,37 +234,23 @@ services:
       - -c
       - |
         set -e
-        # ISSUE-7 v6: was ``apk add --no-cache gettext`` + envsubst.
-        # The apk fetch hits dl-cdn.alpinelinux.org which several
-        # operator ISPs (IN/CN/IR) filter, so the container exits
-        # with "Permission denied" and the camera-agent never starts.
-        # Replaced with busybox sed — same semantics as envsubst (only
-        # replaces the three named variables, leaves other ``$`` sigils
-        # in YAML multiline strings untouched). sed is in busybox so no
-        # external package dependency.
-        #
-        # ``sed_esc`` escapes ``\``, ``&``, and ``/`` in the values
-        # because sed's replacement string treats them as special:
-        # ``\`` for escape sequences, ``&`` for the whole match, ``/``
-        # because we use it as the s/// delimiter. The match pattern
-        # uses character classes ([$][{]...[}]) so it doesn't depend
-        # on BRE/ERE differences for ``$``, ``{``, ``}``.
+        # busybox sed substitutes only the named ${VARS}, leaving other ``$``
+        # sigils in YAML multiline strings untouched (no envsubst / apk fetch,
+        # which some operator ISPs filter).
         sed_esc() { printf '%s' "$$1" | sed -e 's/\\/\\\\/g; s/&/\\&/g; s/\//\\\//g'; }
         ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
         lhost=$$(sed_esc "$${CAMERA_AGENT_LISTEN_HOST}")
         omodel=$$(sed_esc "$${OLLAMA_MODEL}")
-        capa=$$(sed_esc "$${CAPTION_ADAPTER}")
         sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
             -e "s/[$$][{]CAMERA_AGENT_LISTEN_HOST[}]/$$lhost/g" \
             -e "s/[$$][{]OLLAMA_MODEL[}]/$$omodel/g" \
-            -e "s/[$$][{]CAPTION_ADAPTER[}]/$$capa/g" \
+            -e "s/[$$][{]CAPTION_ADAPTER[}]/blip/g" \
             < /template/config.docker.yml > /generated/config.yml
-        echo "Wrote /generated/config.yml from template."
+        echo "Wrote /generated/config.yml (voice) from template."
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
-      - CAPTION_ADAPTER=${CAPTION_ADAPTER:-blip}
     volumes:
       - ./examples/camera-agent:/template:ro
       - opennvr_camera_agent_config:/generated
@@ -371,10 +272,6 @@ services:
         condition: service_healthy
       ollama:
         condition: service_healthy
-      # Wait for the LLM model to be fully pulled before starting, so the
-      # startup pre-warm finds the model present (instead of 500 "model not
-      # found") and the FIRST question is fast. Without this the agent races
-      # the model download.
       ollama-model-pull:
         condition: service_completed_successfully
       opennvr-core:
@@ -390,18 +287,14 @@ services:
       - opennvr_internal
 
   # ──────────────────────────────────────────────────────────────
-  # LITE profile (issue #82): the fast, low-resource on-ramp. Text
-  # chat only — NO Whisper/Piper/BLIP services, just the LLM + the
-  # YOLOv8 detector already in Tier 0. Run with:
-  #   docker compose -f docker-compose.tier0.yml \
-  #                  -f docker-compose.camera-agent.yml \
-  #                  --profile camera-agent-lite up -d
-  # Then open http://localhost:9100/demo and TYPE a question.
+  # CHAT — the same agent in text mode (POST /ask): YOLOv8 + BLIP caption +
+  # small LLM, NO Whisper/Piper. Lighter; type instead of speak. config.yml is
+  # generated from config.docker.chat.yml by the init container below.
   # ──────────────────────────────────────────────────────────────
-  camera-agent-config-init-lite:
-    profiles: [camera-agent-lite]
+  camera-agent-config-init-chat:
+    profiles: [camera-agent-chat]
     image: alpine:3.20
-    container_name: opennvr_camera_agent_config_init_lite
+    container_name: opennvr_camera_agent_config_init_chat
     command:
       - sh
       - -c
@@ -414,26 +307,27 @@ services:
         sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
             -e "s/[$$][{]CAMERA_AGENT_LISTEN_HOST[}]/$$lhost/g" \
             -e "s/[$$][{]OLLAMA_MODEL[}]/$$omodel/g" \
-            < /template/config.docker.lite.yml > /generated/config.yml
-        echo "Wrote lite /generated/config.yml from template."
+            -e "s/[$$][{]CAPTION_ADAPTER[}]/blip/g" \
+            < /template/config.docker.chat.yml > /generated/config.yml
+        echo "Wrote /generated/config.yml (chat) from template."
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
     volumes:
       - ./examples/camera-agent:/template:ro
-      - opennvr_camera_agent_config_lite:/generated
+      - opennvr_camera_agent_config_chat:/generated
 
-  camera-agent-lite:
-    profiles: [camera-agent-lite]
+  camera-agent-chat:
+    profiles: [camera-agent-chat]
     build:
       context: .
       dockerfile: examples/camera-agent/Dockerfile
     image: opennvr/camera-agent:local-build
-    container_name: opennvr_camera_agent_lite
+    container_name: opennvr_camera_agent_chat
     restart: unless-stopped
     depends_on:
-      camera-agent-config-init-lite:
+      camera-agent-config-init-chat:
         condition: service_completed_successfully
       ollama:
         condition: service_healthy
@@ -444,249 +338,7 @@ services:
     ports:
       - "127.0.0.1:9100:9100"  # demo UI (text chat)
     volumes:
-      - opennvr_camera_agent_config_lite:/app/config:ro
-    command:
-      - --config
-      - /app/config/config.yml
-    networks:
-      - opennvr_internal
-
-  # ──────────────────────────────────────────────────────────────
-  # WATCH (Standard) edition — text chat + scene description/VQA.
-  # Runs detector + BLIP caption adapter + small LLM; NO Whisper/Piper.
-  #   docker compose -f docker-compose.tier0.yml \
-  #                  -f docker-compose.camera-agent.yml \
-  #                  --profile camera-agent-standard up -d
-  # ──────────────────────────────────────────────────────────────
-  camera-agent-config-init-standard:
-    profiles: [camera-agent-standard]
-    image: alpine:3.20
-    container_name: opennvr_camera_agent_config_init_standard
-    command:
-      - sh
-      - -c
-      - |
-        set -e
-        sed_esc() { printf '%s' "$$1" | sed -e 's/\\/\\\\/g; s/&/\\&/g; s/\//\\\//g'; }
-        ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
-        lhost=$$(sed_esc "$${CAMERA_AGENT_LISTEN_HOST}")
-        omodel=$$(sed_esc "$${OLLAMA_MODEL}")
-        capa=$$(sed_esc "$${CAPTION_ADAPTER}")
-        sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
-            -e "s/[$$][{]CAMERA_AGENT_LISTEN_HOST[}]/$$lhost/g" \
-            -e "s/[$$][{]OLLAMA_MODEL[}]/$$omodel/g" \
-            -e "s/[$$][{]CAPTION_ADAPTER[}]/$$capa/g" \
-            < /template/config.docker.standard.yml > /generated/config.yml
-        echo "Wrote standard /generated/config.yml from template."
-    environment:
-      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
-      - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
-      - CAPTION_ADAPTER=${CAPTION_ADAPTER:-blip}
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
-    volumes:
-      - ./examples/camera-agent:/template:ro
-      - opennvr_camera_agent_config_standard:/generated
-
-  camera-agent-standard:
-    profiles: [camera-agent-standard]
-    build:
-      context: .
-      dockerfile: examples/camera-agent/Dockerfile
-    image: opennvr/camera-agent:local-build
-    container_name: opennvr_camera_agent_standard
-    restart: unless-stopped
-    depends_on:
-      camera-agent-config-init-standard:
-        condition: service_completed_successfully
-      ollama:
-        condition: service_healthy
-      ollama-model-pull:
-        condition: service_completed_successfully
-      opennvr-core:
-        condition: service_healthy
-    ports:
-      - "127.0.0.1:9100:9100"  # demo UI (text chat)
-    volumes:
-      - opennvr_camera_agent_config_standard:/app/config:ro
-    command:
-      - --config
-      - /app/config/config.yml
-    networks:
-      - opennvr_internal
-
-  # ──────────────────────────────────────────────────────────────
-  # FULL (Sentinel) edition on the COMBINED voice adapter (issue #82).
-  # Same hands-free voice agent as ``camera-agent``, but the three voice
-  # adapters run in one ``voice-adapter`` container.
-  #   docker compose -f docker-compose.tier0.yml \
-  #                  -f docker-compose.camera-agent.yml \
-  #                  --profile camera-agent-combined up -d
-  # ──────────────────────────────────────────────────────────────
-  camera-agent-config-init-combined:
-    profiles: [camera-agent-combined]
-    image: alpine:3.20
-    container_name: opennvr_camera_agent_config_init_combined
-    command:
-      - sh
-      - -c
-      - |
-        set -e
-        sed_esc() { printf '%s' "$$1" | sed -e 's/\\/\\\\/g; s/&/\\&/g; s/\//\\\//g'; }
-        ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
-        lhost=$$(sed_esc "$${CAMERA_AGENT_LISTEN_HOST}")
-        omodel=$$(sed_esc "$${OLLAMA_MODEL}")
-        sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
-            -e "s/[$$][{]CAMERA_AGENT_LISTEN_HOST[}]/$$lhost/g" \
-            -e "s/[$$][{]OLLAMA_MODEL[}]/$$omodel/g" \
-            < /template/config.docker.combined.yml > /generated/config.yml
-        echo "Wrote combined /generated/config.yml from template."
-    environment:
-      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
-      - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
-    volumes:
-      - ./examples/camera-agent:/template:ro
-      - opennvr_camera_agent_config_combined:/generated
-
-  camera-agent-combined:
-    profiles: [camera-agent-combined]
-    build:
-      context: .
-      dockerfile: examples/camera-agent/Dockerfile
-    image: opennvr/camera-agent:local-build
-    container_name: opennvr_camera_agent_combined
-    restart: unless-stopped
-    depends_on:
-      camera-agent-config-init-combined:
-        condition: service_completed_successfully
-      voice-adapter:
-        condition: service_healthy
-      ollama:
-        condition: service_healthy
-      ollama-model-pull:
-        condition: service_completed_successfully
-      opennvr-core:
-        condition: service_healthy
-    ports:
-      - "127.0.0.1:9100:9100"
-    volumes:
-      - opennvr_camera_agent_config_combined:/app/config:ro
-    command:
-      - --config
-      - /app/config/config.yml
-    networks:
-      - opennvr_internal
-
-  # ──────────────────────────────────────────────────────────────
-  # DEMO edition — no camera, no vision adapters (issue #82 / launch).
-  # Scripted synth: cameras + synthetic_detection answer deterministically,
-  # so you can try it (or record the demo GIF) instantly. Only Ollama + this
-  # agent do AI work. Config is mounted directly (no secrets, no init).
-  #   examples/camera-agent/quickstart.sh --demo
-  # ──────────────────────────────────────────────────────────────
-  camera-agent-demo:
-    profiles: [camera-agent-demo]
-    build:
-      context: .
-      dockerfile: examples/camera-agent/Dockerfile
-    image: opennvr/camera-agent:local-build
-    container_name: opennvr_camera_agent_demo
-    restart: unless-stopped
-    depends_on:
-      ollama:
-        condition: service_healthy
-      ollama-model-pull:
-        condition: service_completed_successfully
-    ports:
-      - "127.0.0.1:9100:9100"  # demo UI (text chat)
-    volumes:
-      - ./examples/camera-agent/config.docker.demo.yml:/app/config/config.yml:ro
-    command:
-      - --config
-      - /app/config/config.yml
-    networks:
-      - opennvr_internal
-
-  # ──────────────────────────────────────────────────────────────
-  # llama.cpp brain — the LIGHT LLM path. The server image is a few
-  # hundred MB vs Ollama's ~10 GB (Ollama bundles CUDA/ROCm GPU libs).
-  # Serves an OpenAI-compatible API; the camera-agent uses its OpenAI
-  # client to talk to it — no Ollama, no model-pull.
-  #   docker compose -f docker-compose.tier0.yml \
-  #                  -f docker-compose.camera-agent.yml \
-  #                  --profile camera-agent-llamacpp up -d
-  # ``-hf`` auto-downloads the GGUF once (cached in a volume). For an
-  # OFFLINE/local_only build, pre-download the GGUF and mount it + swap
-  # the command to ``-m /models/<file>.gguf`` instead of ``-hf``.
-  # ──────────────────────────────────────────────────────────────
-  llamacpp:
-    profiles: [camera-agent-llamacpp]
-    image: ghcr.io/ggml-org/llama.cpp:server
-    container_name: opennvr_llamacpp
-    restart: unless-stopped
-    command:
-      - -hf
-      - ${LLAMACPP_HF_REPO:-Qwen/Qwen3-1.7B-GGUF:Q4_K_M}
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8080"
-      - --jinja            # enable the chat template — needed for tool-calling
-      - --ctx-size
-      - "4096"
-    volumes:
-      - opennvr_llamacpp_models:/root/.cache/llama.cpp
-    networks:
-      - opennvr_internal
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
-      interval: 15s
-      timeout: 5s
-      start_period: 300s     # first run downloads the GGUF
-      retries: 30
-
-  camera-agent-config-init-llamacpp:
-    profiles: [camera-agent-llamacpp]
-    image: alpine:3.20
-    container_name: opennvr_camera_agent_config_init_llamacpp
-    command:
-      - sh
-      - -c
-      - |
-        set -e
-        sed_esc() { printf '%s' "$$1" | sed -e 's/\\/\\\\/g; s/&/\\&/g; s/\//\\\//g'; }
-        ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
-        lhost=$$(sed_esc "$${CAMERA_AGENT_LISTEN_HOST}")
-        sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
-            -e "s/[$$][{]CAMERA_AGENT_LISTEN_HOST[}]/$$lhost/g" \
-            < /template/config.docker.llamacpp.yml > /generated/config.yml
-        echo "Wrote llamacpp /generated/config.yml from template."
-    environment:
-      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
-      - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
-    volumes:
-      - ./examples/camera-agent:/template:ro
-      - opennvr_camera_agent_config_llamacpp:/generated
-
-  camera-agent-llamacpp:
-    profiles: [camera-agent-llamacpp]
-    build:
-      context: .
-      dockerfile: examples/camera-agent/Dockerfile
-    image: opennvr/camera-agent:local-build
-    container_name: opennvr_camera_agent_llamacpp
-    restart: unless-stopped
-    depends_on:
-      camera-agent-config-init-llamacpp:
-        condition: service_completed_successfully
-      llamacpp:
-        condition: service_healthy
-      opennvr-core:
-        condition: service_healthy
-    ports:
-      - "127.0.0.1:9100:9100"  # demo UI (text chat)
-    volumes:
-      - opennvr_camera_agent_config_llamacpp:/app/config:ro
+      - opennvr_camera_agent_config_chat:/app/config:ro
     command:
       - --config
       - /app/config/config.yml
@@ -694,32 +346,16 @@ services:
       - opennvr_internal
 
 volumes:
-  # Ollama model store — persisted so the LLM survives ``compose
-  # down``. ``ollama-model-pull`` writes here once; subsequent
-  # restarts re-use the cached weights.
+  # Ollama model store — persisted so the LLM survives ``compose down``.
   opennvr_ollama_models:
   # Faster-whisper model cache for the GHCR whisper adapter.
   opennvr_whisper_models:
-  # HuggingFace cache for the BLIP scene-caption adapter (~990 MB),
-  # so the weights survive ``compose down`` instead of re-downloading.
+  # HuggingFace cache for the BLIP scene-caption adapter (~990 MB).
   opennvr_blip_hf_cache:
   # Piper writes generated WAVs here before optionally returning inline
   # base64 audio to the camera-agent.
   opennvr_piper_audio:
-  # Generated config.yml lives here so the camera-agent container
-  # can mount it read-only without exposing the secret-bearing
-  # config to the repo.
+  # Generated voice config.yml (mounted read-only by the camera-agent).
   opennvr_camera_agent_config:
-  # Generated lite config.yml for the camera-agent-lite profile.
-  opennvr_camera_agent_config_lite:
-  # Generated standard config.yml for the camera-agent-standard profile.
-  opennvr_camera_agent_config_standard:
-  # Generated combined config.yml for the camera-agent-combined profile.
-  opennvr_camera_agent_config_combined:
-  # Moondream quantized model cache (when baked it lives in the image; this
-  # persists any runtime-mounted model across restarts).
-  opennvr_moondream_models:
-  # llama.cpp GGUF cache (the -hf download persists across restarts).
-  opennvr_llamacpp_models:
-  # Generated llamacpp config.yml for the camera-agent-llamacpp profile.
-  opennvr_camera_agent_config_llamacpp:
+  # Generated chat config.yml for the camera-agent-chat profile.
+  opennvr_camera_agent_config_chat:

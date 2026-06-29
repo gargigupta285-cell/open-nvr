@@ -37,12 +37,12 @@ detection_adapter: yolov8
 recognition_adapter: insightface
 caption_adapter: blip
 
-# LLM model + sampling. Default llama3.2:3b runs in ~3GB of RAM on
-# CPU at ~5-15 tokens/sec on modern hardware. For better tool-calling
-# quality at the cost of more RAM and slower inference, use
-# llama3.1:8b-instruct (~6GB RAM). The model MUST support tools —
+# LLM model + sampling. Default qwen2.5:1.5b (~1GB RAM, Apache-2.0,
+# non-thinking) is the sweet spot for tool-calling on CPU. Drop to
+# qwen2.5:0.5b on very low RAM, or use qwen2.5:3b for better grounding
+# at more RAM and slower inference. The model MUST support tools —
 # see https://ollama.com/blog/tool-support for the current list.
-llm_model: llama3.2:3b
+llm_model: qwen2.5:1.5b
 llm_temperature: 0.4
 llm_max_tokens: 256
 

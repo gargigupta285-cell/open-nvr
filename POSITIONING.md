@@ -26,38 +26,36 @@ terms.
 
 ```bash
 git clone https://github.com/open-nvr/open-nvr && cd open-nvr
-cp .env.example .env                       # set one secret
-docker compose -f docker-compose.tier0.yml \
-               -f docker-compose.camera-agent.yml \
-               --profile camera-agent-lite up -d
-# open http://localhost:9100/demo and TYPE: "how many people are at the door?"
+examples/camera-agent/quickstart.sh
+# open http://localhost:9100/demo, click Start, and SAY: "how many people are at the door?"
 ```
 
-That's **Spotter** — fully local, ~1–2 GB RAM, runs on a normal CPU. No GPU, no
-cloud account, no 12 GB download. This is the front door; everything below is
-one flag away from here.
+That's the **camera-agent** — a hands-free voice assistant, fully local, on a
+normal CPU. Whisper hears you, a small local LLM reasons and calls the vision
+tools, Piper speaks the answer back. No GPU, no cloud account. One command.
 
 ---
 
-## Pick your edition — the whole product is two dials
+## One app, two ways to run, one brain dial
 
-You choose **how much you trust the AI** (run it on your box vs. bring your own
-cloud key) and **how much hardware you have** (laptop CPU vs. GPU box). That's
-it — pick a cell and go.
+Same agent, your choice of interface and your choice of brain:
 
-| | Lightweight · CPU | More power · GPU |
-|---|---|---|
-| **Most secure** — AI runs on your box, nothing leaves (`local_only`) | **Spotter** — text chat, detect & count, monitors, alarms · ~1–2 GB | **Sentinel** — hands-free voice + full vision, the flagship sovereign agent |
-| **AI of your choice** — bring your own model/key (hybrid) | **Sentinel Cloud** — local vision, cloud brain · ~1–2 GB, most reliable | **Sentinel Cloud + GPU** — local GPU vision + cloud brain |
-| **In between** — richer local understanding | **Watch** — Spotter + scene description, visual Q&A, "find the red truck" · ~3–4 GB | |
+- **Voice** (default) — hands-free: speak, hear the answer. The flagship.
+- **Chat** (`--chat`) — type, read. Same tools and scene description, no
+  microphone/speaker, so it's lighter on a weak box.
 
-**Frames never leave your machine in any edition.** Cloud editions send only the
-chat text to the provider you chose, and say so out loud (audited, opt-in).
-`local_only` is the default and the promise; the cloud doors exist because *your
-AI, your choice* is the other half of the mission — not because we blinked on
-security.
+And **where the AI brain runs** is the one dial that matters for sovereignty:
 
-Full edition + model details: [`examples/camera-agent/EDITIONS_AND_MODELS.md`](examples/camera-agent/EDITIONS_AND_MODELS.md).
+- **Local** (default, `local_only`) — the LLM runs on your box via Ollama.
+  Nothing leaves the machine. Air-gap-clean, NDAA-minded. This is the promise.
+- **Bring your own** (hybrid, opt-in) — point it at any OpenAI-compatible
+  endpoint (`config.cloud.yml`); only the chat text goes out, audited, and the
+  system says so out loud.
+
+**Frames never leave your machine either way.** Run small on a laptop CPU
+(`OLLAMA_MODEL=qwen2.5:0.5b`) or give it more headroom on a bigger box — same one
+command. Model picks and hardware notes:
+[`examples/camera-agent/MODELS_AND_LATENCY.md`](examples/camera-agent/MODELS_AND_LATENCY.md).
 
 ---
 
@@ -91,7 +89,7 @@ start. Turn on what you need:
 - **Open-vocabulary search** — "find a red truck" with no retraining.
 - **Faces & watchlist** — enroll known people, flag unknowns.
 - **Hands-free voice persona** — a named assistant (Shailaja / Sidhu) with an
-  avatar, for the full Sentinel experience.
+  avatar (the default voice mode).
 - **Scheduled reports & webhooks** — recurring summaries, push to your tools.
 
 Each is a demo of the same engine; none of them is *the* product. The product is
@@ -106,9 +104,9 @@ We know the friction. The roadmap is about *removing doors*, not adding rooms:
 1. **One repo, one quickstart.** Today the stack spans three repos
    (open-nvr / ai-adapter / kai-c) — the single biggest reason people bounce.
    Consolidate the getting-started path so `clone → up` just works.
-2. **Lighter default.** Spotter is the default; the heavy voice stack is opt-in.
-   Next: collapse the three separate voice adapter containers (BLIP is the heavy
-   one — it carries PyTorch; whisper and piper are lean) into one combined image.
+2. **Lighter footprint.** The `--chat` mode already drops Whisper/Piper. Next:
+   trim the vision image (BLIP is the heavy one — it carries PyTorch; whisper and
+   piper are lean) so even the voice stack is smaller.
 3. **Bring-your-own-AI, frictionless.** The OpenAI-compatible client already
    lets any provider be the brain; make it a one-line setting in the UI.
 4. **Home Assistant / NVR integrations** so it slots into setups people already
@@ -119,7 +117,7 @@ We know the friction. The roadmap is about *removing doors*, not adding rooms:
 ## The path: popularity → community → business
 
 The order matters. First make it *trivially runnable and obviously useful*
-(Spotter default, one-repo quickstart) so people star, fork, and file issues.
+(one-command quickstart) so people star, fork, and file issues.
 Then the sovereign + bring-your-own-AI angle earns the audience nobody else
 serves — privacy-sensitive homes, schools, clinics, small public agencies, and
 anyone who can't legally send footage to a vendor cloud. **That** audience is the

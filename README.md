@@ -37,7 +37,7 @@ The architecture is published — a peer-citable paper this year, 34 references,
 
 **Its AI layer is open.** Any model behind a REST or WebSocket endpoint becomes a first-class capability through the AI Adapter Contract — a published wire spec. Object detection, open-vocabulary detection, license-plate OCR, face recognition, scene captioning, multi-object tracking, ASR, TTS, LLM tool-calling all ship out of the box. The SDK to write your own is Apache-2.0 and runs around thirty lines of Python.
 
-**You can talk to it — light or full.** The included camera-agent lets you *ask* your cameras questions. It starts as a ~1–2 GB **text** agent on a plain CPU — one command, no GPU — and scales up to a full **hands-free voice** loop with a named persona and animated avatar. The brain runs locally (Ollama) by default, or you **bring your own** any OpenAI-compatible model — your choice, your control. A few editions cover the range from a dev laptop to a GPU box; details in [`examples/camera-agent/EDITIONS_AND_MODELS.md`](examples/camera-agent/EDITIONS_AND_MODELS.md).
+**You can talk to it — by voice or text.** The included camera-agent lets you *ask* your cameras questions. Run it **hands-free by voice** (a Pipecat loop with a named persona and animated avatar) or as a lighter **text chat** — same app, same tools, one flag apart, both on a plain CPU. The brain runs locally (Ollama) by default, or you **bring your own** any OpenAI-compatible model — your choice, your control. See [`examples/camera-agent/README.md`](examples/camera-agent/README.md).
 
 **It runs on the hardware you already have.** If the machine it's on has a camera — a laptop webcam, a USB or Pi camera, the onboard sensor on a drone or robot — the agent can discover and use it with zero provisioning. Any device that can see a camera or a stream can run its own on-board sovereign agent.
 
@@ -55,7 +55,7 @@ cd open-nvr
 
 That's it. First run launches a brief interactive setup (deploy mode, recording path, secrets generated for you). Run `./start.sh up` again to start containers.
 
-> **Just want to try the AI?** `examples/camera-agent/quickstart.sh` brings up a ~1–2 GB text agent you can ask questions in one command — no GPU, and you can point it at your laptop webcam. See [Talk to your cameras](#talk-to-your-cameras).
+> **Just want to try the AI?** `examples/camera-agent/quickstart.sh` brings up the voice agent in one command (`--chat` for a lighter text version) — no GPU, and you can point it at your laptop webcam. See [Talk to your cameras](#talk-to-your-cameras).
 
 ### What you'll see when it boots
 
@@ -110,30 +110,23 @@ Skipping `./start.sh up` and using bare `docker compose up -d` works too (Docker
 
 ## Talk to your cameras
 
-The camera-agent lets you *ask* your cameras questions — all on your hardware. Start light with **one command** (text chat, detection only, ~1–2 GB RAM, no GPU):
+The camera-agent lets you *ask* your cameras questions — all on your hardware. **One command, from the repo root:**
 
 ```bash
-examples/camera-agent/quickstart.sh        # Spotter (lite): type a question
+examples/camera-agent/quickstart.sh          # voice: click Start and speak
+examples/camera-agent/quickstart.sh --chat   # chat: type and read (lighter — no mic/speaker)
+examples/camera-agent/quickstart.sh --down   # stop
 ```
 
-Then open <http://localhost:9100/demo> and type *"how many people are at the door?"*. No camera yet? Click **"Use this machine's camera"** to run against your laptop webcam (or any USB/Pi/onboard device) with zero provisioning.
+Then open <http://localhost:9100/demo>. **No camera?** Click **"Use this machine's camera"** to run against your laptop webcam (or any USB/Pi/onboard device) with zero provisioning.
 
-**No camera at all? Try it instantly in demo mode:**
+First boot pulls the small LLM (default `qwen2.5:1.5b`) and warms the adapters — give it a minute. A few knobs:
 
-```bash
-examples/camera-agent/quickstart.sh --demo   # scripted scenes, no camera, no vision models
-```
+- **Low-RAM box** — `OLLAMA_MODEL=qwen2.5:0.5b examples/camera-agent/quickstart.sh`
+- **Cloud / bring-your-own brain** — point it at any OpenAI-compatible endpoint; see [`config.cloud.yml`](examples/camera-agent/config.cloud.yml)
+- **Drive Compose yourself** — `docker compose -f docker-compose.yml -f docker-compose.camera-agent.yml --profile camera-agent up -d` (or `--profile camera-agent-chat`)
 
-This runs the agent against deterministic scripted scenes — ask *"how many people are at the front door?"* and it answers *"2 people"* every time. Perfect for a first look or recording a demo. (Edit the scene counts in `examples/camera-agent/config.docker.demo.yml`; it's a scripted demo of the UX, real detection is one flag away.)
-
-Step up an edition when you want more — one flag each:
-
-```bash
-examples/camera-agent/quickstart.sh --standard  # Watch: + scene description & visual Q&A
-examples/camera-agent/quickstart.sh --voice     # Sentinel: full hands-free voice + persona
-```
-
-What each edition runs and which models it uses is laid out in [`examples/camera-agent/EDITIONS_AND_MODELS.md`](examples/camera-agent/EDITIONS_AND_MODELS.md). Prefer to drive Compose yourself? `docker compose -f docker-compose.yml -f docker-compose.camera-agent.yml --profile camera-agent-lite up -d` does the same as the lite quickstart.
+Full details — model picks, hardware notes, how it works — in [`examples/camera-agent/README.md`](examples/camera-agent/README.md).
 
 **What you can ask:**
 
@@ -145,7 +138,7 @@ What each edition runs and which models it uses is laid out in [`examples/camera
 | *"Who was at the door this morning?"* | LLM calls InsightFace against your enrolled face DB |
 | *"Did a red truck come by the dock earlier?"* | LLM searches the recorded-footage index (when a [`footage-search`](examples/footage-search) index is configured) |
 
-Under the hood: a local LLM (Ollama) doing OpenAI-style tool-calling over your live frames — or a cloud brain you bring. The lite default is text-only on CPU; the full voice loop (Pipecat · Silero VAD · Whisper STT · Piper TTS) is one flag up. No cloud and no API keys unless *you* choose a cloud model.
+Under the hood: a local LLM (Ollama) doing OpenAI-style tool-calling over your live frames — or a cloud brain you bring. The default is the full hands-free voice loop (Pipecat · Silero VAD · Whisper STT · Piper TTS) on CPU; `--chat` is the same agent, lighter, typed instead of spoken. No cloud and no API keys unless *you* choose a cloud model.
 
 This is the first OpenNVR example where the cameras have agency, not just data.
 

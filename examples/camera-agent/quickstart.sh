@@ -2,17 +2,18 @@
 # ============================================================
 # OpenNVR Camera Agent — one-command quickstart
 # ============================================================
-# Clone → run → talk to your cameras. Defaults to the LITE
-# (Spotter) edition: text chat, detection only, ~1-2 GB RAM,
-# no GPU. Heavier editions are one flag away.
+# Clone → run → talk to your cameras. Two ways to run the SAME agent:
 #
-# Usage (run from the repo root):
-#   examples/camera-agent/quickstart.sh            # Spotter (lite, text)
-#   examples/camera-agent/quickstart.sh --standard # Watch  (+ scene description)
-#   examples/camera-agent/quickstart.sh --voice    # Sentinel (full hands-free voice)
-#   examples/camera-agent/quickstart.sh --down      # stop the agent
+#   examples/camera-agent/quickstart.sh          # VOICE (default): speak, hear answers
+#   examples/camera-agent/quickstart.sh --chat   # CHAT: type, read answers (lighter)
+#   examples/camera-agent/quickstart.sh --down    # stop
 #
-# See examples/camera-agent/EDITIONS_AND_MODELS.md for what each edition does.
+# Voice = Whisper STT + Ollama LLM + Piper TTS + YOLOv8/BLIP vision.
+# Chat  = the same tools and scene description, no microphone/speaker.
+#
+# The Ollama model (default qwen2.5:1.5b) is pulled automatically on first start.
+# Low-RAM box? Override it:  OLLAMA_MODEL=qwen2.5:0.5b examples/camera-agent/quickstart.sh
+# Cloud / bring-your-own brain? See examples/camera-agent/config.cloud.yml.
 # ============================================================
 set -euo pipefail
 
@@ -26,28 +27,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$ROOT"
 
-PROFILE="camera-agent-lite"; EDITION="Spotter (lite · text · ~1-2 GB)"
-ACTION="up"; NANO=0
+PROFILE="camera-agent"; MODE="voice (speak / hear)"
+ACTION="up"
 for arg in "$@"; do
   case "$arg" in
-    --standard) PROFILE="camera-agent-standard"; EDITION="Watch (standard · +scene description · ~3-4 GB)";;
-    --voice|--full) PROFILE="camera-agent"; EDITION="Sentinel (full · hands-free voice · ~6-12 GB)";;
-    --demo) PROFILE="camera-agent-demo"; EDITION="Demo (no camera · scripted scenes · instant)";;
-    --lite|--spotter) PROFILE="camera-agent-lite";;
-    --nano) PROFILE="camera-agent-lite"; NANO=1; EDITION="Nano (lite · tiniest LLM qwen2.5:0.5b · ~2-3 GB)";;
+    --chat|--text) PROFILE="camera-agent-chat"; MODE="chat (type / read)";;
+    --voice|--full) PROFILE="camera-agent"; MODE="voice (speak / hear)";;
     --down|--stop) ACTION="down";;
     -h|--help)
       cat <<'EOF'
 OpenNVR Camera Agent — one-command quickstart (run from repo root)
 
-  examples/camera-agent/quickstart.sh            Spotter (lite · text · ~1-2 GB)
-  examples/camera-agent/quickstart.sh --nano     Nano: tiniest LLM qwen2.5:0.5b (~2-3 GB, low-RAM boxes)
-  examples/camera-agent/quickstart.sh --demo     Demo: no camera, scripted scenes (instant try / GIF)
-  examples/camera-agent/quickstart.sh --standard Watch  (+ scene description · ~3-4 GB)
-  examples/camera-agent/quickstart.sh --voice    Sentinel (full hands-free voice)
-  examples/camera-agent/quickstart.sh --down     stop the agent
+  examples/camera-agent/quickstart.sh          voice (default): speak, hear answers
+  examples/camera-agent/quickstart.sh --chat   chat: type, read answers (lighter)
+  examples/camera-agent/quickstart.sh --down   stop the agent
 
-See examples/camera-agent/EDITIONS_AND_MODELS.md for what each edition does.
+Override the LLM:  OLLAMA_MODEL=qwen2.5:0.5b examples/camera-agent/quickstart.sh
+Cloud / BYO brain: see examples/camera-agent/config.cloud.yml
 EOF
       exit 0;;
     *) warn "ignoring unknown arg: $arg";;
@@ -63,7 +59,7 @@ COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.camera-agent.yml
 
 if [ "$ACTION" = "down" ]; then
   say "Stopping the camera agent…"
-  "${COMPOSE[@]}" --profile camera-agent-lite --profile camera-agent-standard --profile camera-agent-demo --profile camera-agent down
+  "${COMPOSE[@]}" --profile camera-agent --profile camera-agent-chat down
   ok "Stopped."
   exit 0
 fi
@@ -83,17 +79,9 @@ else
   ok ".env already present."
 fi
 
-# Nano: override the model to the tiniest tool-capable LLM. Exporting it makes
-# Docker Compose use it for BOTH the model pull and the rendered config (shell
-# env overrides the .env value), so they stay in sync.
-if [ "${NANO}" = "1" ]; then
-  export OLLAMA_MODEL="${OLLAMA_MODEL:-qwen2.5:0.5b}"
-  say "Nano mode: OLLAMA_MODEL=${OLLAMA_MODEL}"
-fi
-
-# 2) Bring up the chosen edition. The lite/standard profiles auto-pull the
-#    small LLM and start only the services that edition needs.
-say "Starting edition: ${EDITION}"
+# 2) Bring up the chosen mode. First boot auto-pulls the small LLM and warms
+#    the adapters, then starts the agent.
+say "Starting the camera agent — ${MODE}"
 say "Profile: ${PROFILE} (Ctrl-C is safe; containers run detached)"
 "${COMPOSE[@]}" --profile "$PROFILE" up -d
 

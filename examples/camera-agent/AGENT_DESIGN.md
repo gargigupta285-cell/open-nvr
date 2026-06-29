@@ -68,7 +68,7 @@ Two tiers, both seeded:
    | "what is the person wearing?" | calls `describe_camera` (VQA), gives an attribute answer |
    | "thanks, that's all" | no tool call, polite close |
 
-   Run these against each candidate model (qwen3:1.7b, qwen3:0.6b, a cloud model)
+   Run these against each candidate model (qwen2.5:1.5b, qwen2.5:0.5b, a cloud model)
    to pick the brain per deployment — the harness already quantifies latency; add
    pass/fail on the expected tool + a keyword check on the answer.
 

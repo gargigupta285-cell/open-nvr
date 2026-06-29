@@ -94,7 +94,7 @@ class AppConfig:
     piper_token: str = ""
 
     # LLM tuning.
-    llm_model: str = "llama3.2:3b"
+    llm_model: str = "qwen2.5:1.5b"
     llm_temperature: float = 0.4
     llm_max_tokens: int = 256
     # Reasoning toggle for "thinking" models (Qwen3 etc.). Leave None for
@@ -1458,7 +1458,7 @@ def load_config(path: str | Path) -> AppConfig:
         llm_num_ctx=int(raw.get("llm_num_ctx") or 4096),
         piper_url=_str("piper_url", "http://127.0.0.1:9001"),
         piper_token=_str("piper_token", ""),
-        llm_model=_str("llm_model", "llama3.2:3b"),
+        llm_model=_str("llm_model", "qwen2.5:1.5b"),
         llm_temperature=_float("llm_temperature", 0.4),
         llm_max_tokens=_int("llm_max_tokens", 256),
         enabled_tools=(

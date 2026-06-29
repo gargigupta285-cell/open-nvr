@@ -1,10 +1,11 @@
 # Copyright (c) 2026 OpenNVR
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Docker WATCH (Standard) config — rendered by camera-agent-config-init-standard.
+# Docker CHAT config — rendered by camera-agent-config-init-chat.
 # Text chat (POST /ask) with scene description/VQA via the BLIP caption adapter.
-# Runs detector + BLIP + small LLM — NO Whisper/Piper voice stack (issue #82).
-# ${...} placeholders are substituted from .env at boot.
+# Runs detector + BLIP + small LLM — NO Whisper/Piper voice stack. The lighter
+# way to run the same camera-agent (no microphone/speaker). ${...} placeholders
+# are substituted from .env at boot.
 
 text_mode: true
 
@@ -19,10 +20,10 @@ llm_temperature: 0.3
 llm_max_tokens: 220
 
 # detect_objects -> YOLOv8 (name "default"); describe_camera -> BLIP caption
-# adapter (register it once healthy). describe_camera falls back to the detector
-# until BLIP is registered in KAI-C.
+# adapter (auto-registered by caption-adapter-register once healthy).
+# describe_camera falls back to the detector until BLIP is registered in KAI-C.
 detection_adapter: default
-caption_adapter: ${CAPTION_ADAPTER}   # blip (default) or moondream — auto-registered
+caption_adapter: ${CAPTION_ADAPTER}   # blip — auto-registered by caption-adapter-register
 recognition_adapter: insightface
 
 enabled_tools:
