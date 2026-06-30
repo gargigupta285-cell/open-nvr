@@ -2697,11 +2697,13 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                                      "invoked": False})
             question = stripped
 
-        # 4) Answer. A bare wake word ("Hey Shailaja") with no question gets a
-        #    quick spoken acknowledgement instead of spending the LLM.
+        # 4) Answer. A bare wake word ("Hey Shailaja") with no question ARMS the
+        #    agent, Hey-Siri style: she acknowledges, and the UI then treats the
+        #    NEXT utterance as the question without needing the wake word again.
         runtime.tools.last_cameras_used = []
-        if require_wake and not question:
-            reply = "Yes? How can I help?"
+        armed = bool(require_wake and not question)
+        if armed:
+            reply = "Yes?"
         else:
             # Fresh frame per question: drop any cached frame so each turn sees
             # the current moment, not a frame cached seconds ago (a cause of the
@@ -2738,7 +2740,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             "transcript": transcript, "reply": reply, "audio_b64": audio_b64,
             "cameras_used": list(runtime.tools.last_cameras_used),
             "frames": _frames_for(runtime),
-            "timings_ms": timings, "invoked": True,
+            "timings_ms": timings, "invoked": True, "armed": armed,
         })
 
     @app.websocket("/ws")

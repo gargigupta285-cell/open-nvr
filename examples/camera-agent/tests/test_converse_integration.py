@@ -248,7 +248,8 @@ def test_converse_bare_wake_word_acks_without_llm(harness):
 
     data = client.post("/converse?wake=1", content=_wav_blob()).json()
     assert data["invoked"] is True
-    assert data["reply"]                 # a spoken acknowledgement
+    assert data["armed"] is True         # bare wake word arms her (Hey-Siri style)
+    assert data["reply"]                 # a spoken acknowledgement ("Yes?")
     assert called["chat"] is False       # but no LLM spend
 
 

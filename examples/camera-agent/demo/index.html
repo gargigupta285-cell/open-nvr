@@ -160,7 +160,7 @@
           <button id="talk" class="talk" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg> Talk</button>
           <label class="waketoggle" id="wakeWrap" title="When on, the agent only answers when you address it by name first.">
             <input type="checkbox" id="wakeToggle" checked>
-            <span id="wakeLabel">Require “Hey&nbsp;…” before each question</span>
+            <span id="wakeLabel">Wake with “Hey&nbsp;…”, then ask</span>
           </label>
           <div class="row askrow">
             <input id="askInput" type="text" placeholder="Type a question, e.g. how many people on cam1?" autocomplete="off">
@@ -228,6 +228,9 @@
     const START_MARGIN=2.2, SILENCE_MARGIN=1.5, FLOOR_EMA=0.05;
     let noiseFloor=0.01;
     const IDLE_MS=25000, POLL_MS=3000;
+    // Hey-Siri arming: after the wake word she listens for the question for
+    // ARM_MS without needing the name again, plus a short follow-up window.
+    const ARM_MS=12000, FOLLOWUP_MS=7000; let armUntil=0;
 
     let agentName="the agent";
     let mediaStream=null, audioCtx=null, analyser=null, floatBuf=null;
@@ -313,8 +316,12 @@
       });
     }
     function wakeOn(){ return !!(wakeToggle && wakeToggle.checked); }
-    function restingAvatar(){ setAvatar(wakeOn() && sessionActive ? "gated" : "listening"); }
-    function listenHint(){ return wakeOn() ? ('Say “Hey '+agentName+'” to ask.') : "Listening…"; }
+    function isArmed(){ return performance.now() < armUntil; }
+    function restingAvatar(){ setAvatar(wakeOn() && sessionActive && !isArmed() ? "gated" : "listening"); }
+    function listenHint(){ return isArmed() ? "Listening… ask your question."
+      : (wakeOn() ? ('Say “Hey '+agentName+'” to ask.') : "Listening…"); }
+    function updateWakeLabel(){ if(wakeLabel) wakeLabel.innerHTML = wakeOn()
+      ? `Wake with “Hey&nbsp;${agentName}”, then ask` : "Always listening · no wake word"; }
 
     // Talking-avatar VIDEO: an idle loop, and a 'speaking' loop while she talks.
     // Bundled clips are placeholders — swap in your own (or a HeyGen/render
@@ -366,7 +373,7 @@
 
     async function loadAgent(){ try{ const a=await (await fetch("/agent")).json();
       if(a.name){ agentName=a.name; titleEl.textContent=agentName+" — OpenNVR Camera Agent";
-        if(wakeLabel) wakeLabel.innerHTML=`Require “Hey&nbsp;${agentName}” before each question`; }
+        updateWakeLabel(); }
       if(a.text_mode){
         // Text/chat profile: lead with typing; voice (and wake word) don't apply.
         document.getElementById("talk").style.display="none";
@@ -461,11 +468,20 @@
     async function onUtterance(){ const blob=new Blob(chunks,{type:recorder.mimeType||"audio/webm"});
       if(blob.size<1200){ if(sessionActive){setAvatar("listening");setStatus("Listening…","active");} return; }
       busy=true;
-      try{ const url="/converse?camera="+encodeURIComponent(cameraParam())+"&wake="+(wakeOn()?"1":"0");
+      try{ const wakeParam=isArmed()?"0":(wakeOn()?"1":"0");   // armed → the next utterance IS the question
+        const url="/converse?camera="+encodeURIComponent(cameraParam())+"&wake="+wakeParam;
         const resp=await fetch(url,{method:"POST",headers:{"Content-Type":"application/octet-stream"},body:blob});
         if(!resp.ok){const e=await resp.json().catch(()=>({}));throw new Error(e.error||("HTTP "+resp.status));}
         const data=await resp.json();
-        if(!data.transcript){ if(sessionActive){restingAvatar();setStatus("Didn't catch that — "+listenHint(),"active");} return; }
+        if(!data.transcript){ if(sessionActive){restingAvatar();setStatus(isArmed()?"Listening… ask your question.":("Didn't catch that — "+listenHint()),"active");} return; }
+        if(data.armed){
+          // Wake word heard with no question — acknowledge and start listening
+          // for the question (Hey-Siri style); no need to say her name again.
+          armUntil=performance.now()+ARM_MS; playChime("listen");
+          if(data.audio_b64){ speaking=true; setAvatar("speaking"); await speak(data.audio_b64); speaking=false; }
+          if(sessionActive){ setAvatar("listening"); setStatus("Listening… ask your question.","active"); }
+          lastActivity=performance.now(); return;
+        }
         if(data.invoked===false){
           // Heard speech, but it wasn't addressed to her — show it faintly and
           // keep waiting, instead of answering the room.
@@ -476,6 +492,7 @@
         addMsg(data.transcript,"user"); lastActivity=performance.now(); showWorking(data.cameras_used); showLatency(data.timings_ms);
         if(data.reply) addMsg(data.reply,"agent",data.frames);
         if(data.audio_b64){ speaking=true; setAvatar("speaking"); await speak(data.audio_b64); speaking=false; }
+        armUntil=performance.now()+FOLLOWUP_MS;   // brief window for a natural follow-up
         if(sessionActive){ restingAvatar(); setStatus(listenHint(),"active"); }
       }catch(err){ addMsg("Request failed: "+err.message,"sys"); if(sessionActive){restingAvatar();setStatus("Error: "+err.message,"error");} }
       finally{ busy=false; lastActivity=performance.now(); }
@@ -493,10 +510,10 @@
       if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();},POLL_MS);
       if(!alarmTimer) alarmTimer=setInterval(pollAlarms,2500);
     }
-    function stopSession(){ sessionActive=false; if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(capturing)stopCapture();
+    function stopSession(){ sessionActive=false; armUntil=0; if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(capturing)stopCapture();
       stopSpeaking(); micdotEl.hidden=true;
       talkBtn.innerHTML=IC.mic+" Talk"; talkBtn.classList.remove("listening"); setAvatar("idle"); setStatus("Stopped. Tap Talk to resume."); }
-    function pauseForIdle(){ sessionActive=false; if(vadTimer){clearInterval(vadTimer);vadTimer=null;}
+    function pauseForIdle(){ sessionActive=false; armUntil=0; if(vadTimer){clearInterval(vadTimer);vadTimer=null;}
       stopSpeaking(); micdotEl.hidden=true;
       talkBtn.innerHTML=IC.mic+" Enable talking"; talkBtn.classList.remove("listening"); setAvatar("idle");
       setStatus("Paused — no conversation for a while. Tap Enable talking to resume.");
@@ -585,7 +602,7 @@
     $("askInput").addEventListener("keydown",(e)=>{ if(e.key==="Enter") ask(); });
     talkBtn.addEventListener("click",()=>{ ensureOutputAudio(); if(busy&&sessionActive)return; if(sessionActive)stopSession(); else startSession(); });
     resetBtn.addEventListener("click",async()=>{ stopSpeaking(); try{ await fetch("/reset",{method:"POST"}); logEl.innerHTML=""; addMsg("Conversation reset.","sys"); }catch{} });
-    if(wakeToggle) wakeToggle.addEventListener("change",()=>{
+    if(wakeToggle) wakeToggle.addEventListener("change",()=>{ updateWakeLabel(); armUntil=0;
       if(sessionActive && !capturing && !speaking && !busy){ restingAvatar(); setStatus(listenHint(),"active"); } });
 
     async function loadNotify(){
