@@ -27,12 +27,25 @@ ollama_token:
 piper_url: http://piper-adapter:9001
 piper_token: ${INTERNAL_API_KEY}
 
+# The agent is named "Sara" — this is also the wake word ("Hey Sara"), like
+# Apple's "Siri". CHANGING THE NAME IS NOT ADVISED: the wake word is heard via
+# speech-to-text, which transcribes a common name like Sara the same way every
+# time. An unusual or non-English name is often mis-heard, and a name STT mishears
+# means the agent won't wake when you call it. The voice (voice_gender) is a
+# SEPARATE setting — you can pick a male voice without changing the name.
+#   agent_name: Sara           # only change if you must; then add its spellings:
+#   wake_words: ["camera"]     # extra exact wake words (e.g. a plain-English one)
+
 # Wake word (voice only). When true, the agent answers a spoken utterance only
-# when it's addressed by name ("Hey Shailaja, …") — so it ignores the TV, a side
+# when addressed by name ("Hey Sara, …") — so it ignores the TV, a side
 # conversation, or its own reply echoed back through the speakers. The demo UI
-# also exposes a per-session toggle that overrides this. Set false for a
-# continuous, always-listening turn-taker.
+# also exposes a per-session toggle. Set false for continuous, always-listening.
+# The name's known spellings (sara/sarah) match exactly, plus a tight fuzzy net
+# (wake_fuzzy 0.85) catches close STT drift while rejecting real words. An
+# address word ("hey/ok") is required — the "Hey Siri" model.
 wake_word_required: true
+#   wake_require_prefix: true   # false = the bare word (no "hey") also wakes her
+#   wake_fuzzy: 0.85            # 1.0 = exact only; < 0.85 = more forgiving
 
 # Vision tools — routed through KAI-C by the registered adapter NAME.
 # The Tier 0 stack registers ONLY the YOLOv8 object detector, under the
@@ -43,7 +56,7 @@ wake_word_required: true
 # their intended names so they light up automatically once registered.)
 detection_adapter: default
 recognition_adapter: insightface
-caption_adapter: ${CAPTION_ADAPTER}   # blip (default) or moondream — auto-registered
+caption_adapter: ${CAPTION_ADAPTER}   # blip — auto-registered by caption-adapter-register
 
 # Tools advertised to the LLM. Tier 0 only registers the YOLOv8 object
 # detector, so the demo exposes just the two tools that actually work:

@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import difflib
 import json
 import logging
 import re
@@ -81,10 +82,22 @@ class AppConfig:
     # ambient noise doesn't start a spurious conversation turn.
     stt_noise_filter: bool = True
     # Wake-word gate (voice only). When True, the agent only answers an
-    # utterance that's addressed to it by name ("Hey Shailaja, …") — so it
+    # utterance that's addressed to it by name ("Hey Sara, …") — so it
     # doesn't respond to the TV, a side conversation, or its own echoed reply.
     # The UI exposes a per-session toggle that overrides this default.
     wake_word_required: bool = True
+    # Extra wake words/phrases on top of the persona name + built-in aliases —
+    # e.g. ["computer", "hey camera"] for words STT transcribes more reliably.
+    wake_words: list[str] | None = None
+    # Wake-word matching: the name's known spellings match EXACTLY, plus a TIGHT
+    # fuzzy safety net (0.85) that catches close STT drift (e.g. "Sara"→"Saara")
+    # but still rejects real words (sahara/sorry/camera all score ≤0.67). Set to
+    # 1.0 for exact-only, or lower (e.g. 0.72) to be more forgiving.
+    wake_fuzzy: float = 0.85
+    # Require an address word ("hey/ok/hi") before the name (the "Hey Siri"
+    # model). On = far fewer false wakes (a bare word that sounds like the name
+    # won't trigger). Off = the bare name also wakes her.
+    wake_require_prefix: bool = True
     ollama_url: str = "http://127.0.0.1:9004"
     ollama_token: str = ""
 
@@ -112,9 +125,9 @@ class AppConfig:
     llm_num_threads: int | None = None
     llm_num_ctx: int = 4096
 
-    # Lite/text mode: the UI defaults to a text box (no mic) and the voice
-    # adapters (Whisper/Piper) aren't required. The fast, low-resource on-ramp
-    # — see issue #82 and config.lite.yml.
+    # Text/chat mode: the UI defaults to a text box (no mic) and the voice
+    # adapters (Whisper/Piper) aren't required. The lighter on-ramp — used by
+    # the camera-agent-chat compose profile (config.docker.chat.yml).
     text_mode: bool = False
 
     # Which tools to advertise to the LLM. None = all. Restricting this
@@ -148,10 +161,14 @@ class AppConfig:
     # matching contact records "would alert <number>" when it fires.
     emergency_contacts: dict[str, str] | None = None
 
-    # Persona voice: "male" → Sidhu (default), "female" → Shailaja. Selects the
-    # agent's name + pronouns; the actual spoken voice is the Piper voice
-    # configured in the ai-adapter (see README/ALARMS notes).
-    voice_gender: str = "male"
+    # The agent's name AND wake word — "Hey <agent_name>". Defaults to "Sara".
+    # Changing it is NOT advised (see the load_config warning): STT recognises a
+    # common name like Sara far more reliably, and a name it mishears means the
+    # agent won't wake. If you do change it, register its spellings in wake_words.
+    agent_name: str = "Sara"
+    # Spoken voice (the Piper voice configured in the ai-adapter). Independent of
+    # the name — switch to "male" for a male voice without changing the name.
+    voice_gender: str = "female"
 
     # External notifications: webhook URLs alarms/watches fan out to so alerts
     # reach you when the browser tab is closed (Slack/Discord/n8n/Home
@@ -212,8 +229,11 @@ _DEFAULT_SYSTEM_PROMPT = (
 # The agent's persona name follows the configured voice gender. The actual
 # spoken voice is whichever Piper voice the ai-adapter serves; ``voice_gender``
 # here selects the matching persona NAME (and pronouns) the agent uses.
-AGENT_NAMES = {"female": "Shailaja", "male": "Sidhu"}
-DEFAULT_VOICE_GENDER = "male"
+# ONE agent name, configurable. "Sara" is the default because it's a common name
+# speech-to-text transcribes the same way every time — changing it is not advised
+# (see the warning in load_config). The voice (below) is a separate choice.
+DEFAULT_AGENT_NAME = "Sara"
+DEFAULT_VOICE_GENDER = "female"
 
 
 # Phrases Whisper commonly hallucinates from silence / background noise / the
@@ -291,60 +311,139 @@ def _clean_for_speech(text: str, cameras=None) -> str:
     return s.strip()
 
 
-def agent_name_for(voice_gender: str | None) -> str:
-    return AGENT_NAMES.get((voice_gender or DEFAULT_VOICE_GENDER).strip().lower(),
-                           AGENT_NAMES[DEFAULT_VOICE_GENDER])
+def agent_name_for(name: str | None) -> str:
+    """Normalise the configured agent name, falling back to the default."""
+    return (name or "").strip() or DEFAULT_AGENT_NAME
 
 
 # ── Wake-word gating (voice) ────────────────────────────────────────
 # Only treat a spoken utterance as a question when it's addressed to the
-# agent by name ("Hey Shailaja, what's at the door?"). Without this, ANY
+# agent by name ("Hey Sara, what's at the door?"). Without this, ANY
 # speech in the room — the TV, a side conversation, or the agent re-hearing
 # its own reply through the speakers — becomes a turn, which is the single
 # biggest cause of spurious/looping/"hallucinated" answers in a live room.
 # Transcript-side: reuses Whisper, adds no model, stays fully local.
 
-# Common Whisper mis-hearings of each persona name → all count as the wake word.
+# EXACT spelling variants Whisper produces for each persona name — all count as
+# the wake word, matched exactly (no fuzzy). Pick a name made of clear sounds and
+# add the 2-3 spellings STT actually emits (watch the "wake score" log when you
+# test). Avoid real-word spellings (e.g. "mirror") that would false-wake.
 _WAKE_ALIASES = {
-    "shailaja": ["shailaja", "shailja", "shailaj", "shailu", "shyla", "shaila"],
-    "sidhu": ["sidhu", "sidh", "sid"],
+    "sara": ["sara", "sarah"],
 }
-# Optional address prefix the user might say before the name.
-_WAKE_LEAD = r"(?:hey|hi|hello|ok|okay|yo|hai)?[\s,]*"
+# Words the user might say to address the agent before the name.
+_ADDRESS_WORDS = {"hey", "hi", "hello", "ok", "okay", "yo", "hai"}
+_WAKE_LEAD = r"(?:hey|hi|hello|ok|okay|yo|hai)?[\s,]*"      # prefix optional
+_WAKE_LEAD_REQ = r"(?:hey|hi|hello|ok|okay|yo|hai)[\s,]+"   # prefix REQUIRED
 
 
-def wake_phrases(agent_name: str) -> list[str]:
-    """Lowercase names that invoke the agent (persona name + known aliases)."""
+def wake_phrases(agent_name: str, extra: list[str] | None = None) -> list[str]:
+    """Lowercase names that invoke the agent (persona name + known aliases +
+    any operator-configured ``wake_words``)."""
     base = (agent_name or "").strip().lower()
     names = list(_WAKE_ALIASES.get(base, []))
     if base and base not in names:
         names.insert(0, base)
+    for w in (extra or []):
+        w = str(w).strip().lower()
+        if w and w not in names:
+            names.insert(0, w)
     return names
 
 
-def match_wake(transcript: str, agent_name: str) -> tuple[bool, str]:
+def match_wake(
+    transcript: str, agent_name: str,
+    extra_words: list[str] | None = None, fuzzy: float = 0.85,
+    require_prefix: bool = True,
+) -> tuple[bool, str]:
     """Return ``(invoked, question)``.
 
-    ``invoked`` is True when the transcript opens (within the first couple of
-    words) by addressing the agent by name. ``question`` is the remainder with
-    the wake phrase + any leading "hey"/punctuation stripped — '' when the user
-    said only the name ("Hey Shailaja"). Uses word boundaries so a name that is
-    a short string (e.g. "sid") doesn't match inside another word ("consider").
+    ``invoked`` is True when the transcript opens by addressing the agent by
+    name. ``question`` is the remainder with the wake phrase + leading
+    "hey"/punctuation stripped — '' when only the name was said.
+
+    Two passes: an exact word match on the name/aliases (also catches "hey
+    <name>, <question>" in one breath), then an optional FUZZY pass (when
+    wake_fuzzy < 1.0) — a tight safety net for close STT drift the registered
+    spellings miss. The fuzzy pass compares the leading 1-2 words to the wake
+    phrases and accepts a close-enough match.
     """
     t = (transcript or "").strip()
     if not t:
         return False, ""
     low = t.lower()
-    for name in wake_phrases(agent_name):
-        m = re.search(_WAKE_LEAD + r"\b" + re.escape(name) + r"\b", low)
-        # Require the address at the very start (allow a short lead-in like
-        # "hey "), so the name mid-sentence doesn't trigger.
-        if not m or m.start() > 6:
+    # Exact pass matches the name + aliases + operator wake_words; the fuzzy
+    # pass uses ONLY the persona name + built-in aliases. Operator-chosen
+    # wake_words (e.g. "camera") are reliable English words that DON'T need
+    # fuzzy tolerance — fuzzying them would false-wake on look-alikes
+    # ("cam" vs "calm"). So they match exactly only.
+    names_exact = wake_phrases(agent_name, extra_words)
+    names_fuzzy = wake_phrases(agent_name)
+    # When require_prefix is on, the utterance MUST open with an address word
+    # ("hey/ok/hi …") before the name — so a bare word that merely sounds like
+    # the name ("sit" → "Sita") can't false-wake. This is the "Hey Siri" model.
+    lead_re = _WAKE_LEAD_REQ if require_prefix else _WAKE_LEAD
+
+    # Pass 1 — exact name/alias/wake-word at the start. Longest phrases first so
+    # a multi-word alias ("shaila ja") wins over its prefix ("shaila").
+    for name in sorted(names_exact, key=len, reverse=True):
+        m = re.search(r"^[\s,]*" + lead_re + r"\b" + re.escape(name) + r"\b", low)
+        if m:
+            rest = re.sub(r"^[\s,.:;!?-]+", "", t[m.end():])
+            return True, rest.strip()
+
+    # Exact-only by default (fuzzy disabled) — accurate, no look-alike wakes.
+    if fuzzy >= 1.0:
+        return False, ""
+
+    # Pass 2 — fuzzy on the leading word(s) (opt-in; handles STT mis-transcription
+    # of the persona NAME only, when wake_fuzzy < 1.0 is configured).
+    words = re.findall(r"[a-z']+", low)
+    if not words:
+        return False, ""
+    has_addr = words[0] in _ADDRESS_WORDS
+    if require_prefix and not has_addr:
+        return False, ""              # no "hey/ok/…" → not addressed
+    lead = 1 if (has_addr and len(words) > 1) else 0
+    cands: list[tuple[int, str]] = []
+    if len(words) > lead:
+        cands.append((lead + 1, words[lead]))                       # one word
+    if len(words) > lead + 1:                                       # two words,
+        cands.append((lead + 2, words[lead] + words[lead + 1]))     # joined ("shylaja")
+        cands.append((lead + 2, words[lead] + " " + words[lead + 1]))
+    best, drop = 0.0, 0
+    for ncount, cand in cands:
+        if len(cand) < 3:
             continue
-        rest = t[m.end():]
-        rest = re.sub(r"^[\s,.:;!?-]+", "", rest)  # drop punctuation after name
+        for name in names_fuzzy:
+            r = difflib.SequenceMatcher(None, cand, name).ratio()
+            if r > best:
+                best, drop = r, ncount
+    if best >= fuzzy:
+        rest = " ".join(t.split()[drop:])
+        rest = re.sub(r"^[\s,.:;!?-]+", "", rest)
         return True, rest.strip()
     return False, ""
+
+
+def wake_best_score(transcript: str, agent_name: str,
+                    extra_words: list[str] | None = None) -> float:
+    """Best fuzzy similarity of the leading word(s) to any wake phrase — for
+    logging near-misses so an operator can see what STT actually heard."""
+    low = (transcript or "").strip().lower()
+    words = re.findall(r"[a-z']+", low)
+    if not words:
+        return 0.0
+    names = wake_phrases(agent_name, extra_words)
+    lead = 1 if (words[0] in _ADDRESS_WORDS and len(words) > 1) else 0
+    cands = [words[lead]] if len(words) > lead else []
+    if len(words) > lead + 1:
+        cands.append(words[lead] + words[lead + 1])
+    best = 0.0
+    for cand in cands:
+        for name in names:
+            best = max(best, difflib.SequenceMatcher(None, cand, name).ratio())
+    return round(best, 2)
 
 
 def _frames_for(runtime, max_frames: int = 3) -> list[dict]:
@@ -390,7 +489,7 @@ def greeting_for(name: str) -> str:
 
 @dataclass
 class AgentTask:
-    """A long-running request Sidhu is working on in the background."""
+    """A long-running request Sara is working on in the background."""
 
     id: int
     query: str
@@ -411,7 +510,7 @@ class AgentTask:
 
 
 class TaskManager:
-    """Runs Sidhu's longer jobs as background asyncio tasks so the
+    """Runs Sara's longer jobs as background asyncio tasks so the
     conversation never blocks. In-memory only — tasks reset on restart.
 
     Each task runs a full tool-calling turn for its query (with the
@@ -475,7 +574,7 @@ class TaskManager:
 
 @dataclass
 class Monitor:
-    """A standing watch Sidhu keeps on one or more cameras.
+    """A standing watch Sara keeps on one or more cameras.
 
     kind="notify": alert when ``target`` appears.
     kind="count":  keep a live + peak count of ``target`` per camera
@@ -552,7 +651,7 @@ class LineCounter:
 
 
 class MonitorManager:
-    """Runs Sidhu's standing watches: every ``interval_s`` it grabs a frame
+    """Runs Sara's standing watches: every ``interval_s`` it grabs a frame
     from each watched camera, runs detection, and counts the target. Notify
     monitors raise a (cooldown-limited) notification when the target is
     present; count monitors track live + peak counts. In-memory only."""
@@ -1422,7 +1521,7 @@ def _forget_face_tool() -> dict[str, Any]:
 
 
 def _create_background_task_tool() -> dict[str, Any]:
-    """OpenAI/Ollama function schema for Sidhu's background-task tool."""
+    """OpenAI/Ollama function schema for Sara's background-task tool."""
     return {
         "type": "function",
         "function": {
@@ -1523,6 +1622,19 @@ def load_config(path: str | Path) -> AppConfig:
         except (TypeError, ValueError):
             raise SystemExit(f"config: {key} must be an integer; got {raw.get(key)!r}")
 
+    # Warn loudly if the operator renamed the agent — the wake word's reliability
+    # depends on STT transcribing the name consistently, which a common default
+    # name does and an unusual one often doesn't.
+    _name = str(raw.get("agent_name") or DEFAULT_AGENT_NAME).strip() or DEFAULT_AGENT_NAME
+    if _name.lower() != DEFAULT_AGENT_NAME.lower():
+        logger.warning(
+            "agent_name changed to %r — NOT advised. The wake word is heard via "
+            "speech-to-text, which transcribes a common name like %r the same way "
+            "every time; an unusual name is often mis-heard, so the agent won't "
+            "wake when called. If you keep it, add the spellings STT emits to "
+            "wake_words (watch the 'wake score' log line while testing).",
+            _name, DEFAULT_AGENT_NAME)
+
     return AppConfig(
         kaic_url=str(raw["kaic_url"]),
         kaic_api_key=str(raw["kaic_api_key"]),
@@ -1533,6 +1645,10 @@ def load_config(path: str | Path) -> AppConfig:
         whisper_token=_str("whisper_token", ""),
         stt_noise_filter=bool(raw.get("stt_noise_filter", True)),
         wake_word_required=bool(raw.get("wake_word_required", True)),
+        wake_words=(list(raw["wake_words"])
+                    if isinstance(raw.get("wake_words"), list) else None),
+        wake_fuzzy=float(raw.get("wake_fuzzy", 0.85)),
+        wake_require_prefix=bool(raw.get("wake_require_prefix", True)),
         ollama_url=_str("ollama_url", "http://127.0.0.1:9004"),
         ollama_token=_str("ollama_token", ""),
         llm_provider=_str("llm_provider", "ollama"),
@@ -1563,6 +1679,7 @@ def load_config(path: str | Path) -> AppConfig:
             dict(raw["emergency_contacts"])
             if isinstance(raw.get("emergency_contacts"), dict) else None
         ),
+        agent_name=_name,
         voice_gender=str(raw.get("voice_gender") or "female"),
         state_path=raw.get("state_path"),
         faces_url=raw.get("faces_url"),
@@ -1772,7 +1889,7 @@ class CameraAgentRuntime:
             "forget_face": self._handle_forget_face,
         }
 
-        self.agent_name = agent_name_for(cfg.voice_gender)
+        self.agent_name = agent_name_for(cfg.agent_name)
         self.faces = FaceClient(url=cfg.faces_url, token=cfg.faces_token) if cfg.faces_url else None
         self.notifier = Notifier(self, webhooks=cfg.notify_webhooks, events=cfg.notify_events)
         self.tasks = TaskManager(self)
@@ -2158,7 +2275,7 @@ class CameraAgentRuntime:
     # ── System prompt construction ────────────────────────────────
 
     def build_system_prompt(self) -> str:
-        """Compose the system prompt the LLM sees: Sidhu's identity + the
+        """Compose the system prompt the LLM sees: Sara's identity + the
         operator's base prompt + a per-camera roster + task guidance."""
         roster = "\n".join(
             f"- {cam.camera_id}: {cam.role}" for cam in self.cfg.cameras
@@ -2348,9 +2465,13 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.get("/agent")
     async def _agent() -> dict[str, Any]:
-        """Lightweight identity for the UI (name + voice + mode) — no TTS."""
+        """Lightweight identity for the UI (name + voice + mode + wake) — no TTS."""
+        wake = (runtime.cfg.wake_words[0] if runtime.cfg.wake_words
+                else runtime.agent_name)
         return {"name": runtime.agent_name, "voice_gender": runtime.cfg.voice_gender,
-                "text_mode": runtime.cfg.text_mode}
+                "text_mode": runtime.cfg.text_mode,
+                "wake_phrase": f"Hey {wake.title()}",
+                "wake_required": runtime.cfg.wake_word_required}
 
     @app.get("/demo/avatar/{name}")
     async def _demo_avatar(name: str) -> Response:
@@ -2399,7 +2520,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.get("/tasks")
     async def _tasks() -> dict[str, Any]:
-        """Sidhu's background tasks (the UI polls this to surface results)."""
+        """Sara's background tasks (the UI polls this to surface results)."""
         return {"tasks": runtime.tasks.list()}
 
     @app.post("/tasks")
@@ -2417,7 +2538,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.post("/say")
     async def _say(request: Request) -> JSONResponse:
-        """Synthesize arbitrary text so the UI can speak things Sidhu produces
+        """Synthesize arbitrary text so the UI can speak things Sara produces
         outside a /converse turn — e.g. announcing a finished background task
         aloud. Text-only fallback when Piper is unreachable."""
         try:
@@ -2629,7 +2750,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
         # UI-selected camera hint: one id, a comma list, or "all". Use the
         # first concrete configured camera as the grounding default; "all"
-        # or empty leaves it to Sidhu.
+        # or empty leaves it to Sara.
         configured = {cam.camera_id for cam in runtime.cfg.cameras}
         raw_hint = request.query_params.get("camera") or ""
         camera_hint = None
@@ -2687,17 +2808,26 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         )
         question = transcript
         if require_wake:
-            invoked, stripped = match_wake(transcript, runtime.agent_name)
+            invoked, stripped = match_wake(
+                transcript, runtime.agent_name,
+                runtime.cfg.wake_words, runtime.cfg.wake_fuzzy,
+                runtime.cfg.wake_require_prefix)
             if not invoked:
-                logger.info("converse: not addressed to %s; ignoring %r",
-                            runtime.agent_name, transcript)
+                # Log the near-miss score so an operator can see what STT heard
+                # vs the wake word and tune wake_fuzzy / add a wake_words alias.
+                score = wake_best_score(transcript, runtime.agent_name,
+                                        runtime.cfg.wake_words)
+                logger.info("converse: not addressed to %s (heard %r, wake "
+                            "score=%.2f, need>=%.2f); ignoring",
+                            runtime.agent_name, transcript, score,
+                            runtime.cfg.wake_fuzzy)
                 timings["total"] = int((_t.perf_counter() - t0) * 1000)
                 return JSONResponse({"transcript": transcript, "reply": "",
                                      "audio_b64": None, "timings_ms": timings,
                                      "invoked": False})
             question = stripped
 
-        # 4) Answer. A bare wake word ("Hey Shailaja") with no question ARMS the
+        # 4) Answer. A bare wake word ("Hey Sara") with no question ARMS the
         #    agent, Hey-Siri style: she acknowledges, and the UI then treats the
         #    NEXT utterance as the question without needing the wake word again.
         runtime.tools.last_cameras_used = []

@@ -270,6 +270,8 @@ services:
         condition: service_healthy
       piper-adapter:
         condition: service_healthy
+      blip-adapter:
+        condition: service_healthy
       ollama:
         condition: service_healthy
       ollama-model-pull:
@@ -329,6 +331,11 @@ services:
     depends_on:
       camera-agent-config-init-chat:
         condition: service_completed_successfully
+      # Chat uses BLIP scene captions, so wait for the adapter to be healthy and
+      # registered before the first turn (else describe_camera falls back to the
+      # detector until BLIP comes up).
+      blip-adapter:
+        condition: service_healthy
       ollama:
         condition: service_healthy
       ollama-model-pull:

@@ -6,7 +6,7 @@
   OpenNVR Camera Agent front-end (vanilla JS, no build step).
 
   * The agent introduces itself (text + spoken via Piper) on enable. Its name
-    follows the configured voice (Shailaja / Sidhu) — fetched from /agent.
+    is "Sara" by default (configurable; independent of voice) — fetched from /agent.
   * Hands-free: client-side VAD detects each utterance and POSTs it to
     /converse; idle auto-stops with an "Enable talking" button.
   * Right rail: alarms, watches, and background tasks — each live-polled.
@@ -160,7 +160,7 @@
           <button id="talk" class="talk" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg> Talk</button>
           <label class="waketoggle" id="wakeWrap" title="When on, the agent only answers when you address it by name first.">
             <input type="checkbox" id="wakeToggle" checked>
-            <span id="wakeLabel">Wake with “Hey&nbsp;…”, then ask</span>
+            <span id="wakeLabel">Wake with “Hey&nbsp;Sara”, then ask</span>
           </label>
           <div class="row askrow">
             <input id="askInput" type="text" placeholder="Type a question, e.g. how many people on cam1?" autocomplete="off">
@@ -232,7 +232,7 @@
     // ARM_MS without needing the name again, plus a short follow-up window.
     const ARM_MS=12000, FOLLOWUP_MS=7000; let armUntil=0;
 
-    let agentName="the agent";
+    let agentName="the agent", wakePhrase="Hey Sara";
     let mediaStream=null, audioCtx=null, analyser=null, floatBuf=null;
     let recorder=null, chunks=[];
     let sessionActive=false, capturing=false, speaking=false, busy=false, alarmRinging=false;
@@ -319,9 +319,9 @@
     function isArmed(){ return performance.now() < armUntil; }
     function restingAvatar(){ setAvatar(wakeOn() && sessionActive && !isArmed() ? "gated" : "listening"); }
     function listenHint(){ return isArmed() ? "Listening… ask your question."
-      : (wakeOn() ? ('Say “Hey '+agentName+'” to ask.') : "Listening…"); }
+      : (wakeOn() ? ('Say “'+wakePhrase+'” to ask.') : "Listening…"); }
     function updateWakeLabel(){ if(wakeLabel) wakeLabel.innerHTML = wakeOn()
-      ? `Wake with “Hey&nbsp;${agentName}”, then ask` : "Always listening · no wake word"; }
+      ? `Wake with “${wakePhrase}”, then ask` : "Always listening · no wake word"; }
 
     // Talking-avatar VIDEO: an idle loop, and a 'speaking' loop while she talks.
     // Bundled clips are placeholders — swap in your own (or a HeyGen/render
@@ -372,6 +372,7 @@
       workingEl.hidden=false; workingTimer=setTimeout(()=>{workingEl.hidden=true;},6000); }
 
     async function loadAgent(){ try{ const a=await (await fetch("/agent")).json();
+      if(a.wake_phrase) wakePhrase=a.wake_phrase;
       if(a.name){ agentName=a.name; titleEl.textContent=agentName+" — OpenNVR Camera Agent";
         updateWakeLabel(); }
       if(a.text_mode){
@@ -486,7 +487,7 @@
           // Heard speech, but it wasn't addressed to her — show it faintly and
           // keep waiting, instead of answering the room.
           if(sessionActive){ restingAvatar();
-            setStatus('Heard “'+data.transcript.slice(0,40)+'” — say “Hey '+agentName+'” to ask.',""); }
+            setStatus('Heard “'+data.transcript.slice(0,40)+'” — say “'+wakePhrase+'” to ask.',""); }
           lastActivity=performance.now(); return;
         }
         addMsg(data.transcript,"user"); lastActivity=performance.now(); showWorking(data.cameras_used); showLatency(data.timings_ms);
@@ -505,7 +506,7 @@
       if(!introPlayed){ introPlayed=true; await playIntro(); }
       if(!sessionActive) return;
       micdotEl.hidden=false; restingAvatar();
-      setStatus(wakeOn()?('Listening — say “Hey '+agentName+'” to ask.'):"Listening… just talk.","active");
+      setStatus(wakeOn()?('Listening — say “'+wakePhrase+'” to ask.'):"Listening… just talk.","active");
       if(!vadTimer) vadTimer=setInterval(vadTick,TICK_MS);
       if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();},POLL_MS);
       if(!alarmTimer) alarmTimer=setInterval(pollAlarms,2500);

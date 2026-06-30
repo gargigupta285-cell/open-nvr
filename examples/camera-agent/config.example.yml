@@ -30,11 +30,21 @@ ollama_token: REPLACE_WITH_OPENNVR_ADAPTER_TOKEN
 piper_url: http://127.0.0.1:9001
 piper_token: REPLACE_WITH_OPENNVR_ADAPTER_TOKEN
 
+# The agent's name AND wake word ("Hey Sara") — like Apple's "Siri". Changing it
+# is NOT advised: the wake word is heard via speech-to-text, which transcribes a
+# common name like Sara the same way every time; an unusual name is often
+# mis-heard, so the agent won't wake. The voice is a separate setting below.
+agent_name: Sara
+
 # Wake word (voice only). When true, the agent answers only when addressed by
-# name ("Hey Shailaja, …"), so it ignores ambient speech and its own echoed
-# reply. The demo UI has a per-session toggle that overrides this. Set false
-# for a continuous, always-listening turn-taker.
+# name ("Hey Sara, …"), so it ignores ambient speech and its own echoed reply.
+# The demo UI has a per-session toggle. Set false for always-listening. The
+# name's spellings match exactly + a tight fuzzy net (wake_fuzzy 0.85) catches
+# close STT drift; an address word ("hey/ok") is required.
 wake_word_required: true
+# wake_words: ["camera"]        # extra exact wake words STT hears reliably
+# wake_fuzzy: 0.85              # 1.0 = exact only; < 0.85 = more forgiving
+# wake_require_prefix: true     # false = the bare name (no "hey") also wakes
 
 # Names of the vision adapters used by tool calls. The agent calls
 # these THROUGH KAI-C (auditable, since they're event-driven not

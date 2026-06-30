@@ -220,13 +220,13 @@ def test_converse_wake_gate_ignores_unaddressed(harness):
 
 def test_converse_wake_gate_answers_when_addressed(harness):
     client, state = harness
-    # Sidhu is the default persona (AppConfig voice_gender defaults to 'male').
-    state["transcript"] = "hey Sidhu, what do you see"
+    # Sara is the default persona (AppConfig voice_gender defaults to 'female').
+    state["transcript"] = "hey Sara, what do you see"
 
     async def chat(*, messages, tools=None, temperature=0.4, max_tokens=256, **kw):
         # The wake phrase must be stripped before the model sees the question.
         user = [m for m in messages if m.get("role") == "user"][-1]["content"].lower()
-        assert "sidhu" not in user and user.strip() == "what do you see"
+        assert "sara" not in user and user.strip() == "what do you see"
         return {"message": {"role": "assistant", "content": "I see the front door."}}
     state["set_chat"](chat)
 
@@ -237,7 +237,7 @@ def test_converse_wake_gate_answers_when_addressed(harness):
 
 def test_converse_bare_wake_word_acks_without_llm(harness):
     client, state = harness
-    state["transcript"] = "Hey Sidhu"   # just the name, no question
+    state["transcript"] = "Hey Sara"   # just the name, no question
 
     called = {"chat": False}
 
