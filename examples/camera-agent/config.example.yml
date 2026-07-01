@@ -30,6 +30,32 @@ ollama_token: REPLACE_WITH_OPENNVR_ADAPTER_TOKEN
 piper_url: http://127.0.0.1:9001
 piper_token: REPLACE_WITH_OPENNVR_ADAPTER_TOKEN
 
+# The agent has no persona name — it presents as "the OpenNVR camera agent"
+# (chat label "agent"). This value is only used for event metadata and, if you
+# turn it on, the OPTIONAL wake word ("Hey <agent_name>"). Leave it as-is unless
+# you want a named wake word (then pick a name STT transcribes reliably).
+agent_name: Camera Agent
+voice_gender: neutral   # neutral | female | male (pairs the Piper voice)
+
+# Talking-avatar video in the demo. true = play the bundled clips
+# (demo/avatar/{idle,speaking,thinking}.{webm,mp4}); swap in your own export
+# (e.g. HeyGen) by replacing those files. false = use the built-in animated SVG
+# face only. The 'thinking' clip is optional — it falls back to idle if absent.
+avatar_video: true
+
+# Wake word — OPTIONAL, for ambient/always-on clients. The built-in demo uses
+# click-to-talk (tap Talk → it listens, answers every utterance, auto-stops on
+# a quiet spell), so it never gates on the wake word. This setting only affects
+# callers of /converse that don't pass ?wake=0 — e.g. an always-listening
+# surface, where answering only when addressed by name ("Hey <agent_name>, …") stops it
+# reacting to the TV or its own echoed reply. Spellings match exactly + a tight
+# fuzzy net (wake_fuzzy 0.85) catches close STT drift; an address word
+# ("hey/ok") is required.
+wake_word_required: true
+# wake_words: ["camera"]        # extra exact wake words STT hears reliably
+# wake_fuzzy: 0.85              # 1.0 = exact only; < 0.85 = more forgiving
+# wake_require_prefix: true     # false = the bare name (no "hey") also wakes
+
 # Names of the vision adapters used by tool calls. The agent calls
 # these THROUGH KAI-C (auditable, since they're event-driven not
 # streaming).
@@ -37,12 +63,12 @@ detection_adapter: yolov8
 recognition_adapter: insightface
 caption_adapter: blip
 
-# LLM model + sampling. Default llama3.2:3b runs in ~3GB of RAM on
-# CPU at ~5-15 tokens/sec on modern hardware. For better tool-calling
-# quality at the cost of more RAM and slower inference, use
-# llama3.1:8b-instruct (~6GB RAM). The model MUST support tools —
+# LLM model + sampling. Default qwen2.5:1.5b (~1GB RAM, Apache-2.0,
+# non-thinking) is the sweet spot for tool-calling on CPU. Drop to
+# qwen2.5:0.5b on very low RAM, or use qwen2.5:3b for better grounding
+# at more RAM and slower inference. The model MUST support tools —
 # see https://ollama.com/blog/tool-support for the current list.
-llm_model: llama3.2:3b
+llm_model: qwen2.5:1.5b
 llm_temperature: 0.4
 llm_max_tokens: 256
 

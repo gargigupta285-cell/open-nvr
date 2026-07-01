@@ -5,26 +5,23 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 # Camera-agent image requirements & publication status
 
-What each profile needs on GHCR, so a fresh install actually starts. The
-`camera-agent` image itself is **built from source** (`build:` in compose), not
-pulled — only the adapters/runtimes below are pulled.
+What the camera-agent profiles need on GHCR, so a fresh install actually starts.
+The `camera-agent` image itself is **built from source** (`build:` in compose),
+not pulled — only the adapters/runtimes below are pulled.
 
-## Required images by profile
+## Required images
 
-| Image | Profiles that need it | Source |
-|-------|----------------------|--------|
-| `ghcr.io/open-nvr/core` (+ mediamtx, nats, postgres, nginx, `yolov8-adapter`, `yolov8-weights`) | **all** (Tier 0) | published |
-| `ghcr.io/open-nvr/whisper-adapter` | `camera-agent` (Sentinel voice) | published |
-| `ghcr.io/open-nvr/piper-adapter` | `camera-agent` (Sentinel voice) | published |
-| `ghcr.io/open-nvr/blip-adapter` | `camera-agent`, `camera-agent-standard` (default caption) | published |
-| `ollama/ollama:0.21.2` | lite/standard/sentinel/demo | upstream |
-| `ghcr.io/ggml-org/llama.cpp:server` | `camera-agent-llamacpp` | upstream |
-| `ghcr.io/open-nvr/moondream-adapter` | `caption-moondream` (opt-in VQA) | **CI builds green; publishes on push/merge** |
-| `ghcr.io/open-nvr/voice-adapter` | `camera-agent-combined` (opt-in) | **CI builds green; publishes on push/merge** |
+| Image | Profile(s) | Source |
+|-------|-----------|--------|
+| `ghcr.io/open-nvr/core` (+ mediamtx, nats, postgres, nginx, `yolov8-adapter`, `yolov8-weights`) | both (Tier 0) | published |
+| `ghcr.io/open-nvr/blip-adapter` (default caption) | `camera-agent`, `camera-agent-chat` | published |
+| `ollama/ollama:0.21.2` | `camera-agent`, `camera-agent-chat` | upstream |
+| `ghcr.io/open-nvr/whisper-adapter` | `camera-agent` (voice only) | published |
+| `ghcr.io/open-nvr/piper-adapter` | `camera-agent` (voice only) | published |
 
-The default paths (lite / standard / sentinel-modular / demo / llamacpp) need
-only already-published or upstream images. The two new opt-in adapters are the
-only additions.
+Both the **voice** (`camera-agent`) and **chat** (`camera-agent-chat`) profiles
+need only already-published or upstream images, so a fresh clone comes up with
+nothing to build but the agent itself. Chat skips Whisper/Piper.
 
 ## Publish nuance (PR build vs publish)
 The `publish-images` workflow **builds** every adapter on a PR (smoke, `--load`,
@@ -35,17 +32,7 @@ after the branch is pushed / the PR is merged.
 ## Verify on your machine
 ```bash
 # exists on GHCR? (succeeds if published)
-docker manifest inspect ghcr.io/open-nvr/moondream-adapter:latest
-docker manifest inspect ghcr.io/open-nvr/voice-adapter:latest
-# did the PUBLISH (push-event) job run?
-gh run list -R open-nvr/ai-adapter --workflow publish-images.yml -L 5
+docker manifest inspect ghcr.io/open-nvr/whisper-adapter:latest
+docker manifest inspect ghcr.io/open-nvr/blip-adapter:latest
 # all org packages:  https://github.com/orgs/open-nvr/packages
 ```
-
-## Moondream is "code-only" even once published
-CI builds Moondream **without a model** (no build-arg). Provide the int8 `.mf.gz`
-one of three ways (see `ai-adapter/adapters/moondream/README.md`):
-1. bake at build (`--build-arg MOONDREAM_MODEL_URL=…`) — offline,
-2. mount it into the `opennvr_moondream_models` volume, or
-3. set `MOONDREAM_MODEL_URL` in `.env` → the adapter downloads it once on first
-   start (pull-and-run; one-time fetch, not strict `local_only`).

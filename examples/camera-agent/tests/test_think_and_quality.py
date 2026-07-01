@@ -87,6 +87,35 @@ def test_config_question_answered_deterministically_even_if_model_deflects():
     assert "camera" in reply.lower() and "I'll check" not in reply
 
 
+def test_tool_narration_is_a_deflection():
+    # The exact filler the model emitted in the field: it narrated a tool call
+    # it never made (tool_calls=0) instead of answering.
+    narration = "I see... calling detect_objects to check the number of configured cameras."
+    assert ca._is_deflection(narration) is True
+
+
+def test_config_question_ignores_narrated_tool_call():
+    # Regression: "how many cameras configured?" → the model replied with a
+    # narration ("…calling detect_objects…") and tools=0. The config branch must
+    # answer from the roster, NOT let that narration through.
+    cfg = AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t", text_mode=True,
+                    cameras=[CameraSpec(camera_id="cam1", frame_url="http://x/1.jpg",
+                                        role="secureeye")])
+    rt = CameraAgentRuntime(cfg)
+
+    class _Narrate:
+        async def chat(self, **kw):
+            return {"message": {"content": "I see... calling detect_objects to "
+                                "check the number of configured cameras.",
+                                "tool_calls": []}}
+        async def aclose(self): return None
+    rt.ollama = _Narrate()
+    reply = asyncio.run(ca._run_conversation_turn(
+        rt, [], "How many cameras are configured right now?"))
+    assert "one camera" in reply and "detect_objects" not in reply
+    assert "secureeye" in reply
+
+
 # ── qwen3 auto-think-off selection ──────────────────────────────────────
 
 def test_runtime_auto_disables_thinking_for_qwen3():

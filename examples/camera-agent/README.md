@@ -1,28 +1,50 @@
 # camera-agent example app
 
-**Ask your cameras.** A voice agent that listens for spoken
-questions, grounds its answers in live camera feeds via tool calling
-(YOLOv8 / InsightFace / BLIP), and replies through Piper TTS — all
-running on CPU, on your homelab, no cloud round-trip.
+**Ask your cameras.** An agent that grounds its answers in live camera
+feeds via tool calling (YOLOv8 / InsightFace / BLIP) — running on CPU,
+on your homelab, no cloud round-trip. Run it two ways, same app:
+
+- **Voice** (default) — tap **Talk** and speak; it listens continuously and
+  replies through Piper TTS, with a named persona and avatar. The session stays
+  live for follow-ups until you tap **Stop** or a quiet spell auto-stops it.
+- **Chat** (`--chat`) — type your question, read the answer. Same tools
+  and scene description, no microphone/speaker, so it's lighter.
+
+The brain runs locally (Ollama) by default, or point it at any
+OpenAI-compatible endpoint — bring your own (see `config.cloud.yml`).
 
 This is the agent example for OpenNVR v0.1. It demonstrates the
 pattern of "OpenNVR camera as participant", not just camera as data
-source. The next milestone (v0.2) extends the same agent to join
-LiveKit rooms as a virtual participant.
+source.
+
+**Where this is headed:** today the agent lives on its own demo page.
+The next milestone extends the *same* agent to join **LiveKit rooms**
+(and similar real-time/voice surfaces) as a participant — so you can
+reach it from a phone, a meeting, or a kiosk, not just the local web
+UI. One sovereign agent, widely available, with no change to the tools
+or the local-first brain.
+
+### Run it
+
+From the repo root:
+
+```bash
+examples/camera-agent/quickstart.sh          # voice  (open http://localhost:9100/demo, tap Talk, speak)
+examples/camera-agent/quickstart.sh --chat   # chat   (type your question instead)
+examples/camera-agent/quickstart.sh --down   # stop
+```
+
+First boot pulls the small LLM (default `qwen2.5:1.5b`) and warms the adapters.
+On a low-RAM box: `OLLAMA_MODEL=qwen2.5:0.5b examples/camera-agent/quickstart.sh`.
 
 ### Read in detail
 
-- [**Editions & models**](EDITIONS_AND_MODELS.md) — the lite/standard/full/cloud
-  editions, the efficient model picks, and run-on-any-hardware (laptop webcam,
-  Pi, drone). Start here.
 - [**Models & latency**](MODELS_AND_LATENCY.md) — how model choices were weighed
-  for CPU latency and good UX.
+  for CPU latency and good UX, plus the efficient model picks.
 - [**Alarms**](ALARMS.md) — ringing alarms, time windows, presets, and the
   documented emergency-calling hook.
 - [**Notifications**](NOTIFICATIONS.md) — external webhook/push delivery.
 - [**Faces & watchlist**](FACES.md) — enrollment and watchlist matching.
-- [Architecture review (issue #82)](ARCHITECTURE_REVIEW_82.md) — design notes
-  behind the editions/topology work.
 
 ## What it does
 
@@ -47,7 +69,7 @@ LiveKit rooms as a virtual participant.
                                              │ "what's at the porch?"
                                              ▼
                               ┌───────────────────────────────────┐
-                              │ Ollama adapter (llama3.2:3b) with │
+                              │ Ollama adapter (qwen2.5:1.5b)     │
                               │   5 registered tools              │
                               └──────────────┬────────────────────┘
                                              │ tool calls →
@@ -115,11 +137,11 @@ Real-world limitations the example does NOT yet handle:
   see the voice path in KAI-C's central history until v0.2. The
   tool calls into BLIP / YOLOv8 / InsightFace DO go through
   KAI-C and are fully audited.
-* **Model quality.** llama3.2:3b is fast on CPU but its tool
-  calling is occasionally confused — it'll call `describe_camera`
-  when you asked it to count faces. Bumping to llama3.1:8b-instruct
-  noticeably improves grounding at ~2x the RAM and slower
-  inference. See `config.example.yml`.
+* **Model quality.** `qwen2.5:1.5b` (the default) is small, fast on
+  CPU, Apache-2.0, and non-thinking — the sweet spot for tool-calling
+  on a weak box. Drop to `qwen2.5:0.5b` on very low RAM, or bump to
+  `qwen2.5:3b` for better grounding at more RAM and slower inference.
+  Set it via `OLLAMA_MODEL` in `.env` (or `llm_model` in your config).
 * **No memory across sessions.** Each new WebSocket connection
   starts fresh. "What did you tell me yesterday?" won't work.
   Use the `recent_events` tool with a long window for ad-hoc
@@ -136,11 +158,10 @@ Real-world limitations the example does NOT yet handle:
 
 ## Quick start
 
-**Fastest path (lite):** from the repo root, `examples/camera-agent/quickstart.sh`
-brings up a ~1–2 GB text agent in one command — no GPU, and you can click "Use
-this machine's camera" in the demo. The full six-adapter voice setup below is the
-heavy, opt-in path; see [Editions & models](EDITIONS_AND_MODELS.md) for the
-middle grounds.
+**Fastest path:** from the repo root, `examples/camera-agent/quickstart.sh`
+(add `--chat` for the lighter text version, `--down` to stop). You can click
+"Use this machine's camera" in the demo to run against your laptop webcam. The
+manual, adapter-by-adapter setup below is for development/debugging.
 
 ```bash
 # 1. Start the adapters you need (in the ai-adapter repo). The
@@ -150,8 +171,8 @@ middle grounds.
 cd ai-adapter
 docker compose up -d whisper ollama piper blip yolov8 insightface
 
-# 2. Pull a tool-capable LLM into Ollama (one-time, ~2GB).
-docker exec ai-adapter-ollama-1 ollama pull llama3.2:3b
+# 2. Pull a tool-capable LLM into Ollama (one-time, ~1GB).
+docker exec ai-adapter-ollama-1 ollama pull qwen2.5:1.5b
 
 # 3. Start KAI-C and register the vision adapters. Ports come from
 #    the docker-compose service definitions in ai-adapter — adjust
@@ -201,7 +222,7 @@ See `config.example.yml` for the full set. Key knobs:
 
 | Field | Default | Effect |
 |---|---|---|
-| `llm_model` | `llama3.2:3b` | Tool-capable Ollama model. Bump to llama3.1:8b-instruct for better grounding. |
+| `llm_model` | `qwen2.5:1.5b` | Tool-capable Ollama model (Apache-2.0, non-thinking). `qwen2.5:0.5b` for low RAM, `qwen2.5:3b` for better grounding. |
 | `llm_temperature` | `0.4` | Tool calling works best at low-but-not-zero temperatures. |
 | `frame_cache_ttl_seconds` | `2.0` | How long to reuse one camera's frame across tool calls in a single LLM turn. |
 | `event_ring_size` | `256` | Per-camera ring buffer size for the `recent_events` tool. |
@@ -209,6 +230,50 @@ See `config.example.yml` for the full set. Key knobs:
 | `cameras[].role` | `"(no role configured)"` | One-sentence role description per camera — gets baked into the system prompt so the LLM knows what each camera watches. |
 | `opennvr_cameras_url` | unset | When set and `cameras` is empty, fetches the camera roster from a running OpenNVR instance (`GET /api/v1/internal/camera-agent/cameras`). This means you never duplicate RTSP credentials in this file — OpenNVR owns the camera connection and returns MediaMTX tap URLs. |
 | `opennvr_api_key` | unset | API key for the `opennvr_cameras_url` endpoint. Must match `INTERNAL_API_KEY` in OpenNVR's `.env`. Falls back to `kaic_api_key` if unset. |
+| `avatar_video` | `true` | Play the talking-avatar video clips in the demo. `false` uses the built-in animated SVG face only. |
+
+### Swap in your own avatar (offline)
+
+The demo shows a talking avatar next to the conversation. It's a plain HTML
+`<video>` that plays a looping clip per state, so you can replace it with a
+human presenter without touching any code — just drop your files in, keeping
+the names:
+
+```
+demo/avatar/idle.webm       demo/avatar/idle.mp4        # calm loop, small movements
+demo/avatar/speaking.webm   demo/avatar/speaking.mp4    # talking loop (plays during TTS)
+demo/avatar/thinking.webm   demo/avatar/thinking.mp4    # optional — plays while it computes
+```
+
+Provide both `.webm` (VP9, preferred) and `.mp4` (H.264, Safari fallback); any
+square resolution works (the bundled placeholders are 256×256). The UI switches
+to `speaking` during playback and back to `idle` after; `thinking` is optional
+and falls back to the idle clip if absent. If a clip fails to load — or you set
+`avatar_video: false` — it degrades to the animated SVG face, so the demo never
+breaks.
+
+**Stay offline — no cloud avatar services.** At runtime the demo never contacts
+anything: it only plays local video files, so playback is already sovereign. The
+one thing to watch is *how the clips are produced*. Generate them with a tool
+that runs on your own machine so nothing (your script, your likeness, the reply
+audio) ever leaves it:
+
+- **Local pre-render** — [SadTalker](https://github.com/OpenTalker/SadTalker)
+  (one portrait + audio → a talking-head clip) or
+  [Wav2Lip](https://github.com/Rudrabha/Wav2Lip) (a base video + audio →
+  lip-synced clip), both run locally. Render an `idle`/`speaking`/`thinking`
+  loop once and drop them in.
+- **Avoid cloud generators** (HeyGen and similar) — even a one-time render
+  uploads your script/likeness to their servers, which breaks end-to-end
+  sovereignty. Only use one if you're comfortable with that trade-off for a
+  throwaway concept demo.
+- **Zero-dependency default** — the built-in SVG face is fully local and its
+  mouth is already driven by the live TTS amplitude, so it "speaks" in real time
+  with no assets and no network at all.
+
+Real-time *local* lip-sync (driving a face model from the TTS stream on-device)
+is the natural next step for a more human, fully-sovereign avatar — a good
+follow-up once a local renderer is chosen.
 
 ## Tests
 

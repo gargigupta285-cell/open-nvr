@@ -1,4 +1,4 @@
-# Sidhu — Alarms
+# Alarms
 
 Alarms are high-severity rules: when a target appears on a watched camera
 (optionally only within a time window), the alarm **rings** in the UI until a
@@ -12,14 +12,14 @@ human acknowledges it. They sit alongside, but are distinct from, monitors:
 
 ## Creating alarms
 
-By voice (Sidhu routes these to `create_alarm`):
+By voice (the agent routes these to `create_alarm`):
 - "Sound a fire alarm if you see fire" → `name=Fire, target=fire`
 - "Alarm if a person is detected after 6 pm" → `target=person, after=18:00`
 - "Alert me loudly if a car enters between 10pm and 6am on all cameras" →
   `target=car, after=22:00, before=06:00, camera_id=all`
 
 Time windows are 24h `HH:MM`. A window where `after > before` (e.g.
-`22:00`–`06:00`) wraps across midnight. Sidhu silences with `stop_alarm`
+`22:00`–`06:00`) wraps across midnight. The agent silences with `stop_alarm`
 (`action: silence`) or removes with `stop_alarm` (`action: disarm`).
 
 The UI also offers one-tap **preset** alarms (Fire; After-hours person) and an

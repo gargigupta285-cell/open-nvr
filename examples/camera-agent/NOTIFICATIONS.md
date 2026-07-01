@@ -37,7 +37,7 @@ Event categories:
   "camera": "cam1",
   "severity": "critical",
   "ts": 1781800000.0,
-  "agent": "Sidhu"
+  "agent": "Camera Agent"
 }
 ```
 

@@ -226,7 +226,7 @@ class CameraTools:
         # When None or unavailable, search_footage reports that cleanly.
         self._footage_index = footage_index
         # Cameras touched by the most recent tool call — read by /converse
-        # so the UI can show which camera(s) Sidhu is working on.
+        # so the UI can show which camera(s) the agent is working on.
         self.last_cameras_used: list[str] = []
 
     # ── describe_camera ────────────────────────────────────────────

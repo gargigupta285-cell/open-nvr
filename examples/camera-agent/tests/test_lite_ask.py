@@ -28,6 +28,17 @@ def test_agent_reports_text_mode():
     assert client2.get("/agent").json()["text_mode"] is False
 
 
+def test_agent_avatar_video_flag_reflects_config():
+    cams = [CameraSpec(camera_id="c", frame_url="http://x/1.jpg", role="r")]
+    on = TestClient(build_app(CameraAgentRuntime(
+        AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t", cameras=cams))))
+    off = TestClient(build_app(CameraAgentRuntime(
+        AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+                  avatar_video=False, cameras=cams))))
+    assert on.get("/agent").json()["avatar_video"] is True
+    assert off.get("/agent").json()["avatar_video"] is False
+
+
 def test_ask_runs_a_text_turn(monkeypatch):
     rt = _runtime()
 

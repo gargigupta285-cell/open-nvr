@@ -1,8 +1,8 @@
 # Copyright (c) 2026 OpenNVR
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Tests for the agent persona (Sidhu / Shailaja), the spoken intro, and the
-background task system."""
+"""Tests for the agent persona (nameless — "the OpenNVR camera agent"), the
+spoken intro, and the background task system."""
 from __future__ import annotations
 
 import asyncio
@@ -26,26 +26,33 @@ def _runtime() -> CameraAgentRuntime:
 # ── persona ────────────────────────────────────────────────────────────
 
 
-def test_system_prompt_names_agent_and_describes_tasks():
+def test_system_prompt_identifies_agent_and_describes_tasks():
     prompt = _runtime().build_system_prompt()
-    assert "Sidhu" in prompt  # default voice_gender=male
+    assert "camera agent" in prompt.lower()   # nameless identity, no persona name
     assert "create_background_task" in prompt
 
 
-def test_agent_name_follows_voice_gender():
-    assert ca.agent_name_for("female") == "Shailaja"
-    assert ca.agent_name_for("male") == "Sidhu"
-    assert ca.agent_name_for(None) == "Sidhu"  # default voice_gender=male
-    assert "Shailaja" in ca.greeting_for("Shailaja")
+def test_agent_name_default_and_configurable():
+    assert ca.agent_name_for(None) == "Camera Agent"   # technical default (wake/metadata)
+    assert ca.agent_name_for("Nova") == "Nova"         # operator override
+    assert "camera agent" in ca.greeting_for().lower()  # greeting is nameless
 
 
-def test_male_voice_names_sidhu():
+def test_name_is_independent_of_voice_gender():
+    # The voice can be male without affecting the (technical) default name.
     cfg = AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t",
                     voice_gender="male",
                     cameras=[CameraSpec(camera_id="cam1", frame_url="http://x/1.jpg", role="r")])
     rt = CameraAgentRuntime(cfg)
-    assert rt.agent_name == "Sidhu"
-    assert "Sidhu" in rt.build_system_prompt()
+    assert rt.agent_name == "Camera Agent"
+    assert "camera agent" in rt.build_system_prompt().lower()
+
+
+def test_custom_agent_name_used():
+    cfg = AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+                    agent_name="Nova",
+                    cameras=[CameraSpec(camera_id="cam1", frame_url="http://x/1.jpg", role="r")])
+    assert CameraAgentRuntime(cfg).agent_name == "Nova"
 
 
 def test_llm_think_false_appends_no_think():
@@ -139,8 +146,8 @@ def test_intro_endpoint_returns_text_and_audio(monkeypatch):
     monkeypatch.setattr(rt.piper, "synthesize", fake_synth)
     client = TestClient(build_app(rt))
     data = client.get("/intro").json()
-    assert data["name"] == "Sidhu"
-    assert "Sidhu" in data["text"]
+    assert data["name"] == "Camera Agent"
+    assert "camera agent" in data["text"].lower()
     assert data["audio_b64"] == base64.b64encode(b"WAVDATA").decode()
 
 
@@ -154,7 +161,7 @@ def test_intro_endpoint_text_only_when_tts_down(monkeypatch):
     client = TestClient(build_app(rt))
     data = client.get("/intro").json()
     assert data["audio_b64"] is None
-    assert "Sidhu" in data["text"]
+    assert "camera agent" in data["text"].lower()
 
 
 def test_tasks_endpoints(monkeypatch):

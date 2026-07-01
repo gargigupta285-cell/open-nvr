@@ -60,6 +60,9 @@ recordings/
 *.mkv
 *.avi
 *.webm
+# …except the bundled talking-avatar clips (placeholders; swap your own in)
+!examples/camera-agent/demo/avatar/*.mp4
+!examples/camera-agent/demo/avatar/*.webm
 
 # Python compiled
 __pycache__/

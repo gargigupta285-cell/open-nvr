@@ -6,9 +6,10 @@
   OpenNVR Camera Agent front-end (vanilla JS, no build step).
 
   * The agent introduces itself (text + spoken via Piper) on enable. Its name
-    follows the configured voice (Shailaja / Sidhu) — fetched from /agent.
-  * Hands-free: client-side VAD detects each utterance and POSTs it to
-    /converse; idle auto-stops with an "Enable talking" button.
+    presents as "the OpenNVR camera agent" (chat label "agent").
+  * Click "Talk" to start a listening session: it listens continuously, VAD
+    auto-segments each utterance and answers it — no wake word. It stays live
+    until you click Stop or a quiet spell auto-stops it.
   * Right rail: alarms, watches, and background tasks — each live-polled.
   * Audio cues: a two-tone siren while any alarm rings, and a short chime when
     a background task finishes or a watch notifies. All Web Audio, no assets.
@@ -44,7 +45,10 @@
     h1 { margin:0; font-size:1.35rem; }
     p.lede { margin:0.15rem 0 0 0; color:var(--muted); font-size:0.88rem; }
 
-    .ram { width:60px; height:60px; flex:0 0 auto; }
+    .ram { width:68px; height:68px; flex:0 0 auto; position:relative; }
+    .avatar-video { position:absolute; inset:0; width:100%; height:100%; border-radius:50%; object-fit:cover; display:none; }
+    .ram.has-video .avatar-video { display:block; }
+    .ram.has-video svg { display:none; }
     .ram svg { width:100%; height:100%; display:block; }
     .ram .ring,.ram .iris { transform-origin:center; transform-box:fill-box; }
     .ram.idle .ring{stroke:var(--muted);animation:breathe 3.5s ease-in-out infinite}.ram.idle .iris{fill:var(--muted)}
@@ -55,16 +59,28 @@
     @keyframes pulse{0%{transform:scale(.85);opacity:1}100%{transform:scale(1.15);opacity:.25}}
     @keyframes spin{to{transform:rotate(360deg)}}
     @keyframes bounce{0%,100%{transform:scale(.92)}50%{transform:scale(1.12)}}
+    /* Mouth: hidden unless speaking; its height is driven by the TTS amplitude. */
+    .ram .mouth{fill:var(--agent);opacity:0;transition:opacity .15s;}
+    .ram.speaking .mouth{opacity:.92;}
+    .ram.speaking .iris{opacity:.85;}
+    .micdot{display:inline-flex;align-items:center;gap:.3rem;font-size:.72rem;color:var(--danger);margin-top:.25rem;}
+    .micdot::before{content:"";width:.5rem;height:.5rem;border-radius:50%;background:var(--danger);animation:blink 1.2s steps(2,start) infinite;}
+    .waketoggle{display:flex;align-items:center;gap:.4rem;font-size:.8rem;color:var(--muted);margin:.55rem 0 0;cursor:pointer;user-select:none;}
+    .waketoggle input{accent-color:var(--accent);}
 
     label.field { font-size:0.75rem; color:var(--muted); display:block; margin-bottom:0.35rem; }
     .cambox { border:1px solid var(--border); border-radius:0.5rem; padding:0.5rem 0.6rem; margin-bottom:0.75rem;
       display:flex; flex-wrap:wrap; gap:0.4rem 0.9rem; max-height:6.5rem; overflow-y:auto; }
     .cambox label { display:flex; align-items:center; gap:0.35rem; font-size:0.85rem; cursor:pointer; }
     .cambox input { accent-color:var(--accent); }
+    .ic { width:1.05em; height:1.05em; vertical-align:-0.16em; flex:0 0 auto; }
     .talk { width:100%; background:var(--accent); color:#062321; border:none; padding:1.05rem 1.25rem;
-      border-radius:0.6rem; font-weight:700; cursor:pointer; font-size:1.05rem; transition:background .15s,transform .05s; }
+      border-radius:0.6rem; font-weight:700; cursor:pointer; font-size:1.05rem; transition:background .15s,transform .05s,box-shadow .08s;
+      display:flex; align-items:center; justify-content:center; gap:0.5rem; touch-action:none; -webkit-user-select:none; user-select:none; }
     .talk:hover:not(:disabled){background:var(--accent-strong);} .talk:active:not(:disabled){transform:scale(.99);}
     .talk:disabled{opacity:.5;cursor:progress;}
+    /* Live listening session: red, with a "recording" dot; a mic-level ring is
+       drawn from JS (box-shadow) so you can see it hearing you. */
     .talk.listening{background:var(--danger);color:#fff;} .talk.listening::before{content:"● ";animation:blink 1s steps(2,start) infinite;}
     @keyframes blink{to{visibility:hidden;}}
     .row { display:flex; gap:0.5rem; align-items:center; margin:0.6rem 0 0; }
@@ -73,10 +89,20 @@
     .chip { font-size:0.72rem; padding:0.22rem 0.5rem; border-radius:999px; background:rgba(79,209,197,0.15); color:var(--accent); white-space:nowrap; }
     .ghost { background:transparent; color:var(--muted); border:1px solid var(--border); padding:0.45rem 0.7rem; border-radius:0.375rem; cursor:pointer; font-size:0.8rem; }
     .ghost:hover{color:var(--text);}
-    .log { margin-top:1rem; background:rgba(0,0,0,0.25); border-radius:0.5rem; padding:0.75rem; height:18rem; overflow-y:auto; font-size:0.9rem; line-height:1.45; }
+    .log { margin-top:1rem; background:rgba(0,0,0,0.25); border-radius:0.5rem; padding:0.75rem; height:18rem; overflow-y:auto; font-size:0.9rem; line-height:1.45; display:flex; flex-direction:column; gap:0.3rem; }
     .log:empty::after { content:"Your conversation will appear here."; color:var(--muted); font-size:0.82rem; }
-    .msg{margin:0.35rem 0;} .msg .who{font-weight:700;} .msg.user .who{color:var(--user);} .msg.agent .who{color:var(--agent);}
-    .msg.sys{color:var(--muted); font-size:0.8rem; font-style:italic;}
+    .msg{max-width:86%;} .msg .who{font-weight:500; font-size:0.72rem; display:block; margin-bottom:2px;}
+    .msg.user{align-self:flex-end; background:#1d2740; border-radius:11px 11px 3px 11px; padding:0.45rem 0.65rem;} .msg.user .who{color:var(--user);}
+    .msg.agent{align-self:flex-start; background:var(--panel2); border:1px solid var(--border); border-radius:11px 11px 11px 3px; padding:0.45rem 0.65rem;} .msg.agent .who{color:var(--agent);}
+    .msg.sys{align-self:center; max-width:100%; text-align:center; color:var(--muted); font-size:0.78rem; font-style:italic;}
+    .frames{display:flex; gap:6px; flex-wrap:wrap; margin-top:6px;}
+    .frame-thumb{width:128px; max-width:42vw; border-radius:7px; border:1px solid var(--border); cursor:pointer; display:block;}
+    .frame-thumb:hover{border-color:var(--accent);}
+    .frame-cap{font-size:0.68rem; color:var(--muted); margin-top:2px;}
+    .lightbox{display:none; position:fixed; inset:0; background:rgba(0,0,0,0.82); z-index:50; align-items:center; justify-content:center; padding:2rem; cursor:zoom-out;}
+    .lightbox.show{display:flex;}
+    .lightbox img{max-width:90vw; max-height:80vh; border-radius:10px;}
+    .lightbox figcaption{color:#cbd5e1; text-align:center; margin-top:0.5rem; font-size:0.85rem;}
 
     .side .card { padding:0.85rem 0.9rem; margin-bottom:1rem; }
     .side h2 { font-size:0.72rem; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; margin:0 0 .5rem 0; }
@@ -88,6 +114,35 @@
     .item.ringing{background:rgba(229,62,62,0.14);} #alarmCard .item .badge{color:var(--danger);}
     .presets{display:flex;flex-wrap:wrap;gap:0.4rem;margin-top:0.4rem;}
     .presets .ghost{font-size:0.78rem;}
+    .cardhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:.5rem;}
+    .cardhead h2{margin:0;}
+    .addbtn{width:22px;height:22px;line-height:1;flex:0 0 auto;border-radius:6px;border:1px solid var(--border);
+      background:transparent;color:var(--muted);font-size:1.05rem;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+    .addbtn:hover{color:var(--accent);border-color:var(--accent);}
+    .addbtn.open{background:var(--accent);color:#062321;border-color:var(--accent);}
+    .skillhint{color:var(--muted);font-size:0.72rem;margin:-.15rem 0 .5rem;}
+    .skill{display:flex;align-items:center;gap:.5rem;padding:.42rem .5rem;background:var(--panel2);
+      border:1px solid var(--border);border-radius:8px;margin:.3rem 0;font-size:0.82rem;}
+    .skill .sk-ic{width:18px;text-align:center;flex:0 0 auto;}
+    .skill .sk-body{flex:1;min-width:0;}
+    .skill .sk-nm{display:block;}
+    .skill .sk-uses{display:block;font-size:.66rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .skill .sk-x{background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:.95rem;flex:0 0 auto;padding:0 .1rem;}
+    .skill .sk-x:hover{color:var(--danger);}
+    #skillBrowse{margin-top:.5rem;border-top:1px solid var(--border);padding-top:.5rem;}
+    #skillSearch,.addform input{width:100%;background:#0f1320;color:var(--text);border:1px solid rgba(255,255,255,0.12);
+      border-radius:6px;padding:.4rem .5rem;font-size:.8rem;margin-bottom:.4rem;}
+    #skillSearch:focus,.addform input:focus{outline:none;border-color:var(--accent);}
+    .brow{display:flex;align-items:center;gap:.5rem;padding:.4rem .5rem;border-radius:8px;margin:.25rem 0;font-size:0.8rem;background:var(--panel2);}
+    .brow .b-ic{width:18px;text-align:center;flex:0 0 auto;}
+    .brow .b-nm{flex:1;min-width:0;}.brow .b-nm small{display:block;color:var(--muted);font-size:.66rem;}
+    .brow .b-add{background:var(--accent);color:#062321;border:none;border-radius:6px;font-weight:700;font-size:.72rem;padding:.28rem .55rem;cursor:pointer;}
+    .brow .b-need{font-size:.66rem;color:var(--muted);text-align:right;max-width:52%;}
+    .brow.have{opacity:.55;}
+    .addform{margin:.3rem 0 .5rem;}
+    .addform-lbl{display:flex;align-items:center;gap:.4rem;font-size:.72rem;color:var(--muted);margin-bottom:.4rem;}
+    .addform-lbl input{width:auto;flex:1;margin:0;}
+    .ghost.primary{background:var(--accent);color:#062321;border:none;font-weight:700;width:100%;}
     .notifyrow{display:flex;align-items:center;gap:0.5rem;margin-top:0.5rem;}
     .notifyrow .empty-note{flex:1;}
     .notifyrow .ghost{font-size:0.72rem;padding:0.3rem 0.55rem;}
@@ -100,7 +155,7 @@
 <body>
   <div class="wrap">
     <div class="alarmbar" id="alarmbar" hidden>
-      <span>🚨</span><span class="ab-text" id="alarmText">Alarm</span>
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6"/><path d="M10 19a2 2 0 0 0 4 0"/></svg><span class="ab-text" id="alarmText">Alarm</span>
       <button class="ab-btn" id="silence" type="button">Silence</button>
     </div>
 
@@ -111,12 +166,15 @@
             <div class="ram idle" id="ram" aria-label="agent avatar">
               <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
                 <circle class="ring" cx="50" cy="50" r="40" fill="none" stroke-width="5"/>
-                <circle class="iris" cx="50" cy="50" r="16"/>
+                <circle class="iris" cx="50" cy="44" r="13"/>
+                <ellipse class="mouth" id="mouth" cx="50" cy="68" rx="11" ry="2"/>
               </svg>
+              <video class="avatar-video" id="avatarVideo" muted loop playsinline preload="auto" aria-hidden="true"></video>
             </div>
             <div>
-              <h1 id="title">Camera Agent</h1>
-              <p class="lede" id="lede">Tap <strong>Talk</strong>, then just speak — hands-free, answers aloud.</p>
+              <h1 id="title">OpenNVR Camera Agent</h1>
+              <p class="lede" id="lede">Tap <strong>Talk</strong> and speak — it listens and answers aloud, tap Stop when done.</p>
+              <div class="micdot" id="micdot" hidden>mic live</div>
             </div>
           </div>
 
@@ -125,16 +183,16 @@
             <label><input type="checkbox" id="cam-all" checked> All cameras</label>
           </div>
           <div class="row">
-            <button id="useLocalCam" class="ghost" type="button" title="Use a camera attached to this machine — webcam, USB, Pi or drone">📷 Use this machine's camera</button>
+            <button id="useLocalCam" class="ghost" type="button" title="Use a camera attached to this machine — webcam, USB, Pi or drone"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h3l2-2h8l2 2h3v12H3z"/><circle cx="12" cy="13" r="3.5"/></svg> Use this machine's camera</button>
           </div>
 
-          <button id="talk" class="talk" type="button">🎤 Talk</button>
+          <button id="talk" class="talk" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg> Talk</button>
           <div class="row askrow">
             <input id="askInput" type="text" placeholder="Type a question, e.g. how many people on cam1?" autocomplete="off">
             <button id="askBtn" class="ghost" type="button">Send</button>
           </div>
           <div class="row">
-            <div class="status" id="status">Ready. Type a question or tap Talk.</div>
+            <div class="status" id="status">Ready. Tap Talk and speak, or type a question.</div>
             <span class="chip" id="working" hidden></span>
             <span class="chip" id="lat" hidden title="Per-turn latency: STT · LLM · TTS · total"></span>
             <button id="reset" class="ghost" type="button">Reset</button>
@@ -145,11 +203,27 @@
       </div>
 
       <div class="side">
+        <div class="card" id="skillsCard">
+          <div class="cardhead"><h2>Skills</h2><button class="addbtn" id="skillAdd" type="button" title="Add a skill" aria-label="Add a skill">+</button></div>
+          <div class="skillhint">Capabilities the agent carries. × to remove.</div>
+          <div id="skillsList"></div>
+          <div id="skillBrowse" hidden>
+            <input id="skillSearch" type="text" placeholder="Search skills to add…" autocomplete="off">
+            <div id="skillBrowseList"></div>
+            <button class="ghost" id="skillBrowseClose" type="button">Done</button>
+          </div>
+        </div>
         <div class="card" id="alarmCard">
-          <h2>Alarms</h2>
+          <div class="cardhead"><h2>Alarms</h2><button class="addbtn" id="alarmAdd" type="button" title="Add an alarm" aria-label="Add an alarm">+</button></div>
           <div class="presets">
-            <button class="ghost preset" data-name="Fire" data-target="fire" type="button">🔥 Fire</button>
-            <button class="ghost preset" data-name="After-hours person" data-target="person" data-after="18:00" type="button">🌙 After-hours</button>
+            <button class="ghost preset" data-name="Fire" data-target="fire" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 2c1 3 4 4 4 8a4 4 0 0 1-8 0c0-2 1-3 2-4 0 2 2 2 2 0 0-2-2-2-2-4z"/></svg> Fire</button>
+            <button class="ghost preset" data-name="After-hours person" data-target="person" data-after="18:00" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A8 8 0 1 1 11.2 3 6 6 0 0 0 21 12.8z"/></svg> After-hours</button>
+          </div>
+          <div class="addform" id="alarmForm" hidden>
+            <input id="alarmName" type="text" placeholder="Name, e.g. Porch person" autocomplete="off">
+            <input id="alarmTarget" type="text" placeholder="Watch for, e.g. person / car / package" autocomplete="off">
+            <label class="addform-lbl">Only after <input id="alarmAfter" type="time"></label>
+            <button class="ghost primary" id="alarmArm" type="button">Arm alarm</button>
           </div>
           <div class="notifyrow" id="notifyRow" hidden>
             <span id="notifyStatus" class="empty-note"></span>
@@ -162,7 +236,11 @@
           <div id="monitorList"></div>
         </div>
         <div class="card">
-          <h2>Background tasks</h2>
+          <div class="cardhead"><h2>Background tasks</h2><button class="addbtn" id="taskAdd" type="button" title="Add a background task" aria-label="Add a background task">+</button></div>
+          <div class="addform" id="taskForm" hidden>
+            <input id="taskQuery" type="text" placeholder="e.g. find the red truck earlier today" autocomplete="off">
+            <button class="ghost primary" id="taskRun" type="button">Run in background</button>
+          </div>
           <div id="taskList"></div>
         </div>
         <div class="card">
@@ -180,6 +258,12 @@
     const alarmbarEl=$("alarmbar"), alarmTextEl=$("alarmText"), silenceBtn=$("silence");
     const alarmListEl=$("alarmList"), monitorListEl=$("monitorList"), taskListEl=$("taskList"), reportListEl=$("reportList");
     const titleEl=$("title"), ledeEl=$("lede");
+    const mouthEl=$("mouth"), micdotEl=$("micdot");
+    // Inline SVG icons (no webfont, no external assets — works fully offline).
+    const IC={
+      mic:'<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg>',
+      stop:'<svg class="ic" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
+      bell:'<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6"/><path d="M10 19a2 2 0 0 0 4 0"/></svg>'};
 
     // VAD: START_RMS/SILENCE_RMS are FLOORS — the real gates adapt to the
     // measured ambient noise floor (noiseFloor*MARGIN), so steady background
@@ -188,9 +272,10 @@
     const SILENCE_MS=900, MIN_UTTER_MS=350, MAX_UTTER_MS=15000, TICK_MS=40;
     const START_MARGIN=2.2, SILENCE_MARGIN=1.5, FLOOR_EMA=0.05;
     let noiseFloor=0.01;
-    const IDLE_MS=25000, POLL_MS=3000;
-
-    let agentName="the agent";
+    // Click Talk to start a listening session; it stays live until you click
+    // Stop or there's no voice activity for IDLE_MS (auto-stop). No wake word.
+    const IDLE_MS=15000, POLL_MS=3000;
+    let levelRAF=null;
     let mediaStream=null, audioCtx=null, analyser=null, floatBuf=null;
     let recorder=null, chunks=[];
     let sessionActive=false, capturing=false, speaking=false, busy=false, alarmRinging=false;
@@ -198,6 +283,7 @@
     let vadTimer=null, pollTimer=null, alarmTimer=null, workingTimer=null, introPlayed=false;
     const knownTasks={}, seenNotes={}, seenAlarmEvents={}, seenReports={};
     let sirenOsc=null, sirenGain=null, sirenInt=null;
+    let playbackAnalyser=null, currentSource=null, mouthRAF=null;
 
     // ── audio: output ctx (for siren/chimes) + mic ctx share one AudioContext ──
     function ensureOutputAudio() {
@@ -238,12 +324,96 @@
     }
     function playWav(b64){ return new Promise(r=>{const a=new Audio("data:audio/wav;base64,"+b64); a.onended=r; a.onerror=r; a.play().catch(r);}); }
 
-    function setAvatar(s){ ramEl.className="ram "+s; }
+    // ── Audio-reactive speaking + barge-in ──
+    // Decode the TTS WAV, route it through an analyser, and drive the avatar's
+    // mouth from the live amplitude — so she visibly "speaks". If the user talks
+    // clearly over her (mic well above the room floor), playback stops so they
+    // can ask straight away (barge-in).
+    function setMouth(amp){ if(mouthEl) mouthEl.setAttribute("ry",(2+Math.min(1,amp*4)*14).toFixed(1)); }
+    function stopSpeaking(){ if(currentSource){ try{currentSource.stop();}catch{} currentSource=null; }
+      if(mouthRAF){ cancelAnimationFrame(mouthRAF); mouthRAF=null; } setMouth(0); }
+    async function speak(b64){
+      ensureOutputAudio();
+      let buf; try{ const bytes=Uint8Array.from(atob(b64),c=>c.charCodeAt(0)); buf=await audioCtx.decodeAudioData(bytes.buffer); }
+      catch{ return playWav(b64); }                 // fallback: plain playback, no mouth
+      return new Promise(resolve=>{
+        let done=false; const fin=()=>{ if(done)return; done=true; setMouth(0); resolve(); };
+        if(!playbackAnalyser){ playbackAnalyser=audioCtx.createAnalyser(); playbackAnalyser.fftSize=512;
+          playbackAnalyser.connect(audioCtx.destination); }   // wire to speakers once
+        const an=playbackAnalyser, abuf=new Float32Array(an.fftSize);
+        const src=audioCtx.createBufferSource(); src.buffer=buf;
+        src.connect(an); currentSource=src; let bargeFrames=0;
+        const tick=()=>{
+          if(currentSource!==src){ fin(); return; }       // stopped (barge-in / reset)
+          an.getFloatTimeDomainData(abuf); let s=0; for(let i=0;i<abuf.length;i++)s+=abuf[i]*abuf[i];
+          setMouth(Math.sqrt(s/abuf.length));
+          if(analyser && sessionActive){                   // barge-in detection
+            const mic=rms(), gate=Math.max(START_RMS,noiseFloor*START_MARGIN)*1.7;
+            bargeFrames = mic>gate ? bargeFrames+1 : 0;
+            if(bargeFrames>=4){ stopSpeaking(); fin(); return; }
+          }
+          mouthRAF=requestAnimationFrame(tick);
+        };
+        src.onended=()=>{ if(currentSource===src)currentSource=null; fin(); };
+        src.start(); mouthRAF=requestAnimationFrame(tick);
+      });
+    }
+    // A ring around the Talk button, driven by mic level while the session is
+    // live: bright + wide when you're speaking, a gentle glow while it waits.
+    function levelRing(){ if(!sessionActive){ talkBtn.style.boxShadow=""; return; }
+      let glow = capturing ? Math.min(1,(analyser?rms():0)*6) : ((speaking||busy)?0:0.14);
+      const r=(3+glow*20).toFixed(0), a=(0.05+glow*0.16).toFixed(2);
+      talkBtn.style.boxShadow=`0 0 0 ${r}px rgba(229,62,62,${a})`;
+      levelRAF=requestAnimationFrame(levelRing); }
+
+    // Talking-avatar VIDEO: an idle loop, a 'speaking' loop while she talks, and
+    // an optional 'thinking' loop. Bundled clips are placeholders — swap in your
+    // own (e.g. a HeyGen export) by replacing demo/avatar/{idle,speaking,
+    // thinking}.{webm,mp4}. Turned off with `avatar_video: false` in the config
+    // (or per /agent). If a clip can't load we degrade gracefully: a missing
+    // optional clip falls back to the idle clip; if idle itself fails, we fall
+    // all the way back to the animated SVG face above.
+    const avatarVideo=$("avatarVideo"); let avatarEnabled=true, avatarVideoOk=false, avClip="";
+    const avAvail={idle:true, speaking:true, thinking:true};   // optimistic; error events prune this
+    const AV={ idle:{webm:"/demo/avatar/idle.webm",mp4:"/demo/avatar/idle.mp4"},
+               speaking:{webm:"/demo/avatar/speaking.webm",mp4:"/demo/avatar/speaking.mp4"},
+               thinking:{webm:"/demo/avatar/thinking.webm",mp4:"/demo/avatar/thinking.mp4"} };
+    function avSrc(kind){ const c=AV[kind];
+      return (avatarVideo.canPlayType&&avatarVideo.canPlayType("video/webm").replace("no",""))?c.webm:c.mp4; }
+    function setAvatarClip(kind){ if(!avatarVideo||!avatarEnabled)return;
+      if(!avAvail[kind]) kind="idle";                          // optional clip absent → idle
+      if(avClip===kind)return; avClip=kind;
+      avatarVideo.src=avSrc(kind); avatarVideo.play().catch(()=>{}); }
+    function disableAvatarVideo(){ avatarEnabled=false; avatarVideoOk=false; avClip="";
+      if(avatarVideo){ avatarVideo.removeAttribute("src"); } ramEl.classList.remove("has-video"); }
+    if(avatarVideo){
+      avatarVideo.addEventListener("loadeddata",()=>{ if(!avatarVideoOk){ avatarVideoOk=true; ramEl.classList.add("has-video"); } });
+      avatarVideo.addEventListener("error",()=>{
+        if(avClip && avClip!=="idle"){ avAvail[avClip]=false; avClip=""; setAvatarClip("idle"); }  // optional clip → idle
+        else { disableAvatarVideo(); } });                     // idle failed → SVG face
+      setAvatarClip("idle");
+    }
+    function setAvatar(s){ ramEl.className="ram "+(avatarVideoOk?"has-video ":"")+s;
+      if(avatarVideoOk) setAvatarClip(s==="speaking"?"speaking":(s==="thinking"?"thinking":"idle")); }
     function setStatus(t,k=""){ statusEl.textContent=t; statusEl.className="status"+(k?(" "+k):""); }
-    function addMsg(text,who){ const d=document.createElement("div"); d.className="msg "+who;
-      if(who==="sys"){d.textContent=text;} else { const label=who==="user"?"you":agentName;
-        d.innerHTML=`<span class="who">${label}:</span> `; d.appendChild(document.createTextNode(text)); }
+    function addMsg(text,who,frames){ const d=document.createElement("div"); d.className="msg "+who;
+      if(who==="sys"){d.textContent=text;} else { const label=who==="user"?"you":"agent";
+        d.innerHTML=`<span class="who">${label}</span>`; d.appendChild(document.createTextNode(text));
+        // Show the frame(s) the agent actually looked at, inline in the bubble.
+        if(frames&&frames.length){ const fr=document.createElement("div"); fr.className="frames";
+          frames.forEach(f=>{ const wrap=document.createElement("div");
+            const im=document.createElement("img"); im.className="frame-thumb";
+            im.src="data:image/jpeg;base64,"+f.jpeg_b64; im.alt=im.title=f.role||f.camera_id;
+            im.addEventListener("click",()=>openLightbox(im.src,f.role||f.camera_id));
+            const cap=document.createElement("div"); cap.className="frame-cap"; cap.textContent=f.role||f.camera_id;
+            wrap.appendChild(im); wrap.appendChild(cap); fr.appendChild(wrap); });
+          d.appendChild(fr); } }
       logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight; }
+    function openLightbox(src,label){ let ov=document.getElementById("lightbox");
+      if(!ov){ ov=document.createElement("div"); ov.id="lightbox"; ov.className="lightbox";
+        ov.addEventListener("click",()=>ov.classList.remove("show")); document.body.appendChild(ov); }
+      ov.innerHTML=`<figure style="margin:0"><img src="${src}" alt="${label||""}"><figcaption>${label||""}</figcaption></figure>`;
+      ov.classList.add("show"); }
     function showLatency(t){ const el=$("lat"); if(!el||!t)return;
       const ms=(t.total!=null?t.total:0); if(!ms){el.hidden=true;return;}
       const parts=[]; if(t.stt!=null)parts.push("STT "+t.stt); if(t.llm!=null)parts.push("LLM "+t.llm);
@@ -256,14 +426,15 @@
       workingEl.hidden=false; workingTimer=setTimeout(()=>{workingEl.hidden=true;},6000); }
 
     async function loadAgent(){ try{ const a=await (await fetch("/agent")).json();
-      if(a.name){ agentName=a.name; titleEl.textContent=agentName+" — OpenNVR Camera Agent"; }
+      if(a.avatar_video===false) disableAvatarVideo();   // operator turned the video avatar off
+      titleEl.textContent="OpenNVR Camera Agent";
       if(a.text_mode){
-        // Lite/text profile: lead with typing; voice is optional.
+        // Text/chat profile: lead with typing; the voice controls don't apply.
         document.getElementById("talk").style.display="none";
-        ledeEl.innerHTML=`Type a question to ${agentName} — e.g. <em>"how many people on cam1?"</em>`;
+        ledeEl.innerHTML=`Type a question — e.g. <em>"how many people on cam1?"</em>`;
         setStatus("Ready. Type a question.");
       } else {
-        ledeEl.innerHTML=`Tap <strong>Talk</strong> and speak, or type below. ${agentName} answers from your cameras.`;
+        ledeEl.innerHTML=`Tap <strong>Talk</strong> and speak, or type below — it answers from your cameras.`;
       }
     }catch{} }
 
@@ -277,7 +448,7 @@
           body:JSON.stringify({text:q,camera:cameraParam()})});
         const d=await r.json();
         if(!r.ok){ addMsg("Error: "+(d.error||("HTTP "+r.status)),"sys"); }
-        else { if(d.reply) addMsg(d.reply,"agent"); showWorking(d.cameras_used); showLatency({total:d.latency_ms}); }
+        else { if(d.reply) addMsg(d.reply,"agent",d.frames); showWorking(d.cameras_used); showLatency({total:d.latency_ms}); }
         setStatus("Ready. Type a question.","");
       }catch(err){ addMsg("Request failed: "+err.message,"sys"); setStatus("Error","error"); }
       finally{ $("askBtn").disabled=false; setAvatar("idle"); }
@@ -315,10 +486,10 @@
     function pickMimeType(){ for(const t of ["audio/webm;codecs=opus","audio/webm","audio/ogg;codecs=opus","audio/mp4"])
       if(window.MediaRecorder&&MediaRecorder.isTypeSupported(t))return t; return ""; }
 
-    async function playIntro(){ setStatus(agentName+" is introducing…"); setAvatar("speaking");
-      try{ const d=await (await fetch("/intro")).json(); if(d.name) agentName=d.name;
-        if(d.text) addMsg(d.text,"agent"); if(d.audio_b64){ speaking=true; await playWav(d.audio_b64); speaking=false; } }
-      catch{ addMsg("Hi, I'm "+agentName+", your OpenNVR camera agent.","agent"); } }
+    async function playIntro(){ setStatus("Introducing…"); setAvatar("speaking");
+      try{ const d=await (await fetch("/intro")).json();
+        if(d.text) addMsg(d.text,"agent"); if(d.audio_b64){ speaking=true; setAvatar("speaking"); await speak(d.audio_b64); speaking=false; } }
+      catch{ addMsg("Hi, I'm your OpenNVR camera agent.","agent"); } }
 
     // ── listening loop ──
     function vadTick(){ if(!sessionActive||speaking||busy||alarmRinging)return;
@@ -348,38 +519,44 @@
       setAvatar("thinking"); setStatus("Thinking…"); recorder.stop(); }
 
     async function onUtterance(){ const blob=new Blob(chunks,{type:recorder.mimeType||"audio/webm"});
-      if(blob.size<1200){ if(sessionActive){setAvatar("listening");setStatus("Listening…","active");} return; }
+      if(blob.size<1200){ if(sessionActive){setAvatar("listening");setStatus("Listening… speak your question.","active");} return; }
       busy=true;
-      try{ const url="/converse?camera="+encodeURIComponent(cameraParam());
+      try{ // wake=0 → the session is the addressing; every utterance is answered.
+        const url="/converse?camera="+encodeURIComponent(cameraParam())+"&wake=0";
         const resp=await fetch(url,{method:"POST",headers:{"Content-Type":"application/octet-stream"},body:blob});
         if(!resp.ok){const e=await resp.json().catch(()=>({}));throw new Error(e.error||("HTTP "+resp.status));}
         const data=await resp.json();
-        if(!data.transcript){ if(sessionActive){setAvatar("listening");setStatus("Didn't catch that — keep talking.","active");} return; }
+        if(!data.transcript){ if(sessionActive){setAvatar("listening");setStatus("Didn't catch that — go ahead.","active");} return; }
         addMsg(data.transcript,"user"); lastActivity=performance.now(); showWorking(data.cameras_used); showLatency(data.timings_ms);
-        if(data.reply) addMsg(data.reply,"agent");
-        if(data.audio_b64){ speaking=true; setAvatar("speaking"); await playWav(data.audio_b64); speaking=false; }
-        if(sessionActive){ setAvatar("listening"); setStatus("Listening…","active"); }
+        if(data.reply) addMsg(data.reply,"agent",data.frames);
+        if(data.audio_b64){ speaking=true; setAvatar("speaking"); await speak(data.audio_b64); speaking=false; }
+        if(sessionActive){ setAvatar("listening"); setStatus("Listening… ask a follow-up, or tap Stop.","active"); }
       }catch(err){ addMsg("Request failed: "+err.message,"sys"); if(sessionActive){setAvatar("listening");setStatus("Error: "+err.message,"error");} }
       finally{ busy=false; lastActivity=performance.now(); }
     }
 
+    // ── listening session ──
+    // Click Talk → listen continuously (VAD auto-segments each utterance and
+    // answers it), until you click Stop or a quiet spell (IDLE_MS) auto-stops.
     async function startSession(){ ensureOutputAudio();
       try{ await ensureMic(); }catch(err){ setStatus("Microphone access denied.","error"); addMsg("Microphone access denied: "+err,"sys"); return; }
       sessionActive=true; lastActivity=performance.now(); loudFrames=0;
-      talkBtn.textContent="⏹ Stop"; talkBtn.classList.add("listening");
+      talkBtn.innerHTML=IC.stop+" Stop"; talkBtn.classList.add("listening");
       if(!introPlayed){ introPlayed=true; await playIntro(); }
       if(!sessionActive) return;
-      setAvatar("listening"); setStatus("Listening… just talk.","active");
+      micdotEl.hidden=false; setAvatar("listening"); setStatus("Listening… just speak.","active");
+      if(!levelRAF) levelRAF=requestAnimationFrame(levelRing);
       if(!vadTimer) vadTimer=setInterval(vadTick,TICK_MS);
       if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();},POLL_MS);
       if(!alarmTimer) alarmTimer=setInterval(pollAlarms,2500);
     }
-    function stopSession(){ sessionActive=false; if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(capturing)stopCapture();
-      talkBtn.textContent="🎤 Talk"; talkBtn.classList.remove("listening"); setAvatar("idle"); setStatus("Stopped. Tap Talk to resume."); }
-    function pauseForIdle(){ sessionActive=false; if(vadTimer){clearInterval(vadTimer);vadTimer=null;}
-      talkBtn.textContent="🎙️ Enable talking"; talkBtn.classList.remove("listening"); setAvatar("idle");
-      setStatus("Paused — no conversation for a while. Tap Enable talking to resume.");
-      addMsg(agentName+" stopped listening after a quiet spell. Tap “Enable talking” to chat again.","sys"); }
+    function endSession(){ sessionActive=false; if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(capturing)stopCapture();
+      if(levelRAF){cancelAnimationFrame(levelRAF);levelRAF=null;} talkBtn.style.boxShadow="";
+      stopSpeaking(); micdotEl.hidden=true; talkBtn.classList.remove("listening"); setAvatar("idle"); }
+    function stopSession(){ endSession(); talkBtn.innerHTML=IC.mic+" Talk"; setStatus("Stopped. Tap Talk to start again."); }
+    function pauseForIdle(){ endSession(); talkBtn.innerHTML=IC.mic+" Talk";
+      setStatus("Stopped listening after a quiet spell. Tap Talk to resume.");
+      addMsg("The agent stopped listening after a quiet spell. Tap Talk to chat again.","sys"); }
 
     // ── tasks ──
     async function pollTasks(){ let tasks; try{ tasks=(await (await fetch("/tasks")).json()).tasks||[]; }catch{ return; }
@@ -433,7 +610,7 @@
 
     // ── alarms ──
     async function pollAlarms(){ let data; try{ data=await (await fetch("/alarms")).json(); }catch{ return; }
-      for(const e of (data.events||[])){ if(!seenAlarmEvents[e.id]){ seenAlarmEvents[e.id]=true; addMsg("🚨 "+e.text,"agent"); } }
+      for(const e of (data.events||[])){ if(!seenAlarmEvents[e.id]){ seenAlarmEvents[e.id]=true; addMsg("Alarm: "+e.text,"agent"); } }
       const names=(data.alarms||[]).filter(a=>a.triggered).map(a=>a.name);
       if(data.ringing){ alarmRinging=true; alarmTextEl.textContent=names.length?("Alarm: "+names.join(", ")):"Alarm triggered";
         alarmbarEl.hidden=false; setAvatar("speaking"); startSiren(); }
@@ -443,7 +620,7 @@
       if(!active.length){ alarmListEl.innerHTML='<div class="empty-note">No alarms armed.</div>'; return; }
       alarmListEl.innerHTML="";
       for(const a of active){ const d=document.createElement("div"); d.className="item"+(a.triggered?" ringing":"");
-        d.innerHTML=`<span class="badge">${a.triggered?"🚨":"🔔"}</span>`; const q=document.createElement("span"); q.className="q";
+        d.innerHTML=`<span class="badge">${IC.bell}</span>`; const q=document.createElement("span"); q.className="q";
         const when=a.window==="any time"?"":` · ${a.window}`; const contact=a.emergency_contact_configured?" · ☎":"";
         q.textContent=`${a.name}: ${a.target} on ${a.camera_ids.join(", ")}${when}${contact}`; d.appendChild(q);
         const s=document.createElement("button"); s.className="stop"; s.title="Disarm"; s.textContent="✕";
@@ -462,8 +639,10 @@
       if(btn.dataset.after) body.after=btn.dataset.after; addAlarm(body); }));
     $("askBtn").addEventListener("click", ask);
     $("askInput").addEventListener("keydown",(e)=>{ if(e.key==="Enter") ask(); });
-    talkBtn.addEventListener("click",()=>{ ensureOutputAudio(); if(busy&&sessionActive)return; if(sessionActive)stopSession(); else startSession(); });
-    resetBtn.addEventListener("click",async()=>{ try{ await fetch("/reset",{method:"POST"}); logEl.innerHTML=""; addMsg("Conversation reset.","sys"); }catch{} });
+    // Click Talk to start/stop the listening session.
+    talkBtn.addEventListener("click",()=>{ ensureOutputAudio();
+      if(busy&&sessionActive)return; if(sessionActive)stopSession(); else startSession(); });
+    resetBtn.addEventListener("click",async()=>{ stopSpeaking(); try{ await fetch("/reset",{method:"POST"}); logEl.innerHTML=""; addMsg("Conversation reset.","sys"); }catch{} });
 
     async function loadNotify(){
       try{ const s=await (await fetch("/notify")).json();
@@ -477,8 +656,71 @@
         addMsg(r.ok?`Test sent to ${d.delivered}/${d.channels} channel(s).`:("Test failed: "+(d.error||"")), "sys"); }catch{}
     });
 
+    // ── skills: capabilities the agent carries. The list shows ENABLED skills
+    // (× to remove); + opens a browse/search to add ones whose backend is
+    // configured. Toggling calls the server, which reconfigures the live toolset.
+    let _skills=[];
+    async function loadSkills(){ try{ _skills=(await (await fetch("/skills")).json()).skills||[]; }
+      catch{ const c=$("skillsCard"); if(c) c.style.display="none"; return; }
+      renderSkills(); }
+    function renderSkills(){ const el=$("skillsList"); if(!el) return; el.innerHTML="";
+      const on=_skills.filter(s=>s.enabled);
+      if(!on.length) el.innerHTML='<div class="empty-note">No skills enabled — tap + to add.</div>';
+      for(const s of on){ const d=document.createElement("div"); d.className="skill";
+        d.innerHTML=`<span class="sk-ic">${s.icon}</span><span class="sk-body"><span class="sk-nm"></span><span class="sk-uses"></span></span><button class="sk-x" title="Remove skill">✕</button>`;
+        d.querySelector(".sk-nm").textContent=s.name;
+        d.querySelector(".sk-uses").textContent="uses "+s.uses;
+        d.querySelector(".sk-x").addEventListener("click",()=>toggleSkill(s.id,"disable"));
+        el.appendChild(d); }
+      renderBrowse(); }
+    function renderBrowse(){ const el=$("skillBrowseList"); if(!el) return;
+      const q=(($("skillSearch")||{}).value||"").toLowerCase();
+      const add=_skills.filter(s=>!s.enabled && (s.name.toLowerCase().includes(q)||s.id.includes(q)));
+      el.innerHTML = add.length?"":'<div class="empty-note">No matching skills.</div>';
+      for(const s of add){ const d=document.createElement("div"); d.className="brow"+(s.available?"":" have");
+        d.innerHTML=`<span class="b-ic">${s.icon}</span><span class="b-nm"><span></span><small></small></span>`+
+          (s.available?'<button class="b-add" type="button">Add</button>':'<span class="b-need"></span>');
+        d.querySelector(".b-nm span").textContent=s.name;
+        d.querySelector(".b-nm small").textContent="uses "+s.uses;
+        if(s.available) d.querySelector(".b-add").addEventListener("click",()=>toggleSkill(s.id,"enable"));
+        else d.querySelector(".b-need").textContent=s.hint||"needs setup";
+        el.appendChild(d); } }
+    async function toggleSkill(id,action){
+      try{ const r=await fetch("/skills/"+encodeURIComponent(id)+"/"+action,{method:"POST"});
+        const d=await r.json().catch(()=>({}));
+        if(!r.ok){ addMsg("Couldn't "+action+" skill: "+(d.hint||d.error||("HTTP "+r.status)),"sys"); return; }
+        _skills=d.skills||_skills; renderSkills();
+        addMsg((action==="enable"?"Enabled":"Removed")+" a skill — the agent reconfigured its tools.","sys");
+      }catch(err){ addMsg("Couldn't "+action+" skill: "+err.message,"sys"); } }
+    // + / browse / search wiring
+    (function(){ const add=$("skillAdd"), br=$("skillBrowse"), close=$("skillBrowseClose"), search=$("skillSearch");
+      if(add&&br) add.addEventListener("click",()=>{ br.hidden=!br.hidden; add.classList.toggle("open",!br.hidden); if(!br.hidden){ renderBrowse(); search&&search.focus(); } });
+      if(close) close.addEventListener("click",()=>{ br.hidden=true; add.classList.remove("open"); });
+      if(search) search.addEventListener("input", renderBrowse); })();
+
+    // Alarms: + reveals a small custom-alarm form (POST /alarms via addAlarm).
+    (function(){ const add=$("alarmAdd"), f=$("alarmForm"), arm=$("alarmArm");
+      if(add&&f) add.addEventListener("click",()=>{ f.hidden=!f.hidden; add.classList.toggle("open",!f.hidden); if(!f.hidden) $("alarmName").focus(); });
+      if(arm) arm.addEventListener("click",()=>{ const target=$("alarmTarget").value.trim();
+        if(!target){ $("alarmTarget").focus(); return; }
+        const body={name:$("alarmName").value.trim()||("Alarm: "+target),target,camera_id:cameraParam()};
+        const after=$("alarmAfter").value; if(after) body.after=after; addAlarm(body);
+        $("alarmName").value=""; $("alarmTarget").value=""; $("alarmAfter").value=""; f.hidden=true; add.classList.remove("open"); }); })();
+
+    // Background tasks: + reveals a query input (POST /tasks).
+    (function(){ const add=$("taskAdd"), f=$("taskForm"), run=$("taskRun"), qi=$("taskQuery");
+      if(add&&f) add.addEventListener("click",()=>{ f.hidden=!f.hidden; add.classList.toggle("open",!f.hidden); if(!f.hidden) qi.focus(); });
+      async function go(){ const q=(qi.value||"").trim(); if(!q){ qi.focus(); return; }
+        try{ const r=await fetch("/tasks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:q})});
+          if(r.ok){ addMsg("Background task queued: "+q,"sys"); qi.value=""; f.hidden=true; add.classList.remove("open");
+            pollTasks(); if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();},POLL_MS); }
+          else { const d=await r.json().catch(()=>({})); addMsg("Task failed: "+(d.error||("HTTP "+r.status)),"sys"); }
+        }catch(err){ addMsg("Task failed: "+err.message,"sys"); } }
+      if(run) run.addEventListener("click", go);
+      if(qi) qi.addEventListener("keydown",e=>{ if(e.key==="Enter") go(); }); })();
+
     const _ulc=$("useLocalCam"); if(_ulc) _ulc.addEventListener("click", useLocalCamera);
-    loadAgent(); loadCameras(); loadNotify(); setAvatar("idle");
+    loadAgent(); loadCameras(); loadNotify(); loadSkills(); setAvatar("idle");
     renderTasks([]); renderMonitors([]); renderAlarms([]); renderReports([]);
     alarmTimer = setInterval(pollAlarms, 2500);   // alarms ring even before Talk
   </script>

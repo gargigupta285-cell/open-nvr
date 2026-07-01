@@ -146,6 +146,13 @@ class CameraContext:
             )
             return frame
 
+    def get_cached_frame(self, camera_id: str) -> bytes | None:
+        """Return the JPEG bytes most recently fetched for ``camera_id`` this
+        session, or None if nothing is cached. Best-effort, no fetch — used to
+        show the operator the exact frame a tool looked at, in the chat."""
+        cached = self._frame_cache.get(camera_id)
+        return cached.bytes_ if cached is not None else None
+
     def invalidate_frame_cache(self, camera_id: str | None = None) -> None:
         """Drop cached frames. Without an arg, drops all — useful for
         tests."""
