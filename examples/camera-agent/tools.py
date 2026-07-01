@@ -256,12 +256,19 @@ class CameraTools:
         # available. Send the task explicitly for symmetry with
         # recognize_faces and so the wire shape is legible in audit logs.
         try:
-            extra: dict[str, Any] = {"task": "scene_caption"}
+            # A specific question → ask the adapter to ANSWER it (VQA); an
+            # open-ended request → a scene caption. Crucially, do NOT pin
+            # task="scene_caption" when there's a question: a VQA adapter
+            # (moondream) only answers when the task ISN'T scene_caption, while a
+            # pure captioner (BLIP) defaults to captioning when no task is given.
+            # So omitting the task lets moondream do VQA and BLIP still caption —
+            # otherwise every question got the same generic caption back.
+            extra: dict[str, Any] = {}
             if question:
-                # Forward the question both ways so any VQA adapter naming picks
-                # it up; captioners that don't understand it simply ignore it.
                 extra["question"] = question
                 extra["prompt"] = question
+            else:
+                extra["task"] = "scene_caption"
             response = await self._caption.infer(frame_jpeg=frame, extra=extra)
             result = response.get("result") or {}
             # VQA adapters return ``answer``; captioners return ``caption``.

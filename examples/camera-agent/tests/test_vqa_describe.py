@@ -60,6 +60,32 @@ def test_plain_captioner_still_works_without_question():
     assert "a man sitting at a desk" in out
 
 
+class _RecordingCaptioner:
+    """Records the extra payload and always returns a caption."""
+    def __init__(self):
+        self.seen = {}
+    async def infer(self, *, frame_jpeg, extra=None, correlation_id=None):
+        self.seen = extra or {}
+        return {"result": {"caption": "a man at a desk"}}
+
+
+def test_question_does_not_pin_scene_caption_task():
+    # Regression: pinning task="scene_caption" suppressed VQA on moondream
+    # (is_vqa requires task != "scene_caption"), so every question got the same
+    # generic caption back. With a question we must NOT send scene_caption.
+    c = _RecordingCaptioner()
+    asyncio.run(_tools(c).describe_camera(
+        {"camera_id": "cam1", "question": "what is he doing?"}))
+    assert c.seen.get("task") != "scene_caption"
+    assert c.seen.get("question") == "what is he doing?"
+
+
+def test_open_ended_request_asks_for_scene_caption():
+    c = _RecordingCaptioner()
+    asyncio.run(_tools(c).describe_camera({"camera_id": "cam1"}))   # no question
+    assert c.seen.get("task") == "scene_caption"
+
+
 def test_describe_tool_advertises_question_param():
     defs = build_tool_definitions(["cam1"])
     describe = next(d for d in defs if d["function"]["name"] == "describe_camera")
