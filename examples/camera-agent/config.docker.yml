@@ -27,24 +27,23 @@ ollama_token:
 piper_url: http://piper-adapter:9001
 piper_token: ${INTERNAL_API_KEY}
 
-# The agent is named "Sara" — this is also the wake word ("Hey Sara"), like
-# Apple's "Siri". CHANGING THE NAME IS NOT ADVISED: the wake word is heard via
-# speech-to-text, which transcribes a common name like Sara the same way every
-# time. An unusual or non-English name is often mis-heard, and a name STT mishears
-# means the agent won't wake when you call it. The voice (voice_gender) is a
-# SEPARATE setting — you can pick a male voice without changing the name.
-#   agent_name: Sara           # only change if you must; then add its spellings:
-#   wake_words: ["camera"]     # extra exact wake words (e.g. a plain-English one)
+# The agent has no persona name — it presents as "the OpenNVR camera agent"
+# (chat label "agent"). This value is only used for event metadata and, if you
+# turn it on, the OPTIONAL wake word ("Hey <agent_name>"). The voice is a
+# SEPARATE setting — "neutral" pairs an androgynous Piper voice.
+agent_name: Camera Agent
+voice_gender: neutral
+#   wake_words: ["camera"]     # extra exact wake words, if you enable the wake word
 
-# Wake word (voice only). When true, the agent answers a spoken utterance only
-# when addressed by name ("Hey Sara, …") — so it ignores the TV, a side
-# conversation, or its own reply echoed back through the speakers. The demo UI
-# also exposes a per-session toggle. Set false for continuous, always-listening.
-# The name's known spellings (sara/sarah) match exactly, plus a tight fuzzy net
-# (wake_fuzzy 0.85) catches close STT drift while rejecting real words. An
-# address word ("hey/ok") is required — the "Hey Siri" model.
+# Wake word — OPTIONAL. The demo uses click-to-talk (tap Talk → it listens and
+# answers every utterance, auto-stops on a quiet spell), so it never hits this
+# gate. It only affects always-on callers of /converse that don't pass ?wake=0:
+# when true they answer only when addressed by name ("Hey <agent_name>, …"), so
+# ambient speech and the agent's own echoed reply don't trigger a turn. Exact
+# match on the name (+ spellings), a tight fuzzy net (wake_fuzzy 0.85) for drift,
+# and an address word ("hey/ok") required — the "Hey Siri" model.
 wake_word_required: true
-#   wake_require_prefix: true   # false = the bare word (no "hey") also wakes her
+#   wake_require_prefix: true   # false = the bare word (no "hey") also wakes it
 #   wake_fuzzy: 0.85            # 1.0 = exact only; < 0.85 = more forgiving
 
 # Vision tools — routed through KAI-C by the registered adapter NAME.

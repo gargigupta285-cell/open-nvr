@@ -6,9 +6,10 @@
   OpenNVR Camera Agent front-end (vanilla JS, no build step).
 
   * The agent introduces itself (text + spoken via Piper) on enable. Its name
-    is "Sara" by default (configurable; independent of voice) — fetched from /agent.
-  * Hands-free: client-side VAD detects each utterance and POSTs it to
-    /converse; idle auto-stops with an "Enable talking" button.
+    presents as "the OpenNVR camera agent" (chat label "agent").
+  * Click "Talk" to start a listening session: it listens continuously, VAD
+    auto-segments each utterance and answers it — no wake word. It stays live
+    until you click Stop or a quiet spell auto-stops it.
   * Right rail: alarms, watches, and background tasks — each live-polled.
   * Audio cues: a two-tone siren while any alarm rings, and a short chime when
     a background task finishes or a watch notifies. All Web Audio, no assets.
@@ -58,9 +59,6 @@
     @keyframes pulse{0%{transform:scale(.85);opacity:1}100%{transform:scale(1.15);opacity:.25}}
     @keyframes spin{to{transform:rotate(360deg)}}
     @keyframes bounce{0%,100%{transform:scale(.92)}50%{transform:scale(1.12)}}
-    /* Gated: session live but waiting to be addressed by name (wake word on). */
-    .ram.gated .ring{stroke:var(--muted);opacity:.45;animation:breathe 3.5s ease-in-out infinite}
-    .ram.gated .iris{fill:var(--muted);opacity:.45}
     /* Mouth: hidden unless speaking; its height is driven by the TTS amplitude. */
     .ram .mouth{fill:var(--agent);opacity:0;transition:opacity .15s;}
     .ram.speaking .mouth{opacity:.92;}
@@ -77,10 +75,12 @@
     .cambox input { accent-color:var(--accent); }
     .ic { width:1.05em; height:1.05em; vertical-align:-0.16em; flex:0 0 auto; }
     .talk { width:100%; background:var(--accent); color:#062321; border:none; padding:1.05rem 1.25rem;
-      border-radius:0.6rem; font-weight:700; cursor:pointer; font-size:1.05rem; transition:background .15s,transform .05s;
-      display:flex; align-items:center; justify-content:center; gap:0.5rem; }
+      border-radius:0.6rem; font-weight:700; cursor:pointer; font-size:1.05rem; transition:background .15s,transform .05s,box-shadow .08s;
+      display:flex; align-items:center; justify-content:center; gap:0.5rem; touch-action:none; -webkit-user-select:none; user-select:none; }
     .talk:hover:not(:disabled){background:var(--accent-strong);} .talk:active:not(:disabled){transform:scale(.99);}
     .talk:disabled{opacity:.5;cursor:progress;}
+    /* Live listening session: red, with a "recording" dot; a mic-level ring is
+       drawn from JS (box-shadow) so you can see it hearing you. */
     .talk.listening{background:var(--danger);color:#fff;} .talk.listening::before{content:"● ";animation:blink 1s steps(2,start) infinite;}
     @keyframes blink{to{visibility:hidden;}}
     .row { display:flex; gap:0.5rem; align-items:center; margin:0.6rem 0 0; }
@@ -114,6 +114,35 @@
     .item.ringing{background:rgba(229,62,62,0.14);} #alarmCard .item .badge{color:var(--danger);}
     .presets{display:flex;flex-wrap:wrap;gap:0.4rem;margin-top:0.4rem;}
     .presets .ghost{font-size:0.78rem;}
+    .cardhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:.5rem;}
+    .cardhead h2{margin:0;}
+    .addbtn{width:22px;height:22px;line-height:1;flex:0 0 auto;border-radius:6px;border:1px solid var(--border);
+      background:transparent;color:var(--muted);font-size:1.05rem;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+    .addbtn:hover{color:var(--accent);border-color:var(--accent);}
+    .addbtn.open{background:var(--accent);color:#062321;border-color:var(--accent);}
+    .skillhint{color:var(--muted);font-size:0.72rem;margin:-.15rem 0 .5rem;}
+    .skill{display:flex;align-items:center;gap:.5rem;padding:.42rem .5rem;background:var(--panel2);
+      border:1px solid var(--border);border-radius:8px;margin:.3rem 0;font-size:0.82rem;}
+    .skill .sk-ic{width:18px;text-align:center;flex:0 0 auto;}
+    .skill .sk-body{flex:1;min-width:0;}
+    .skill .sk-nm{display:block;}
+    .skill .sk-uses{display:block;font-size:.66rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .skill .sk-x{background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:.95rem;flex:0 0 auto;padding:0 .1rem;}
+    .skill .sk-x:hover{color:var(--danger);}
+    #skillBrowse{margin-top:.5rem;border-top:1px solid var(--border);padding-top:.5rem;}
+    #skillSearch,.addform input{width:100%;background:#0f1320;color:var(--text);border:1px solid rgba(255,255,255,0.12);
+      border-radius:6px;padding:.4rem .5rem;font-size:.8rem;margin-bottom:.4rem;}
+    #skillSearch:focus,.addform input:focus{outline:none;border-color:var(--accent);}
+    .brow{display:flex;align-items:center;gap:.5rem;padding:.4rem .5rem;border-radius:8px;margin:.25rem 0;font-size:0.8rem;background:var(--panel2);}
+    .brow .b-ic{width:18px;text-align:center;flex:0 0 auto;}
+    .brow .b-nm{flex:1;min-width:0;}.brow .b-nm small{display:block;color:var(--muted);font-size:.66rem;}
+    .brow .b-add{background:var(--accent);color:#062321;border:none;border-radius:6px;font-weight:700;font-size:.72rem;padding:.28rem .55rem;cursor:pointer;}
+    .brow .b-need{font-size:.66rem;color:var(--muted);text-align:right;max-width:52%;}
+    .brow.have{opacity:.55;}
+    .addform{margin:.3rem 0 .5rem;}
+    .addform-lbl{display:flex;align-items:center;gap:.4rem;font-size:.72rem;color:var(--muted);margin-bottom:.4rem;}
+    .addform-lbl input{width:auto;flex:1;margin:0;}
+    .ghost.primary{background:var(--accent);color:#062321;border:none;font-weight:700;width:100%;}
     .notifyrow{display:flex;align-items:center;gap:0.5rem;margin-top:0.5rem;}
     .notifyrow .empty-note{flex:1;}
     .notifyrow .ghost{font-size:0.72rem;padding:0.3rem 0.55rem;}
@@ -143,8 +172,8 @@
               <video class="avatar-video" id="avatarVideo" muted loop playsinline preload="auto" aria-hidden="true"></video>
             </div>
             <div>
-              <h1 id="title">Camera Agent</h1>
-              <p class="lede" id="lede">Tap <strong>Talk</strong>, then just speak — hands-free, answers aloud.</p>
+              <h1 id="title">OpenNVR Camera Agent</h1>
+              <p class="lede" id="lede">Tap <strong>Talk</strong> and speak — it listens and answers aloud, tap Stop when done.</p>
               <div class="micdot" id="micdot" hidden>mic live</div>
             </div>
           </div>
@@ -158,16 +187,12 @@
           </div>
 
           <button id="talk" class="talk" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg> Talk</button>
-          <label class="waketoggle" id="wakeWrap" title="When on, the agent only answers when you address it by name first.">
-            <input type="checkbox" id="wakeToggle" checked>
-            <span id="wakeLabel">Wake with “Hey&nbsp;Sara”, then ask</span>
-          </label>
           <div class="row askrow">
             <input id="askInput" type="text" placeholder="Type a question, e.g. how many people on cam1?" autocomplete="off">
             <button id="askBtn" class="ghost" type="button">Send</button>
           </div>
           <div class="row">
-            <div class="status" id="status">Ready. Type a question or tap Talk.</div>
+            <div class="status" id="status">Ready. Tap Talk and speak, or type a question.</div>
             <span class="chip" id="working" hidden></span>
             <span class="chip" id="lat" hidden title="Per-turn latency: STT · LLM · TTS · total"></span>
             <button id="reset" class="ghost" type="button">Reset</button>
@@ -178,11 +203,27 @@
       </div>
 
       <div class="side">
+        <div class="card" id="skillsCard">
+          <div class="cardhead"><h2>Skills</h2><button class="addbtn" id="skillAdd" type="button" title="Add a skill" aria-label="Add a skill">+</button></div>
+          <div class="skillhint">Capabilities the agent carries. × to remove.</div>
+          <div id="skillsList"></div>
+          <div id="skillBrowse" hidden>
+            <input id="skillSearch" type="text" placeholder="Search skills to add…" autocomplete="off">
+            <div id="skillBrowseList"></div>
+            <button class="ghost" id="skillBrowseClose" type="button">Done</button>
+          </div>
+        </div>
         <div class="card" id="alarmCard">
-          <h2>Alarms</h2>
+          <div class="cardhead"><h2>Alarms</h2><button class="addbtn" id="alarmAdd" type="button" title="Add an alarm" aria-label="Add an alarm">+</button></div>
           <div class="presets">
             <button class="ghost preset" data-name="Fire" data-target="fire" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 2c1 3 4 4 4 8a4 4 0 0 1-8 0c0-2 1-3 2-4 0 2 2 2 2 0 0-2-2-2-2-4z"/></svg> Fire</button>
             <button class="ghost preset" data-name="After-hours person" data-target="person" data-after="18:00" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A8 8 0 1 1 11.2 3 6 6 0 0 0 21 12.8z"/></svg> After-hours</button>
+          </div>
+          <div class="addform" id="alarmForm" hidden>
+            <input id="alarmName" type="text" placeholder="Name, e.g. Porch person" autocomplete="off">
+            <input id="alarmTarget" type="text" placeholder="Watch for, e.g. person / car / package" autocomplete="off">
+            <label class="addform-lbl">Only after <input id="alarmAfter" type="time"></label>
+            <button class="ghost primary" id="alarmArm" type="button">Arm alarm</button>
           </div>
           <div class="notifyrow" id="notifyRow" hidden>
             <span id="notifyStatus" class="empty-note"></span>
@@ -195,7 +236,11 @@
           <div id="monitorList"></div>
         </div>
         <div class="card">
-          <h2>Background tasks</h2>
+          <div class="cardhead"><h2>Background tasks</h2><button class="addbtn" id="taskAdd" type="button" title="Add a background task" aria-label="Add a background task">+</button></div>
+          <div class="addform" id="taskForm" hidden>
+            <input id="taskQuery" type="text" placeholder="e.g. find the red truck earlier today" autocomplete="off">
+            <button class="ghost primary" id="taskRun" type="button">Run in background</button>
+          </div>
           <div id="taskList"></div>
         </div>
         <div class="card">
@@ -213,7 +258,7 @@
     const alarmbarEl=$("alarmbar"), alarmTextEl=$("alarmText"), silenceBtn=$("silence");
     const alarmListEl=$("alarmList"), monitorListEl=$("monitorList"), taskListEl=$("taskList"), reportListEl=$("reportList");
     const titleEl=$("title"), ledeEl=$("lede");
-    const mouthEl=$("mouth"), micdotEl=$("micdot"), wakeToggle=$("wakeToggle"), wakeLabel=$("wakeLabel");
+    const mouthEl=$("mouth"), micdotEl=$("micdot");
     // Inline SVG icons (no webfont, no external assets — works fully offline).
     const IC={
       mic:'<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg>',
@@ -227,12 +272,10 @@
     const SILENCE_MS=900, MIN_UTTER_MS=350, MAX_UTTER_MS=15000, TICK_MS=40;
     const START_MARGIN=2.2, SILENCE_MARGIN=1.5, FLOOR_EMA=0.05;
     let noiseFloor=0.01;
-    const IDLE_MS=25000, POLL_MS=3000;
-    // Hey-Siri arming: after the wake word she listens for the question for
-    // ARM_MS without needing the name again, plus a short follow-up window.
-    const ARM_MS=12000, FOLLOWUP_MS=7000; let armUntil=0;
-
-    let agentName="the agent", wakePhrase="Hey Sara";
+    // Click Talk to start a listening session; it stays live until you click
+    // Stop or there's no voice activity for IDLE_MS (auto-stop). No wake word.
+    const IDLE_MS=15000, POLL_MS=3000;
+    let levelRAF=null;
     let mediaStream=null, audioCtx=null, analyser=null, floatBuf=null;
     let recorder=null, chunks=[];
     let sessionActive=false, capturing=false, speaking=false, busy=false, alarmRinging=false;
@@ -315,35 +358,46 @@
         src.start(); mouthRAF=requestAnimationFrame(tick);
       });
     }
-    function wakeOn(){ return !!(wakeToggle && wakeToggle.checked); }
-    function isArmed(){ return performance.now() < armUntil; }
-    function restingAvatar(){ setAvatar(wakeOn() && sessionActive && !isArmed() ? "gated" : "listening"); }
-    function listenHint(){ return isArmed() ? "Listening… ask your question."
-      : (wakeOn() ? ('Say “'+wakePhrase+'” to ask.') : "Listening…"); }
-    function updateWakeLabel(){ if(wakeLabel) wakeLabel.innerHTML = wakeOn()
-      ? `Wake with “${wakePhrase}”, then ask` : "Always listening · no wake word"; }
+    // A ring around the Talk button, driven by mic level while the session is
+    // live: bright + wide when you're speaking, a gentle glow while it waits.
+    function levelRing(){ if(!sessionActive){ talkBtn.style.boxShadow=""; return; }
+      let glow = capturing ? Math.min(1,(analyser?rms():0)*6) : ((speaking||busy)?0:0.14);
+      const r=(3+glow*20).toFixed(0), a=(0.05+glow*0.16).toFixed(2);
+      talkBtn.style.boxShadow=`0 0 0 ${r}px rgba(229,62,62,${a})`;
+      levelRAF=requestAnimationFrame(levelRing); }
 
-    // Talking-avatar VIDEO: an idle loop, and a 'speaking' loop while she talks.
-    // Bundled clips are placeholders — swap in your own (or a HeyGen/render
-    // export) by replacing demo/avatar/{idle,speaking}.{webm,mp4}. If the video
-    // can't load, we silently fall back to the animated SVG face above.
-    const avatarVideo=$("avatarVideo"); let avatarVideoOk=false, avClip="";
+    // Talking-avatar VIDEO: an idle loop, a 'speaking' loop while she talks, and
+    // an optional 'thinking' loop. Bundled clips are placeholders — swap in your
+    // own (e.g. a HeyGen export) by replacing demo/avatar/{idle,speaking,
+    // thinking}.{webm,mp4}. Turned off with `avatar_video: false` in the config
+    // (or per /agent). If a clip can't load we degrade gracefully: a missing
+    // optional clip falls back to the idle clip; if idle itself fails, we fall
+    // all the way back to the animated SVG face above.
+    const avatarVideo=$("avatarVideo"); let avatarEnabled=true, avatarVideoOk=false, avClip="";
+    const avAvail={idle:true, speaking:true, thinking:true};   // optimistic; error events prune this
     const AV={ idle:{webm:"/demo/avatar/idle.webm",mp4:"/demo/avatar/idle.mp4"},
-               speaking:{webm:"/demo/avatar/speaking.webm",mp4:"/demo/avatar/speaking.mp4"} };
+               speaking:{webm:"/demo/avatar/speaking.webm",mp4:"/demo/avatar/speaking.mp4"},
+               thinking:{webm:"/demo/avatar/thinking.webm",mp4:"/demo/avatar/thinking.mp4"} };
     function avSrc(kind){ const c=AV[kind];
       return (avatarVideo.canPlayType&&avatarVideo.canPlayType("video/webm").replace("no",""))?c.webm:c.mp4; }
-    function setAvatarClip(kind){ if(!avatarVideo||avClip===kind)return; avClip=kind;
+    function setAvatarClip(kind){ if(!avatarVideo||!avatarEnabled)return;
+      if(!avAvail[kind]) kind="idle";                          // optional clip absent → idle
+      if(avClip===kind)return; avClip=kind;
       avatarVideo.src=avSrc(kind); avatarVideo.play().catch(()=>{}); }
+    function disableAvatarVideo(){ avatarEnabled=false; avatarVideoOk=false; avClip="";
+      if(avatarVideo){ avatarVideo.removeAttribute("src"); } ramEl.classList.remove("has-video"); }
     if(avatarVideo){
       avatarVideo.addEventListener("loadeddata",()=>{ if(!avatarVideoOk){ avatarVideoOk=true; ramEl.classList.add("has-video"); } });
-      avatarVideo.addEventListener("error",()=>{ avatarVideoOk=false; ramEl.classList.remove("has-video"); });
+      avatarVideo.addEventListener("error",()=>{
+        if(avClip && avClip!=="idle"){ avAvail[avClip]=false; avClip=""; setAvatarClip("idle"); }  // optional clip → idle
+        else { disableAvatarVideo(); } });                     // idle failed → SVG face
       setAvatarClip("idle");
     }
     function setAvatar(s){ ramEl.className="ram "+(avatarVideoOk?"has-video ":"")+s;
-      if(avatarVideoOk) setAvatarClip(s==="speaking"?"speaking":"idle"); }
+      if(avatarVideoOk) setAvatarClip(s==="speaking"?"speaking":(s==="thinking"?"thinking":"idle")); }
     function setStatus(t,k=""){ statusEl.textContent=t; statusEl.className="status"+(k?(" "+k):""); }
     function addMsg(text,who,frames){ const d=document.createElement("div"); d.className="msg "+who;
-      if(who==="sys"){d.textContent=text;} else { const label=who==="user"?"you":agentName;
+      if(who==="sys"){d.textContent=text;} else { const label=who==="user"?"you":"agent";
         d.innerHTML=`<span class="who">${label}</span>`; d.appendChild(document.createTextNode(text));
         // Show the frame(s) the agent actually looked at, inline in the bubble.
         if(frames&&frames.length){ const fr=document.createElement("div"); fr.className="frames";
@@ -372,17 +426,15 @@
       workingEl.hidden=false; workingTimer=setTimeout(()=>{workingEl.hidden=true;},6000); }
 
     async function loadAgent(){ try{ const a=await (await fetch("/agent")).json();
-      if(a.wake_phrase) wakePhrase=a.wake_phrase;
-      if(a.name){ agentName=a.name; titleEl.textContent=agentName+" — OpenNVR Camera Agent";
-        updateWakeLabel(); }
+      if(a.avatar_video===false) disableAvatarVideo();   // operator turned the video avatar off
+      titleEl.textContent="OpenNVR Camera Agent";
       if(a.text_mode){
-        // Text/chat profile: lead with typing; voice (and wake word) don't apply.
+        // Text/chat profile: lead with typing; the voice controls don't apply.
         document.getElementById("talk").style.display="none";
-        const w=document.getElementById("wakeWrap"); if(w) w.style.display="none";
-        ledeEl.innerHTML=`Type a question to ${agentName} — e.g. <em>"how many people on cam1?"</em>`;
+        ledeEl.innerHTML=`Type a question — e.g. <em>"how many people on cam1?"</em>`;
         setStatus("Ready. Type a question.");
       } else {
-        ledeEl.innerHTML=`Tap <strong>Talk</strong> and speak, or type below. ${agentName} answers from your cameras.`;
+        ledeEl.innerHTML=`Tap <strong>Talk</strong> and speak, or type below — it answers from your cameras.`;
       }
     }catch{} }
 
@@ -434,10 +486,10 @@
     function pickMimeType(){ for(const t of ["audio/webm;codecs=opus","audio/webm","audio/ogg;codecs=opus","audio/mp4"])
       if(window.MediaRecorder&&MediaRecorder.isTypeSupported(t))return t; return ""; }
 
-    async function playIntro(){ setStatus(agentName+" is introducing…"); setAvatar("speaking");
-      try{ const d=await (await fetch("/intro")).json(); if(d.name) agentName=d.name;
+    async function playIntro(){ setStatus("Introducing…"); setAvatar("speaking");
+      try{ const d=await (await fetch("/intro")).json();
         if(d.text) addMsg(d.text,"agent"); if(d.audio_b64){ speaking=true; setAvatar("speaking"); await speak(d.audio_b64); speaking=false; } }
-      catch{ addMsg("Hi, I'm "+agentName+", your OpenNVR camera agent.","agent"); } }
+      catch{ addMsg("Hi, I'm your OpenNVR camera agent.","agent"); } }
 
     // ── listening loop ──
     function vadTick(){ if(!sessionActive||speaking||busy||alarmRinging)return;
@@ -467,58 +519,44 @@
       setAvatar("thinking"); setStatus("Thinking…"); recorder.stop(); }
 
     async function onUtterance(){ const blob=new Blob(chunks,{type:recorder.mimeType||"audio/webm"});
-      if(blob.size<1200){ if(sessionActive){setAvatar("listening");setStatus("Listening…","active");} return; }
+      if(blob.size<1200){ if(sessionActive){setAvatar("listening");setStatus("Listening… speak your question.","active");} return; }
       busy=true;
-      try{ const wakeParam=isArmed()?"0":(wakeOn()?"1":"0");   // armed → the next utterance IS the question
-        const url="/converse?camera="+encodeURIComponent(cameraParam())+"&wake="+wakeParam;
+      try{ // wake=0 → the session is the addressing; every utterance is answered.
+        const url="/converse?camera="+encodeURIComponent(cameraParam())+"&wake=0";
         const resp=await fetch(url,{method:"POST",headers:{"Content-Type":"application/octet-stream"},body:blob});
         if(!resp.ok){const e=await resp.json().catch(()=>({}));throw new Error(e.error||("HTTP "+resp.status));}
         const data=await resp.json();
-        if(!data.transcript){ if(sessionActive){restingAvatar();setStatus(isArmed()?"Listening… ask your question.":("Didn't catch that — "+listenHint()),"active");} return; }
-        if(data.armed){
-          // Wake word heard with no question — acknowledge and start listening
-          // for the question (Hey-Siri style); no need to say her name again.
-          armUntil=performance.now()+ARM_MS; playChime("listen");
-          if(data.audio_b64){ speaking=true; setAvatar("speaking"); await speak(data.audio_b64); speaking=false; }
-          if(sessionActive){ setAvatar("listening"); setStatus("Listening… ask your question.","active"); }
-          lastActivity=performance.now(); return;
-        }
-        if(data.invoked===false){
-          // Heard speech, but it wasn't addressed to her — show it faintly and
-          // keep waiting, instead of answering the room.
-          if(sessionActive){ restingAvatar();
-            setStatus('Heard “'+data.transcript.slice(0,40)+'” — say “'+wakePhrase+'” to ask.',""); }
-          lastActivity=performance.now(); return;
-        }
+        if(!data.transcript){ if(sessionActive){setAvatar("listening");setStatus("Didn't catch that — go ahead.","active");} return; }
         addMsg(data.transcript,"user"); lastActivity=performance.now(); showWorking(data.cameras_used); showLatency(data.timings_ms);
         if(data.reply) addMsg(data.reply,"agent",data.frames);
         if(data.audio_b64){ speaking=true; setAvatar("speaking"); await speak(data.audio_b64); speaking=false; }
-        armUntil=performance.now()+FOLLOWUP_MS;   // brief window for a natural follow-up
-        if(sessionActive){ restingAvatar(); setStatus(listenHint(),"active"); }
-      }catch(err){ addMsg("Request failed: "+err.message,"sys"); if(sessionActive){restingAvatar();setStatus("Error: "+err.message,"error");} }
+        if(sessionActive){ setAvatar("listening"); setStatus("Listening… ask a follow-up, or tap Stop.","active"); }
+      }catch(err){ addMsg("Request failed: "+err.message,"sys"); if(sessionActive){setAvatar("listening");setStatus("Error: "+err.message,"error");} }
       finally{ busy=false; lastActivity=performance.now(); }
     }
 
+    // ── listening session ──
+    // Click Talk → listen continuously (VAD auto-segments each utterance and
+    // answers it), until you click Stop or a quiet spell (IDLE_MS) auto-stops.
     async function startSession(){ ensureOutputAudio();
       try{ await ensureMic(); }catch(err){ setStatus("Microphone access denied.","error"); addMsg("Microphone access denied: "+err,"sys"); return; }
       sessionActive=true; lastActivity=performance.now(); loudFrames=0;
       talkBtn.innerHTML=IC.stop+" Stop"; talkBtn.classList.add("listening");
       if(!introPlayed){ introPlayed=true; await playIntro(); }
       if(!sessionActive) return;
-      micdotEl.hidden=false; restingAvatar();
-      setStatus(wakeOn()?('Listening — say “'+wakePhrase+'” to ask.'):"Listening… just talk.","active");
+      micdotEl.hidden=false; setAvatar("listening"); setStatus("Listening… just speak.","active");
+      if(!levelRAF) levelRAF=requestAnimationFrame(levelRing);
       if(!vadTimer) vadTimer=setInterval(vadTick,TICK_MS);
       if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();},POLL_MS);
       if(!alarmTimer) alarmTimer=setInterval(pollAlarms,2500);
     }
-    function stopSession(){ sessionActive=false; armUntil=0; if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(capturing)stopCapture();
-      stopSpeaking(); micdotEl.hidden=true;
-      talkBtn.innerHTML=IC.mic+" Talk"; talkBtn.classList.remove("listening"); setAvatar("idle"); setStatus("Stopped. Tap Talk to resume."); }
-    function pauseForIdle(){ sessionActive=false; armUntil=0; if(vadTimer){clearInterval(vadTimer);vadTimer=null;}
-      stopSpeaking(); micdotEl.hidden=true;
-      talkBtn.innerHTML=IC.mic+" Enable talking"; talkBtn.classList.remove("listening"); setAvatar("idle");
-      setStatus("Paused — no conversation for a while. Tap Enable talking to resume.");
-      addMsg(agentName+" stopped listening after a quiet spell. Tap “Enable talking” to chat again.","sys"); }
+    function endSession(){ sessionActive=false; if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(capturing)stopCapture();
+      if(levelRAF){cancelAnimationFrame(levelRAF);levelRAF=null;} talkBtn.style.boxShadow="";
+      stopSpeaking(); micdotEl.hidden=true; talkBtn.classList.remove("listening"); setAvatar("idle"); }
+    function stopSession(){ endSession(); talkBtn.innerHTML=IC.mic+" Talk"; setStatus("Stopped. Tap Talk to start again."); }
+    function pauseForIdle(){ endSession(); talkBtn.innerHTML=IC.mic+" Talk";
+      setStatus("Stopped listening after a quiet spell. Tap Talk to resume.");
+      addMsg("The agent stopped listening after a quiet spell. Tap Talk to chat again.","sys"); }
 
     // ── tasks ──
     async function pollTasks(){ let tasks; try{ tasks=(await (await fetch("/tasks")).json()).tasks||[]; }catch{ return; }
@@ -601,10 +639,10 @@
       if(btn.dataset.after) body.after=btn.dataset.after; addAlarm(body); }));
     $("askBtn").addEventListener("click", ask);
     $("askInput").addEventListener("keydown",(e)=>{ if(e.key==="Enter") ask(); });
-    talkBtn.addEventListener("click",()=>{ ensureOutputAudio(); if(busy&&sessionActive)return; if(sessionActive)stopSession(); else startSession(); });
+    // Click Talk to start/stop the listening session.
+    talkBtn.addEventListener("click",()=>{ ensureOutputAudio();
+      if(busy&&sessionActive)return; if(sessionActive)stopSession(); else startSession(); });
     resetBtn.addEventListener("click",async()=>{ stopSpeaking(); try{ await fetch("/reset",{method:"POST"}); logEl.innerHTML=""; addMsg("Conversation reset.","sys"); }catch{} });
-    if(wakeToggle) wakeToggle.addEventListener("change",()=>{ updateWakeLabel(); armUntil=0;
-      if(sessionActive && !capturing && !speaking && !busy){ restingAvatar(); setStatus(listenHint(),"active"); } });
 
     async function loadNotify(){
       try{ const s=await (await fetch("/notify")).json();
@@ -618,8 +656,71 @@
         addMsg(r.ok?`Test sent to ${d.delivered}/${d.channels} channel(s).`:("Test failed: "+(d.error||"")), "sys"); }catch{}
     });
 
+    // ── skills: capabilities the agent carries. The list shows ENABLED skills
+    // (× to remove); + opens a browse/search to add ones whose backend is
+    // configured. Toggling calls the server, which reconfigures the live toolset.
+    let _skills=[];
+    async function loadSkills(){ try{ _skills=(await (await fetch("/skills")).json()).skills||[]; }
+      catch{ const c=$("skillsCard"); if(c) c.style.display="none"; return; }
+      renderSkills(); }
+    function renderSkills(){ const el=$("skillsList"); if(!el) return; el.innerHTML="";
+      const on=_skills.filter(s=>s.enabled);
+      if(!on.length) el.innerHTML='<div class="empty-note">No skills enabled — tap + to add.</div>';
+      for(const s of on){ const d=document.createElement("div"); d.className="skill";
+        d.innerHTML=`<span class="sk-ic">${s.icon}</span><span class="sk-body"><span class="sk-nm"></span><span class="sk-uses"></span></span><button class="sk-x" title="Remove skill">✕</button>`;
+        d.querySelector(".sk-nm").textContent=s.name;
+        d.querySelector(".sk-uses").textContent="uses "+s.uses;
+        d.querySelector(".sk-x").addEventListener("click",()=>toggleSkill(s.id,"disable"));
+        el.appendChild(d); }
+      renderBrowse(); }
+    function renderBrowse(){ const el=$("skillBrowseList"); if(!el) return;
+      const q=(($("skillSearch")||{}).value||"").toLowerCase();
+      const add=_skills.filter(s=>!s.enabled && (s.name.toLowerCase().includes(q)||s.id.includes(q)));
+      el.innerHTML = add.length?"":'<div class="empty-note">No matching skills.</div>';
+      for(const s of add){ const d=document.createElement("div"); d.className="brow"+(s.available?"":" have");
+        d.innerHTML=`<span class="b-ic">${s.icon}</span><span class="b-nm"><span></span><small></small></span>`+
+          (s.available?'<button class="b-add" type="button">Add</button>':'<span class="b-need"></span>');
+        d.querySelector(".b-nm span").textContent=s.name;
+        d.querySelector(".b-nm small").textContent="uses "+s.uses;
+        if(s.available) d.querySelector(".b-add").addEventListener("click",()=>toggleSkill(s.id,"enable"));
+        else d.querySelector(".b-need").textContent=s.hint||"needs setup";
+        el.appendChild(d); } }
+    async function toggleSkill(id,action){
+      try{ const r=await fetch("/skills/"+encodeURIComponent(id)+"/"+action,{method:"POST"});
+        const d=await r.json().catch(()=>({}));
+        if(!r.ok){ addMsg("Couldn't "+action+" skill: "+(d.hint||d.error||("HTTP "+r.status)),"sys"); return; }
+        _skills=d.skills||_skills; renderSkills();
+        addMsg((action==="enable"?"Enabled":"Removed")+" a skill — the agent reconfigured its tools.","sys");
+      }catch(err){ addMsg("Couldn't "+action+" skill: "+err.message,"sys"); } }
+    // + / browse / search wiring
+    (function(){ const add=$("skillAdd"), br=$("skillBrowse"), close=$("skillBrowseClose"), search=$("skillSearch");
+      if(add&&br) add.addEventListener("click",()=>{ br.hidden=!br.hidden; add.classList.toggle("open",!br.hidden); if(!br.hidden){ renderBrowse(); search&&search.focus(); } });
+      if(close) close.addEventListener("click",()=>{ br.hidden=true; add.classList.remove("open"); });
+      if(search) search.addEventListener("input", renderBrowse); })();
+
+    // Alarms: + reveals a small custom-alarm form (POST /alarms via addAlarm).
+    (function(){ const add=$("alarmAdd"), f=$("alarmForm"), arm=$("alarmArm");
+      if(add&&f) add.addEventListener("click",()=>{ f.hidden=!f.hidden; add.classList.toggle("open",!f.hidden); if(!f.hidden) $("alarmName").focus(); });
+      if(arm) arm.addEventListener("click",()=>{ const target=$("alarmTarget").value.trim();
+        if(!target){ $("alarmTarget").focus(); return; }
+        const body={name:$("alarmName").value.trim()||("Alarm: "+target),target,camera_id:cameraParam()};
+        const after=$("alarmAfter").value; if(after) body.after=after; addAlarm(body);
+        $("alarmName").value=""; $("alarmTarget").value=""; $("alarmAfter").value=""; f.hidden=true; add.classList.remove("open"); }); })();
+
+    // Background tasks: + reveals a query input (POST /tasks).
+    (function(){ const add=$("taskAdd"), f=$("taskForm"), run=$("taskRun"), qi=$("taskQuery");
+      if(add&&f) add.addEventListener("click",()=>{ f.hidden=!f.hidden; add.classList.toggle("open",!f.hidden); if(!f.hidden) qi.focus(); });
+      async function go(){ const q=(qi.value||"").trim(); if(!q){ qi.focus(); return; }
+        try{ const r=await fetch("/tasks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:q})});
+          if(r.ok){ addMsg("Background task queued: "+q,"sys"); qi.value=""; f.hidden=true; add.classList.remove("open");
+            pollTasks(); if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();},POLL_MS); }
+          else { const d=await r.json().catch(()=>({})); addMsg("Task failed: "+(d.error||("HTTP "+r.status)),"sys"); }
+        }catch(err){ addMsg("Task failed: "+err.message,"sys"); } }
+      if(run) run.addEventListener("click", go);
+      if(qi) qi.addEventListener("keydown",e=>{ if(e.key==="Enter") go(); }); })();
+
     const _ulc=$("useLocalCam"); if(_ulc) _ulc.addEventListener("click", useLocalCamera);
-    loadAgent(); loadCameras(); loadNotify(); setAvatar("idle");
+    loadAgent(); loadCameras(); loadNotify(); loadSkills(); setAvatar("idle");
     renderTasks([]); renderMonitors([]); renderAlarms([]); renderReports([]);
     alarmTimer = setInterval(pollAlarms, 2500);   // alarms ring even before Talk
   </script>

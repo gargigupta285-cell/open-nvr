@@ -88,7 +88,7 @@ start. Turn on what you need:
   banner; emergency-call hook (documented).
 - **Open-vocabulary search** — "find a red truck" with no retraining.
 - **Faces & watchlist** — enroll known people, flag unknowns.
-- **Hands-free voice persona** — a named assistant (Shailaja / Sidhu) with an
+- **Voice agent** — a spoken camera assistant with a talking
   avatar (the default voice mode).
 - **Scheduled reports & webhooks** — recurring summaries, push to your tools.
 

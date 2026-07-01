@@ -30,17 +30,27 @@ ollama_token: REPLACE_WITH_OPENNVR_ADAPTER_TOKEN
 piper_url: http://127.0.0.1:9001
 piper_token: REPLACE_WITH_OPENNVR_ADAPTER_TOKEN
 
-# The agent's name AND wake word ("Hey Sara") — like Apple's "Siri". Changing it
-# is NOT advised: the wake word is heard via speech-to-text, which transcribes a
-# common name like Sara the same way every time; an unusual name is often
-# mis-heard, so the agent won't wake. The voice is a separate setting below.
-agent_name: Sara
+# The agent has no persona name — it presents as "the OpenNVR camera agent"
+# (chat label "agent"). This value is only used for event metadata and, if you
+# turn it on, the OPTIONAL wake word ("Hey <agent_name>"). Leave it as-is unless
+# you want a named wake word (then pick a name STT transcribes reliably).
+agent_name: Camera Agent
+voice_gender: neutral   # neutral | female | male (pairs the Piper voice)
 
-# Wake word (voice only). When true, the agent answers only when addressed by
-# name ("Hey Sara, …"), so it ignores ambient speech and its own echoed reply.
-# The demo UI has a per-session toggle. Set false for always-listening. The
-# name's spellings match exactly + a tight fuzzy net (wake_fuzzy 0.85) catches
-# close STT drift; an address word ("hey/ok") is required.
+# Talking-avatar video in the demo. true = play the bundled clips
+# (demo/avatar/{idle,speaking,thinking}.{webm,mp4}); swap in your own export
+# (e.g. HeyGen) by replacing those files. false = use the built-in animated SVG
+# face only. The 'thinking' clip is optional — it falls back to idle if absent.
+avatar_video: true
+
+# Wake word — OPTIONAL, for ambient/always-on clients. The built-in demo uses
+# click-to-talk (tap Talk → it listens, answers every utterance, auto-stops on
+# a quiet spell), so it never gates on the wake word. This setting only affects
+# callers of /converse that don't pass ?wake=0 — e.g. an always-listening
+# surface, where answering only when addressed by name ("Hey <agent_name>, …") stops it
+# reacting to the TV or its own echoed reply. Spellings match exactly + a tight
+# fuzzy net (wake_fuzzy 0.85) catches close STT drift; an address word
+# ("hey/ok") is required.
 wake_word_required: true
 # wake_words: ["camera"]        # extra exact wake words STT hears reliably
 # wake_fuzzy: 0.85              # 1.0 = exact only; < 0.85 = more forgiving

@@ -82,7 +82,7 @@ class AppConfig:
     # ambient noise doesn't start a spurious conversation turn.
     stt_noise_filter: bool = True
     # Wake-word gate (voice only). When True, the agent only answers an
-    # utterance that's addressed to it by name ("Hey Sara, …") — so it
+    # utterance that's addressed to it by name ("Hey <name>, …") — so it
     # doesn't respond to the TV, a side conversation, or its own echoed reply.
     # The UI exposes a per-session toggle that overrides this default.
     wake_word_required: bool = True
@@ -90,8 +90,8 @@ class AppConfig:
     # e.g. ["computer", "hey camera"] for words STT transcribes more reliably.
     wake_words: list[str] | None = None
     # Wake-word matching: the name's known spellings match EXACTLY, plus a TIGHT
-    # fuzzy safety net (0.85) that catches close STT drift (e.g. "Sara"→"Saara")
-    # but still rejects real words (sahara/sorry/camera all score ≤0.67). Set to
+    # fuzzy safety net (0.85) that catches close STT drift (e.g. a name → its common misspelling)
+    # but still rejects real words (current/clearing/camera all score ≤0.67). Set to
     # 1.0 for exact-only, or lower (e.g. 0.72) to be more forgiving.
     wake_fuzzy: float = 0.85
     # Require an address word ("hey/ok/hi") before the name (the "Hey Siri"
@@ -161,14 +161,19 @@ class AppConfig:
     # matching contact records "would alert <number>" when it fires.
     emergency_contacts: dict[str, str] | None = None
 
-    # The agent's name AND wake word — "Hey <agent_name>". Defaults to "Sara".
-    # Changing it is NOT advised (see the load_config warning): STT recognises a
-    # common name like Sara far more reliably, and a name it mishears means the
-    # agent won't wake. If you do change it, register its spellings in wake_words.
-    agent_name: str = "Sara"
+    # Identity used for the optional wake word ("Hey <agent_name>") and event
+    # metadata. The demo presents the agent as "the OpenNVR camera agent" (chat
+    # label: "agent") and never uses this as a persona name. If you turn on a
+    # named wake word, pick a name STT transcribes reliably and register its
+    # spellings in wake_words (an unusual name is often mis-heard).
+    agent_name: str = "Camera Agent"
     # Spoken voice (the Piper voice configured in the ai-adapter). Independent of
     # the name — switch to "male" for a male voice without changing the name.
-    voice_gender: str = "female"
+    voice_gender: str = "neutral"
+    # Talking-avatar VIDEO in the demo. When true the UI plays the bundled clips
+    # (demo/avatar/{idle,speaking,thinking}.{webm,mp4}) — swap in your own (e.g. a
+    # HeyGen export). When false the UI uses the built-in animated SVG face only.
+    avatar_video: bool = True
 
     # External notifications: webhook URLs alarms/watches fan out to so alerts
     # reach you when the browser tab is closed (Slack/Discord/n8n/Home
@@ -228,12 +233,52 @@ _DEFAULT_SYSTEM_PROMPT = (
 
 # The agent's persona name follows the configured voice gender. The actual
 # spoken voice is whichever Piper voice the ai-adapter serves; ``voice_gender``
-# here selects the matching persona NAME (and pronouns) the agent uses.
-# ONE agent name, configurable. "Sara" is the default because it's a common name
-# speech-to-text transcribes the same way every time — changing it is not advised
-# (see the warning in load_config). The voice (below) is a separate choice.
-DEFAULT_AGENT_NAME = "Sara"
-DEFAULT_VOICE_GENDER = "female"
+# here selects the matching pronouns the agent uses.
+# The agent has no persona name: it presents as "the OpenNVR camera agent" (chat
+# label "agent"). ``agent_name`` below is a technical default used only for event
+# metadata and the OPTIONAL wake word. The voice is a separate choice.
+DEFAULT_AGENT_NAME = "Camera Agent"
+DEFAULT_VOICE_GENDER = "neutral"
+
+# ── Skills ──────────────────────────────────────────────────────────
+# A "skill" is a user-facing capability the agent carries. Each maps to the
+# tool(s) it exposes to the LLM; switching a skill off drops those tools from
+# the advertised set (the agent "reconfigures" — see _configure_tools), so the
+# model can no longer call them. Some skills need a backend (a recognition
+# adapter, the event bus, or a footage index) and can't be enabled until it's
+# configured. First tool in each list is the "primary" (used for gating).
+SKILL_TOOLS: dict[str, list[str]] = {
+    "see": ["describe_camera"],
+    "count": ["detect_objects"],
+    "faces": ["recognize_faces", "enroll_face", "list_people", "forget_face"],
+    "events": ["recent_events"],
+    "footage": ["search_footage"],
+    "alarm": ["create_alarm", "stop_alarm"],
+    "watch": ["create_monitor", "stop_monitor"],
+    "report": ["create_report", "stop_report"],
+    "task": ["create_background_task"],
+}
+# id, icon, name, example question, requirement key ("" = always available)
+_SKILL_META: list[tuple[str, str, str, str, str]] = [
+    ("see", "🎥", "See what's happening now",
+     "What's happening at the front door?", ""),
+    ("count", "🔢", "Detect & count people and objects",
+     "How many people are in the back yard?", ""),
+    ("faces", "🧑", "Recognise & enroll faces",
+     "Who's at the front door?", "faces"),
+    ("events", "⏱", "Look back at recent events",
+     "Did anyone come to the door in the last 30 minutes?", "events"),
+    ("footage", "🔎", "Search recorded footage",
+     "Did a red truck come by earlier today?", "footage"),
+    ("alarm", "🔔", "Set alarms",
+     "Alarm me if someone is at the door after 10pm.", ""),
+    ("watch", "👁", "Watch & count over time",
+     "Watch the driveway and tell me if more than 3 cars show up.", ""),
+    ("report", "📋", "Schedule reports",
+     "Every morning at 7, summarise overnight activity.", ""),
+    ("task", "⚙", "Run longer searches in the background",
+     "Check every camera for anyone in a red shirt.", ""),
+]
 
 
 # Phrases Whisper commonly hallucinates from silence / background noise / the
@@ -318,7 +363,7 @@ def agent_name_for(name: str | None) -> str:
 
 # ── Wake-word gating (voice) ────────────────────────────────────────
 # Only treat a spoken utterance as a question when it's addressed to the
-# agent by name ("Hey Sara, what's at the door?"). Without this, ANY
+# agent by name ("Hey <name>, what's at the door?"). Without this, ANY
 # speech in the room — the TV, a side conversation, or the agent re-hearing
 # its own reply through the speakers — becomes a turn, which is the single
 # biggest cause of spurious/looping/"hallucinated" answers in a live room.
@@ -329,7 +374,9 @@ def agent_name_for(name: str | None) -> str:
 # add the 2-3 spellings STT actually emits (watch the "wake score" log when you
 # test). Avoid real-word spellings (e.g. "mirror") that would false-wake.
 _WAKE_ALIASES = {
-    "sara": ["sara", "sarah"],
+    # "Kiran" — STT usually writes it as the familiar "Kieran"; register both
+    # (plus "keeran") so the transcript gate matches regardless of spelling.
+    "kiran": ["kiran", "kieran", "keeran"],
 }
 # Words the user might say to address the agent before the name.
 _ADDRESS_WORDS = {"hey", "hi", "hello", "ok", "okay", "yo", "hai"}
@@ -474,13 +521,15 @@ def _frames_for(runtime, max_frames: int = 3) -> list[dict]:
     return out
 
 
-def greeting_for(name: str) -> str:
+def greeting_for(name: str | None = None) -> str:
+    # Nameless by design — the agent introduces itself as "the OpenNVR camera
+    # agent", not by a persona name. (``name`` is accepted for call-site compat.)
     return (
-        f"Hi, I'm {name}, your OpenNVR camera agent. I keep an eye on all your "
-        f"cameras and run the checks you ask for. I can tell you what's "
-        f"happening right now, look back at what happened earlier, set up "
-        f"alarms and watches, and take on longer searches in the background "
-        f"while we keep talking. Ask me anything about your cameras."
+        "Hi, I'm your OpenNVR camera agent. I keep an eye on all your "
+        "cameras and run the checks you ask for. I can tell you what's "
+        "happening right now, look back at what happened earlier, set up "
+        "alarms and watches, and take on longer searches in the background "
+        "while we keep talking. Ask me anything about your cameras."
     )
 
 
@@ -489,7 +538,7 @@ def greeting_for(name: str) -> str:
 
 @dataclass
 class AgentTask:
-    """A long-running request Sara is working on in the background."""
+    """A long-running request the agent is working on in the background."""
 
     id: int
     query: str
@@ -510,7 +559,7 @@ class AgentTask:
 
 
 class TaskManager:
-    """Runs Sara's longer jobs as background asyncio tasks so the
+    """Runs the agent's longer jobs as background asyncio tasks so the
     conversation never blocks. In-memory only — tasks reset on restart.
 
     Each task runs a full tool-calling turn for its query (with the
@@ -574,7 +623,7 @@ class TaskManager:
 
 @dataclass
 class Monitor:
-    """A standing watch Sara keeps on one or more cameras.
+    """A standing watch the agent keeps on one or more cameras.
 
     kind="notify": alert when ``target`` appears.
     kind="count":  keep a live + peak count of ``target`` per camera
@@ -651,7 +700,7 @@ class LineCounter:
 
 
 class MonitorManager:
-    """Runs Sara's standing watches: every ``interval_s`` it grabs a frame
+    """Runs the agent's standing watches: every ``interval_s`` it grabs a frame
     from each watched camera, runs detection, and counts the target. Notify
     monitors raise a (cooldown-limited) notification when the target is
     present; count monitors track live + peak counts. In-memory only."""
@@ -1521,7 +1570,7 @@ def _forget_face_tool() -> dict[str, Any]:
 
 
 def _create_background_task_tool() -> dict[str, Any]:
-    """OpenAI/Ollama function schema for Sara's background-task tool."""
+    """OpenAI/Ollama function schema for the agent's background-task tool."""
     return {
         "type": "function",
         "function": {
@@ -1622,18 +1671,15 @@ def load_config(path: str | Path) -> AppConfig:
         except (TypeError, ValueError):
             raise SystemExit(f"config: {key} must be an integer; got {raw.get(key)!r}")
 
-    # Warn loudly if the operator renamed the agent — the wake word's reliability
-    # depends on STT transcribing the name consistently, which a common default
-    # name does and an unusual one often doesn't.
+    # Note if the operator set a custom name — only relevant if they also turn on
+    # the optional wake word, whose reliability depends on STT transcribing the
+    # name consistently (an unusual name is often mis-heard).
     _name = str(raw.get("agent_name") or DEFAULT_AGENT_NAME).strip() or DEFAULT_AGENT_NAME
     if _name.lower() != DEFAULT_AGENT_NAME.lower():
-        logger.warning(
-            "agent_name changed to %r — NOT advised. The wake word is heard via "
-            "speech-to-text, which transcribes a common name like %r the same way "
-            "every time; an unusual name is often mis-heard, so the agent won't "
-            "wake when called. If you keep it, add the spellings STT emits to "
-            "wake_words (watch the 'wake score' log line while testing).",
-            _name, DEFAULT_AGENT_NAME)
+        logger.info(
+            "agent_name set to %r. If you enable the wake word, pick a name STT "
+            "transcribes reliably and add the spellings it emits to wake_words "
+            "(watch the 'wake score' log line while testing).", _name)
 
     return AppConfig(
         kaic_url=str(raw["kaic_url"]),
@@ -1680,7 +1726,8 @@ def load_config(path: str | Path) -> AppConfig:
             if isinstance(raw.get("emergency_contacts"), dict) else None
         ),
         agent_name=_name,
-        voice_gender=str(raw.get("voice_gender") or "female"),
+        voice_gender=str(raw.get("voice_gender") or "neutral"),
+        avatar_video=bool(raw.get("avatar_video", True)),
         state_path=raw.get("state_path"),
         faces_url=raw.get("faces_url"),
         faces_token=raw.get("faces_token"),
@@ -1839,38 +1886,11 @@ class CameraAgentRuntime:
             recognition_client=self.recognition_client,
             footage_index=self.footage_index,
         )
-        # Tools the background task runner uses — the live camera/footage
-        # tools WITHOUT create_background_task (a task must not spawn tasks).
-        self.background_tool_definitions = build_tool_definitions(
-            [cam.camera_id for cam in cfg.cameras],
-            enabled=cfg.enabled_tools,
-        )
-        # Foreground tools = background tools + the agent-control tools
-        # (offload long jobs, set up standing monitors) — none of which a
-        # background task is allowed to call.
-        _camera_enum_all = [cam.camera_id for cam in cfg.cameras] + ["all"]
-        self.tool_definitions = list(self.background_tool_definitions) + [
-            _create_background_task_tool(),
-            _create_monitor_tool(_camera_enum_all),
-            _stop_monitor_tool(),
-            _create_alarm_tool(_camera_enum_all),
-            _stop_alarm_tool(),
-            _create_report_tool(),
-            _stop_report_tool(),
-            _enroll_face_tool(_camera_enum_all),
-            _list_people_tool(),
-            _forget_face_tool(),
-        ]
-        # Honour enabled_tools across ALL advertised tools (base + control) —
-        # not just the base set. Previously the control tools (monitor/alarm/
-        # report/face/background) were appended unconditionally, so enabled_tools
-        # had "no effect" (test-report #4). Fewer tools = shorter prompt + far
-        # fewer wrong-tool picks by small models.
-        if cfg.enabled_tools is not None:
-            allow = set(cfg.enabled_tools)
-            self.tool_definitions = [
-                t for t in self.tool_definitions if t["function"]["name"] in allow
-            ]
+        # Advertised tools are (re)built by _configure_tools from enabled_tools
+        # minus any skills switched off at runtime. disabled_skills starts empty.
+        self._camera_ids = [cam.camera_id for cam in cfg.cameras]
+        self.disabled_skills: set[str] = set()
+        self._configure_tools()
         self.tool_handlers = {
             "describe_camera": self.tools.describe_camera,
             "detect_objects": self.tools.detect_objects,
@@ -1898,6 +1918,96 @@ class CameraAgentRuntime:
         self.reports = ReportScheduler(self)
         self._stop_event = asyncio.Event()
         self._subscriber_task: asyncio.Task | None = None
+
+    def _configure_tools(self) -> None:
+        """(Re)build the advertised tool lists from ``enabled_tools`` minus the
+        tools of any switched-off skill. Called at startup and whenever a skill
+        is toggled, so the LLM's callable tools change live (the "reconfigure").
+        ``background_tool_definitions`` excludes the agent-control tools (a task
+        must not spawn tasks / arm alarms)."""
+        excluded: set[str] = set()
+        for sid in self.disabled_skills:
+            excluded.update(SKILL_TOOLS.get(sid, ()))
+        allow = None if self.cfg.enabled_tools is None else set(self.cfg.enabled_tools)
+
+        def keep(defn: dict[str, Any]) -> bool:
+            name = defn["function"]["name"]
+            return (allow is None or name in allow) and name not in excluded
+
+        cam_all = self._camera_ids + ["all"]
+        base = [t for t in build_tool_definitions(self._camera_ids, enabled=None)
+                if keep(t)]
+        control = [t for t in (
+            _create_background_task_tool(),
+            _create_monitor_tool(cam_all), _stop_monitor_tool(),
+            _create_alarm_tool(cam_all), _stop_alarm_tool(),
+            _create_report_tool(), _stop_report_tool(),
+            _enroll_face_tool(cam_all), _list_people_tool(), _forget_face_tool(),
+        ) if keep(t)]
+        self.background_tool_definitions = base
+        self.tool_definitions = base + control
+
+    # ── skills: capabilities the agent carries (toggle → reconfigure) ──
+    def skill_requirement_met(self, req: str) -> bool:
+        """Is the backend a skill needs actually wired up?"""
+        if req == "faces":
+            return self.faces is not None
+        if req == "events":
+            return bool(self.cfg.nats_inference_url)
+        if req == "footage":
+            return bool(getattr(self, "footage_index", None)
+                        and self.footage_index.available)
+        return True   # no external requirement
+
+    def skills_payload(self) -> list[dict[str, Any]]:
+        """Catalogue for the UI: what each skill is, what it uses, and whether
+        it's enabled / can be enabled."""
+        advertised = {t["function"]["name"] for t in self.tool_definitions}
+        allow = None if self.cfg.enabled_tools is None else set(self.cfg.enabled_tools)
+        uses = {
+            "see": f"{self.cfg.caption_adapter} caption + {self.cfg.llm_model}",
+            "count": f"{self.cfg.detection_adapter} detection",
+            "faces": f"{self.cfg.recognition_adapter} recognition",
+            "events": "inference event bus (NATS)",
+            "footage": "footage-search index",
+        }
+        hints = {
+            "faces": "Set faces_url to the recognition adapter to enable.",
+            "events": "Set nats_inference_url to stream inference events.",
+            "footage": "Set footage_index_path (built by the footage-search example).",
+        }
+        out: list[dict[str, Any]] = []
+        for sid, icon, name, example, req in _SKILL_META:
+            primary = SKILL_TOOLS[sid][0]
+            req_met = self.skill_requirement_met(req)
+            allowed = allow is None or primary in allow
+            available = req_met and allowed   # can it be turned on at all?
+            # "enabled" = usable now: advertised to the LLM AND its backend wired.
+            # (Vision tools are always advertised and degrade at call time, so a
+            # missing backend must still read as not-enabled in the panel.)
+            enabled = (primary in advertised) and req_met
+            out.append({
+                "id": sid, "icon": icon, "name": name, "example": example,
+                "uses": uses.get(sid, f"agent app + {self.cfg.llm_model}"),
+                "enabled": enabled, "available": available,
+                "hint": "" if available else (hints.get(req, "Not enabled in config.")),
+            })
+        return out
+
+    def set_skill_enabled(self, skill_id: str, enabled: bool) -> bool:
+        """Turn a skill on/off and reconfigure the toolset. Returns False if the
+        skill is unknown or can't be enabled (backend not configured)."""
+        if skill_id not in SKILL_TOOLS:
+            return False
+        if enabled:
+            _, _, _, _, req = next(m for m in _SKILL_META if m[0] == skill_id)
+            if not self.skill_requirement_met(req):
+                return False
+            self.disabled_skills.discard(skill_id)
+        else:
+            self.disabled_skills.add(skill_id)
+        self._configure_tools()
+        return True
 
     def _emergency_contact_for(self, name: str, target: str) -> str | None:
         contacts = self.cfg.emergency_contacts or {}
@@ -2275,16 +2385,15 @@ class CameraAgentRuntime:
     # ── System prompt construction ────────────────────────────────
 
     def build_system_prompt(self) -> str:
-        """Compose the system prompt the LLM sees: Sara's identity + the
+        """Compose the system prompt the LLM sees: the agent's identity + the
         operator's base prompt + a per-camera roster + task guidance."""
         roster = "\n".join(
             f"- {cam.camera_id}: {cam.role}" for cam in self.cfg.cameras
         )
         prompt = (
-            f"Your name is {self.agent_name}. You are the OpenNVR camera agent. "
-            f"Speak in the FIRST person — say 'I see…', 'I'm watching…', never "
-            f"'{self.agent_name} sees…' in the third person. Only use the name "
-            f"{self.agent_name} when you introduce yourself.\n\n"
+            f"You are the OpenNVR camera agent. Speak in the FIRST person — "
+            f"say 'I see…', 'I'm watching…', not in the third person. If asked "
+            f"your name, say you're the OpenNVR camera agent.\n\n"
             f"{self.cfg.system_prompt.strip()}\n\n"
             f"Cameras available to you:\n{roster}\n\n"
             f"Always pass one of the camera_id values exactly as listed "
@@ -2471,17 +2580,50 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         return {"name": runtime.agent_name, "voice_gender": runtime.cfg.voice_gender,
                 "text_mode": runtime.cfg.text_mode,
                 "wake_phrase": f"Hey {wake.title()}",
-                "wake_required": runtime.cfg.wake_word_required}
+                "wake_required": runtime.cfg.wake_word_required,
+                "avatar_video": runtime.cfg.avatar_video}
+
+    @app.get("/skills")
+    async def _skills() -> dict[str, Any]:
+        """The agent's capabilities for the UI's Skills panel. Each entry reports
+        what it ``uses`` (model/adapter/app), whether it's ``enabled`` now, and
+        whether it's ``available`` to enable (its backend is configured) — with a
+        ``hint`` otherwise, so the panel never promises something it can't do."""
+        return {"skills": runtime.skills_payload()}
+
+    @app.post("/skills/{skill_id}/{action}")
+    async def _skill_toggle(skill_id: str, action: str) -> JSONResponse:
+        """Turn a skill on/off. This reconfigures the agent's live toolset, so
+        the LLM immediately can (or can't) use those tools."""
+        if action not in ("enable", "disable"):
+            return JSONResponse({"error": "action must be enable or disable"},
+                                status_code=400)
+        ok = runtime.set_skill_enabled(skill_id, action == "enable")
+        if not ok:
+            # Unknown skill, or its backend isn't configured yet.
+            skill = next((s for s in runtime.skills_payload() if s["id"] == skill_id), None)
+            if skill is None:
+                return JSONResponse({"error": f"unknown skill {skill_id!r}"},
+                                    status_code=404)
+            return JSONResponse(
+                {"error": "skill can't be enabled yet", "hint": skill["hint"]},
+                status_code=409)
+        logger.info("skill %r %sd — tools reconfigured (%d advertised)",
+                    skill_id, action, len(runtime.tool_definitions))
+        return JSONResponse({"skills": runtime.skills_payload()})
 
     @app.get("/demo/avatar/{name}")
     async def _demo_avatar(name: str) -> Response:
-        """Serve the bundled talking-avatar clips (idle/speaking · webm/mp4).
-        Whitelisted names only — no path traversal, no arbitrary file read. The
-        clips are placeholders; replace the files to use your own avatar."""
+        """Serve the bundled talking-avatar clips (idle/speaking/thinking ·
+        webm/mp4). Whitelisted names only — no path traversal, no arbitrary file
+        read. The clips are placeholders; replace the files to use your own
+        avatar (e.g. a HeyGen export). ``thinking`` is optional — the UI falls
+        back to the idle clip if it's absent."""
         from fastapi.responses import FileResponse
         allowed = {
             "idle.webm": "video/webm", "idle.mp4": "video/mp4",
             "speaking.webm": "video/webm", "speaking.mp4": "video/mp4",
+            "thinking.webm": "video/webm", "thinking.mp4": "video/mp4",
         }
         media = allowed.get(name)
         path = Path(__file__).parent / "demo" / "avatar" / name
@@ -2520,7 +2662,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.get("/tasks")
     async def _tasks() -> dict[str, Any]:
-        """Sara's background tasks (the UI polls this to surface results)."""
+        """The agent's background tasks (the UI polls this to surface results)."""
         return {"tasks": runtime.tasks.list()}
 
     @app.post("/tasks")
@@ -2538,7 +2680,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.post("/say")
     async def _say(request: Request) -> JSONResponse:
-        """Synthesize arbitrary text so the UI can speak things Sara produces
+        """Synthesize arbitrary text so the UI can speak things the agent produces
         outside a /converse turn — e.g. announcing a finished background task
         aloud. Text-only fallback when Piper is unreachable."""
         try:
@@ -2750,7 +2892,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
         # UI-selected camera hint: one id, a comma list, or "all". Use the
         # first concrete configured camera as the grounding default; "all"
-        # or empty leaves it to Sara.
+        # or empty leaves it to the agent.
         configured = {cam.camera_id for cam in runtime.cfg.cameras}
         raw_hint = request.query_params.get("camera") or ""
         camera_hint = None
@@ -2827,7 +2969,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                                      "invoked": False})
             question = stripped
 
-        # 4) Answer. A bare wake word ("Hey Sara") with no question ARMS the
+        # 4) Answer. A bare wake word ("Hey <name>") with no question ARMS the
         #    agent, Hey-Siri style: she acknowledges, and the UI then treats the
         #    NEXT utterance as the question without needing the wake word again.
         runtime.tools.last_cameras_used = []

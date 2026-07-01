@@ -4,8 +4,9 @@
 feeds via tool calling (YOLOv8 / InsightFace / BLIP) — running on CPU,
 on your homelab, no cloud round-trip. Run it two ways, same app:
 
-- **Voice** (default) — listens for spoken questions and replies through
-  Piper TTS, hands-free, with a named persona and avatar.
+- **Voice** (default) — tap **Talk** and speak; it listens continuously and
+  replies through Piper TTS, with a named persona and avatar. The session stays
+  live for follow-ups until you tap **Stop** or a quiet spell auto-stops it.
 - **Chat** (`--chat`) — type your question, read the answer. Same tools
   and scene description, no microphone/speaker, so it's lighter.
 
@@ -28,7 +29,7 @@ or the local-first brain.
 From the repo root:
 
 ```bash
-examples/camera-agent/quickstart.sh          # voice  (open http://localhost:9100/demo, click Start, speak)
+examples/camera-agent/quickstart.sh          # voice  (open http://localhost:9100/demo, tap Talk, speak)
 examples/camera-agent/quickstart.sh --chat   # chat   (type your question instead)
 examples/camera-agent/quickstart.sh --down   # stop
 ```
@@ -229,6 +230,50 @@ See `config.example.yml` for the full set. Key knobs:
 | `cameras[].role` | `"(no role configured)"` | One-sentence role description per camera — gets baked into the system prompt so the LLM knows what each camera watches. |
 | `opennvr_cameras_url` | unset | When set and `cameras` is empty, fetches the camera roster from a running OpenNVR instance (`GET /api/v1/internal/camera-agent/cameras`). This means you never duplicate RTSP credentials in this file — OpenNVR owns the camera connection and returns MediaMTX tap URLs. |
 | `opennvr_api_key` | unset | API key for the `opennvr_cameras_url` endpoint. Must match `INTERNAL_API_KEY` in OpenNVR's `.env`. Falls back to `kaic_api_key` if unset. |
+| `avatar_video` | `true` | Play the talking-avatar video clips in the demo. `false` uses the built-in animated SVG face only. |
+
+### Swap in your own avatar (offline)
+
+The demo shows a talking avatar next to the conversation. It's a plain HTML
+`<video>` that plays a looping clip per state, so you can replace it with a
+human presenter without touching any code — just drop your files in, keeping
+the names:
+
+```
+demo/avatar/idle.webm       demo/avatar/idle.mp4        # calm loop, small movements
+demo/avatar/speaking.webm   demo/avatar/speaking.mp4    # talking loop (plays during TTS)
+demo/avatar/thinking.webm   demo/avatar/thinking.mp4    # optional — plays while it computes
+```
+
+Provide both `.webm` (VP9, preferred) and `.mp4` (H.264, Safari fallback); any
+square resolution works (the bundled placeholders are 256×256). The UI switches
+to `speaking` during playback and back to `idle` after; `thinking` is optional
+and falls back to the idle clip if absent. If a clip fails to load — or you set
+`avatar_video: false` — it degrades to the animated SVG face, so the demo never
+breaks.
+
+**Stay offline — no cloud avatar services.** At runtime the demo never contacts
+anything: it only plays local video files, so playback is already sovereign. The
+one thing to watch is *how the clips are produced*. Generate them with a tool
+that runs on your own machine so nothing (your script, your likeness, the reply
+audio) ever leaves it:
+
+- **Local pre-render** — [SadTalker](https://github.com/OpenTalker/SadTalker)
+  (one portrait + audio → a talking-head clip) or
+  [Wav2Lip](https://github.com/Rudrabha/Wav2Lip) (a base video + audio →
+  lip-synced clip), both run locally. Render an `idle`/`speaking`/`thinking`
+  loop once and drop them in.
+- **Avoid cloud generators** (HeyGen and similar) — even a one-time render
+  uploads your script/likeness to their servers, which breaks end-to-end
+  sovereignty. Only use one if you're comfortable with that trade-off for a
+  throwaway concept demo.
+- **Zero-dependency default** — the built-in SVG face is fully local and its
+  mouth is already driven by the live TTS amplitude, so it "speaks" in real time
+  with no assets and no network at all.
+
+Real-time *local* lip-sync (driving a face model from the TTS stream on-device)
+is the natural next step for a more human, fully-sovereign avatar — a good
+follow-up once a local renderer is chosen.
 
 ## Tests
 

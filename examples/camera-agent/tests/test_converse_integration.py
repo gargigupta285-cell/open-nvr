@@ -220,13 +220,13 @@ def test_converse_wake_gate_ignores_unaddressed(harness):
 
 def test_converse_wake_gate_answers_when_addressed(harness):
     client, state = harness
-    # Sara is the default persona (AppConfig voice_gender defaults to 'female').
-    state["transcript"] = "hey Sara, what do you see"
+    # The wake gate matches the agent's name (default "Camera Agent").
+    state["transcript"] = "hey Camera Agent, what do you see"
 
     async def chat(*, messages, tools=None, temperature=0.4, max_tokens=256, **kw):
         # The wake phrase must be stripped before the model sees the question.
         user = [m for m in messages if m.get("role") == "user"][-1]["content"].lower()
-        assert "sara" not in user and user.strip() == "what do you see"
+        assert "camera agent" not in user and user.strip() == "what do you see"
         return {"message": {"role": "assistant", "content": "I see the front door."}}
     state["set_chat"](chat)
 
@@ -237,7 +237,7 @@ def test_converse_wake_gate_answers_when_addressed(harness):
 
 def test_converse_bare_wake_word_acks_without_llm(harness):
     client, state = harness
-    state["transcript"] = "Hey Sara"   # just the name, no question
+    state["transcript"] = "Hey Camera Agent"   # just the name, no question
 
     called = {"chat": False}
 
@@ -258,12 +258,93 @@ def test_converse_bare_wake_word_acks_without_llm(harness):
 
 def test_avatar_clip_served(harness):
     client, _ = harness
-    r = client.get("/demo/avatar/idle.webm")
-    assert r.status_code == 200
-    assert r.headers["content-type"].startswith("video/")
+    # All three states, both formats, are whitelisted and shipped.
+    for name in ("idle.webm", "idle.mp4", "speaking.webm", "speaking.mp4",
+                 "thinking.webm", "thinking.mp4"):
+        r = client.get("/demo/avatar/" + name)
+        assert r.status_code == 200, name
+        assert r.headers["content-type"].startswith("video/"), name
 
 
 def test_avatar_unknown_name_404(harness):
     client, _ = harness
     assert client.get("/demo/avatar/evil.sh").status_code == 404
     assert client.get("/demo/avatar/secrets.yml").status_code == 404
+
+
+def test_agent_reports_avatar_video(harness):
+    client, _ = harness
+    # Default on; the UI reads this to decide video-avatar vs SVG-face.
+    assert client.get("/agent").json()["avatar_video"] is True
+
+
+# ── skills catalogue (Skills panel) ───────────────────────────────────
+
+
+def test_skills_lists_core_capabilities(harness):
+    client, _ = harness
+    skills = client.get("/skills").json()["skills"]
+    by_id = {s["id"]: s for s in skills}
+    # Core vision + control skills are always available in the default harness.
+    for sid in ("see", "count", "alarm", "watch", "report", "task"):
+        assert by_id[sid]["available"] is True, sid
+        assert by_id[sid]["example"] and by_id[sid]["name"]
+
+
+def test_skills_gate_unconfigured_backends(harness):
+    client, _ = harness
+    by_id = {s["id"]: s for s in client.get("/skills").json()["skills"]}
+    # No faces_url / NATS / footage index in the harness → these are off, with a hint.
+    for sid in ("faces", "events", "footage"):
+        assert by_id[sid]["available"] is False, sid
+        assert by_id[sid]["hint"], sid  # tells the user how to enable it
+
+
+def test_skills_turn_on_when_configured():
+    # Wiring faces_url + a NATS url flips those skills to available (no hint).
+    cfg = AppConfig(
+        kaic_url="http://kaic", kaic_api_key="k", system_prompt="t",
+        faces_url="http://faces", nats_inference_url="nats://127.0.0.1:4222",
+        cameras=[CameraSpec(camera_id="cam1", frame_url="http://x/1.jpg", role="r")],
+    )
+    client = TestClient(build_app(CameraAgentRuntime(cfg)))
+    by_id = {s["id"]: s for s in client.get("/skills").json()["skills"]}
+    assert by_id["faces"]["available"] is True and by_id["faces"]["hint"] == ""
+    assert by_id["events"]["available"] is True and by_id["events"]["hint"] == ""
+
+
+def _skill_runtime():
+    cfg = AppConfig(
+        kaic_url="http://kaic", kaic_api_key="k", system_prompt="t",
+        cameras=[CameraSpec(camera_id="cam1", frame_url="http://x/1.jpg", role="r")],
+    )
+    rt = CameraAgentRuntime(cfg)
+    return rt, TestClient(build_app(rt))
+
+
+def test_skill_toggle_reconfigures_live_toolset():
+    rt, client = _skill_runtime()
+    advertised = lambda: {t["function"]["name"] for t in rt.tool_definitions}
+    assert "detect_objects" in advertised()
+    # Remove the "count" skill → its tool drops from the advertised set.
+    r = client.post("/skills/count/disable")
+    assert r.status_code == 200
+    assert "detect_objects" not in advertised()
+    assert {s["id"]: s for s in r.json()["skills"]}["count"]["enabled"] is False
+    # Add it back → tool returns.
+    r = client.post("/skills/count/enable")
+    assert r.status_code == 200
+    assert "detect_objects" in advertised()
+
+
+def test_skill_enable_unconfigured_returns_409_with_hint():
+    _, client = _skill_runtime()   # no faces_url/nats/footage
+    r = client.post("/skills/faces/enable")
+    assert r.status_code == 409
+    assert r.json()["hint"]        # tells the operator how to enable it
+
+
+def test_skill_unknown_404_and_bad_action_400():
+    _, client = _skill_runtime()
+    assert client.post("/skills/not-a-skill/disable").status_code == 404
+    assert client.post("/skills/count/frobnicate").status_code == 400
