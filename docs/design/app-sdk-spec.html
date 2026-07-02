@@ -1,0 +1,417 @@
+<title>OpenNVR App SDK &amp; Catalog — Design Spec</title>
+<style>
+  :root {
+    --ground: #0b111c; --panel: #121a28; --panel-2: #182233; --panel-3: #1e2a3d;
+    --border: #26344a; --border-soft: #1d293b;
+    --text: #e7edf6; --text-dim: #93a1b8; --text-faint: #667891;
+    --accent: #3fd0c4; --accent-deep: #1f8f87; --accent-glow: rgba(63,208,196,0.14);
+    --agent: #a98bfb; --ai: #45c98a; --sec: #f0a848; --gov: #f2748c;
+    --good: #45c98a; --warn: #f0a848; --crit: #f2748c;
+    /* code syntax */
+    --c-kw: #6fb7ff; --c-str: #7ee0a6; --c-com: #5c6b81; --c-fn: #d9a8ff; --c-num: #f0a848;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+    --sans: "SF Pro Display", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  .doc {
+    background: radial-gradient(1100px 560px at 82% -8%, rgba(63,208,196,0.06), transparent 60%), var(--ground);
+    color: var(--text); font-family: var(--sans); line-height: 1.6; font-size: 16px;
+    -webkit-font-smoothing: antialiased; padding: 0 24px 120px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  .prose { max-width: 70ch; }
+  h1, h2, h3, h4 { text-wrap: balance; line-height: 1.15; margin: 0; letter-spacing: -0.02em; }
+  h1 { font-size: clamp(2rem, 4.5vw, 3rem); font-weight: 800; }
+  h2 { font-size: clamp(1.4rem, 3vw, 1.85rem); font-weight: 700; }
+  h3 { font-size: 1.02rem; font-weight: 700; }
+  p { margin: 0; color: var(--text-dim); }
+  strong { color: var(--text); font-weight: 600; }
+  em { color: var(--text-dim); }
+  code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); background: var(--panel-2); padding: 1px 5px; border-radius: 2px; }
+
+  .eyebrow { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.24em; text-transform: uppercase; color: var(--accent); font-weight: 500; }
+
+  /* hero */
+  .hero { padding: 88px 0 48px; border-bottom: 1px solid var(--border-soft); }
+  .hero .tagrow { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .hero h1 { margin-top: 22px; }
+  .hero h1 .hl { color: var(--accent); }
+  .hero .lede { margin-top: 22px; font-size: 1.16rem; color: var(--text-dim); max-width: 62ch; }
+  .hero .lede strong { color: var(--text); }
+  .pill { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); border: 1px solid var(--border); background: var(--panel-2); padding: 5px 10px; border-radius: 2px; }
+
+  section { padding: 68px 0 0; }
+  .sec-head { display: flex; align-items: baseline; gap: 16px; margin-bottom: 8px; }
+  .sec-num { font-family: var(--mono); font-size: 0.8rem; color: var(--accent); letter-spacing: 0.1em; padding-top: 4px; }
+  .sec-intro { margin: 16px 0 32px; font-size: 1.04rem; }
+
+  /* code blocks */
+  .code-wrap { border: 1px solid var(--border); border-radius: 6px; background: #0a0f18; overflow: hidden; }
+  .code-head { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-bottom: 1px solid var(--border-soft); background: var(--panel); }
+  .code-head .fn { font-family: var(--mono); font-size: 0.74rem; color: var(--text-dim); }
+  .code-head .lc { margin-left: auto; font-family: var(--mono); font-size: 0.68rem; }
+  .code-head .lc.big { color: var(--crit); }
+  .code-head .lc.small { color: var(--good); }
+  pre { margin: 0; padding: 16px 18px; overflow-x: auto; font-family: var(--mono); font-size: 0.8rem; line-height: 1.65; color: #cdd8e8; }
+  pre .kw { color: var(--c-kw); } pre .str { color: var(--c-str); } pre .com { color: var(--c-com); font-style: italic; }
+  pre .fn { color: var(--c-fn); } pre .num { color: var(--c-num); } pre .em { color: #fff; font-style: normal; }
+
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+
+  /* tables */
+  .tbl-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 0.86rem; }
+  thead th { text-align: left; font-family: var(--mono); font-size: 0.65rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-faint); font-weight: 500; padding: 13px 16px; background: var(--panel-2); border-bottom: 1px solid var(--border); }
+  tbody td { padding: 13px 16px; border-bottom: 1px solid var(--border-soft); color: var(--text-dim); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody td.k { color: var(--text); font-family: var(--mono); font-size: 0.8rem; }
+  tbody td .mono { font-family: var(--mono); font-size: 0.8rem; color: var(--accent); }
+  td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--text-dim); text-align: right; white-space: nowrap; }
+
+  /* archetype / generic cards */
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+  .card { border: 1px solid var(--border); border-radius: 6px; background: var(--panel); padding: 20px; display: flex; flex-direction: column; gap: 10px; border-top: 3px solid var(--hue, var(--accent)); }
+  .card h3 { font-size: 1.02rem; }
+  .card .lbl { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--hue, var(--accent)); }
+  .card p { font-size: 0.86rem; }
+  .card .ex { font-family: var(--mono); font-size: 0.72rem; color: var(--text-faint); border-top: 1px solid var(--border-soft); padding-top: 10px; margin-top: auto; }
+
+  /* flow */
+  .flow { display: grid; grid-template-columns: 1fr auto 1fr; gap: 14px; align-items: stretch; }
+  .flow .node { border: 1px solid var(--border); border-radius: 6px; background: var(--panel); padding: 16px 18px; }
+  .flow .node.seam { border-color: var(--accent-deep); background: linear-gradient(180deg, var(--accent-glow), transparent); }
+  .flow .node .nl { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-faint); margin-bottom: 8px; }
+  .flow .node .nt { font-weight: 700; font-size: 0.95rem; }
+  .flow .node .nd { font-size: 0.8rem; color: var(--text-dim); margin-top: 5px; }
+  .flow .mid { display: flex; align-items: center; justify-content: center; color: var(--accent); font-family: var(--mono); font-size: 0.72rem; text-align: center; padding: 0 4px; }
+  .flow-note { text-align: center; font-family: var(--mono); font-size: 0.74rem; color: var(--text-faint); margin-top: 12px; }
+
+  /* callout */
+  .callout { border: 1px solid var(--border); border-left: 3px solid var(--accent); background: linear-gradient(180deg, rgba(63,208,196,0.06), transparent); border-radius: 5px; padding: 18px 20px; margin-top: 18px; }
+  .callout .cl { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); margin-bottom: 8px; }
+  .callout p { font-size: 0.9rem; }
+
+  /* catalog mock */
+  .mock { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); overflow: hidden; }
+  .mock-bar { display: flex; align-items: center; gap: 8px; padding: 11px 16px; border-bottom: 1px solid var(--border-soft); background: var(--panel-2); }
+  .mock-bar .t { font-family: var(--mono); font-size: 0.74rem; color: var(--text-dim); letter-spacing: 0.06em; }
+  .mock-bar .dots { display: flex; gap: 6px; }
+  .mock-bar .dots i { width: 9px; height: 9px; border-radius: 50%; display: block; }
+  .mock-body { padding: 18px; display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
+  .appcard { border: 1px solid var(--border); border-radius: 6px; background: var(--panel-2); padding: 15px; display: flex; flex-direction: column; gap: 9px; }
+  .appcard .ac-h { display: flex; align-items: center; gap: 10px; }
+  .appcard .ico { width: 34px; height: 34px; border-radius: 6px; display: grid; place-items: center; font-size: 1.05rem; background: var(--panel-3); border: 1px solid var(--border); }
+  .appcard .nm { font-weight: 700; font-size: 0.92rem; }
+  .appcard .cat { font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-faint); }
+  .appcard .desc { font-size: 0.78rem; color: var(--text-dim); line-height: 1.45; }
+  .appcard .dep { display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 0.68rem; }
+  .appcard .dep.ok { color: var(--good); } .appcard .dep.miss { color: var(--warn); }
+  .appcard .row { display: flex; align-items: center; justify-content: space-between; margin-top: 2px; padding-top: 10px; border-top: 1px solid var(--border-soft); }
+  .toggle { width: 34px; height: 19px; border-radius: 12px; position: relative; background: var(--accent-deep); }
+  .toggle.off { background: var(--panel-3); }
+  .toggle i { position: absolute; top: 2px; left: 17px; width: 15px; height: 15px; border-radius: 50%; background: #fff; }
+  .toggle.off i { left: 2px; background: var(--text-faint); }
+  .appcard .cfg { font-family: var(--mono); font-size: 0.68rem; color: var(--accent); }
+
+  /* dashboard strip */
+  .dash { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 1px; background: var(--border-soft); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; margin-top: 14px; }
+  .metric { background: var(--panel); padding: 15px 16px; }
+  .metric .mv { font-family: var(--mono); font-size: 1.35rem; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+  .metric .mv.good { color: var(--good); } .metric .mv.warn { color: var(--warn); }
+  .metric .ml { font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint); margin-top: 4px; }
+
+  /* rollout */
+  .seq { display: flex; flex-direction: column; }
+  .seq-step { display: grid; grid-template-columns: 40px 1fr; gap: 18px; padding: 16px 0; border-bottom: 1px solid var(--border-soft); }
+  .seq-step:last-child { border-bottom: none; }
+  .seq-step .m { font-family: var(--mono); font-weight: 700; color: var(--accent); font-size: 1rem; border: 1px solid var(--accent-deep); border-radius: 3px; height: 36px; display: flex; align-items: center; justify-content: center; background: var(--accent-glow); }
+  .seq-step h3 { font-size: 0.98rem; margin-bottom: 4px; }
+  .seq-step p { font-size: 0.86rem; }
+  .seq-step .proof { font-family: var(--mono); font-size: 0.72rem; color: var(--good); }
+
+  footer { margin-top: 84px; padding-top: 26px; border-top: 1px solid var(--border-soft); color: var(--text-faint); font-family: var(--mono); font-size: 0.74rem; letter-spacing: 0.04em; }
+
+  @media (max-width: 780px) {
+    .two { grid-template-columns: 1fr; }
+    .flow { grid-template-columns: 1fr; }
+    .flow .mid { padding: 6px 0; transform: rotate(90deg); }
+    .hero { padding: 60px 0 40px; }
+    section { padding: 52px 0 0; }
+  }
+</style>
+
+<div class="doc">
+<div class="wrap">
+
+  <header class="hero">
+    <div class="tagrow">
+      <span class="eyebrow">Engineering Design Spec</span>
+      <span class="pill">companion to the platform blueprint</span>
+    </div>
+    <h1>Give the apps what the adapters<br>already have: <span class="hl">an SDK and a registry</span>.</h1>
+    <p class="lede">The adapter layer has a contract, an SDK, conformance tests, and a gateway. The <strong>vertical-detector layer</strong> — 13 shipped, ~50 planned — has 13 folders of copy-pasted Python wired by YAML. This spec factors the real duplication into an <strong>App SDK</strong>, closes the missing <strong>app-registry API</strong>, and puts a <strong>catalog UI</strong> on top — all against OpenNVR's actual NATS and KAI-C wire formats.</p>
+  </header>
+
+  <!-- 01 PROBLEM -->
+  <section>
+    <div class="sec-head"><span class="sec-num">01</span><h2>The duplication is measurable</h2></div>
+    <p class="sec-intro prose">Reading the 8 detector examples, the same code is pasted into each. The rule that makes a detector <em>that</em> detector is a small fraction of the file; the rest is boilerplate that belongs in a shared package.</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Pasted into every app</th><th>What it is</th><th>~LOC each</th></tr></thead>
+        <tbody>
+          <tr><td class="k">alerts.py</td><td><code>Alert</code>, <code>AlertSource</code>, <code>AlertDispatcher</code>, stdout / webhook / NATS channels, <code>build_dispatcher()</code></td><td class="num">280</td></tr>
+          <tr><td class="k">load_config()</td><td>YAML load, required-field validation, type coercion, per-camera zone parsing</td><td class="num">150</td></tr>
+          <tr><td class="k">main() + loop</td><td>argparse, logging, SIGINT/SIGTERM, interruptible sleep, NATS connect + <code>async for</code></td><td class="num">80</td></tr>
+          <tr><td class="k">zone.py / line.py</td><td><code>Point</code>, ray-cast <code>contains()</code>, <code>Tripwire.crossing()</code>, <code>bbox_center()</code></td><td class="num">130</td></tr>
+          <tr><td class="k">state dict + GC</td><td>per-<code>(camera, label)</code> or per-<code>(camera, track_id)</code> dict, TTL cutoff, alert latch, debounce</td><td class="num">40</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout">
+      <div class="cl">The signal</div>
+      <p>~680 lines of the ~575–800-line detector files are boilerplate. <code>loitering-detection.py</code> minus the SDK-able parts is <strong>one <code>handle_event</code> method</strong>. That ratio is the whole argument for the SDK — and the reason a new detector should be ~40 lines, not a fork of an existing folder. Treat "575 → 40" as <strong>directional, not a target</strong>: real detectors keep their domain logic and land nearer 60–100 lines. The argument survives at 100; don't let the slogan drive API decisions.</p>
+    </div>
+  </section>
+
+  <!-- 02 ARCHETYPES -->
+  <section>
+    <div class="sec-head"><span class="sec-num">02</span><h2>Three archetypes, one base</h2></div>
+    <p class="sec-intro prose">The examples fall into exactly three shapes. The SDK provides a base for each; you override one method.</p>
+    <div class="cards">
+      <div class="card" style="--hue:var(--sec)">
+        <span class="lbl">most detectors</span>
+        <h3>InferenceSubscriber</h3>
+        <p>Subscribe to <code>opennvr.inference.&gt;</code>, react to each <code>InferenceCompletedEvent</code>. Override <code>on_detections()</code>.</p>
+        <span class="ex">loitering · occupancy · line-crossing · abandoned-object</span>
+      </div>
+      <div class="card" style="--hue:var(--ai)">
+        <span class="lbl">pull model</span>
+        <h3>FrameApp</h3>
+        <p>SDK owns the poll loop + KAI-C client. It fetches frames, calls <code>POST /api/v1/infer/{adapter}</code>, hands you results. Override <code>on_frame()</code>.</p>
+        <span class="ex">intrusion-detection · package-delivery</span>
+      </div>
+      <div class="card" style="--hue:var(--agent)">
+        <span class="lbl">pass-through</span>
+        <h3>AlertSubscriber</h3>
+        <p>Subscribe to <code>opennvr.alerts.&gt;</code>, fan out to sinks. Override <code>on_alert()</code>.</p>
+        <span class="ex">alerts-subscriber · home-assistant-relay</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 03 CONTRACT -->
+  <section>
+    <div class="sec-head"><span class="sec-num">03</span><h2>The App Contract — mirror the adapter contract</h2></div>
+    <p class="sec-intro prose">Adapters self-register with KAI-C and expose <code>/health</code> + <code>/capabilities</code>. Apps should do the identical thing against a new OpenNVR app registry. The SDK serves these endpoints for free.</p>
+
+    <div class="flow">
+      <div class="node">
+        <div class="nl">the app (SDK)</div>
+        <div class="nt">serves 3 endpoints</div>
+        <div class="nd"><code>/health</code> · <code>/manifest</code> · <code>/state</code></div>
+      </div>
+      <div class="mid">&mdash; POST /apps/register &rarr;<br>on boot</div>
+      <div class="node seam">
+        <div class="nl">OpenNVR backend</div>
+        <div class="nt">app registry</div>
+        <div class="nd">polls health · stores manifest &amp; config · gates by RBAC</div>
+      </div>
+    </div>
+    <p class="flow-note">exactly the shape KAI-C already uses for adapters (<code>POST /api/v1/adapters/register</code> → in-memory <code>RegisteredAdapter</code>)</p>
+
+    <div class="tbl-wrap" style="margin-top:20px">
+      <table>
+        <thead><tr><th>Endpoint</th><th>Returns</th><th>Powers</th></tr></thead>
+        <tbody>
+          <tr><td class="k">GET /health</td><td><span class="mono">ready</span>, uptime, events_seen, alerts_fired, last_event_age_s</td><td>catalog status dot, stall detection</td></tr>
+          <tr><td class="k">GET /manifest</td><td>the static <code>AppManifest</code> (id, category, required tasks, param schema, alert types)</td><td>catalog card + auto-generated config form</td></tr>
+          <tr><td class="k">GET /state</td><td>live standing state — active tracks, zone levels, running counters</td><td>the per-app dashboard</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 04 SDK SURFACE / BEFORE-AFTER -->
+  <section>
+    <div class="sec-head"><span class="sec-num">04</span><h2>What a detector becomes</h2></div>
+    <p class="sec-intro prose">The SDK folds config, alerts, geometry, the NATS loop, the CLI, signal handling, and the contract endpoints behind <code>app(Detector).run()</code>. What's left is the rule. Here's <code>loitering-detection</code>, whole.</p>
+
+    <div class="code-wrap">
+      <div class="code-head"><span class="fn">loitering.py — the entire app</span><span class="lc small">~40 lines · was 575</span></div>
+<pre><span class="kw">from</span> opennvr_app_sdk <span class="kw">import</span> Detector, Alert, app, AppManifest, Param, AlertType
+<span class="kw">from</span> opennvr_app_sdk.geometry <span class="kw">import</span> bbox_center
+
+MANIFEST = <span class="fn">AppManifest</span>(
+    id=<span class="str">"loitering-detection"</span>, name=<span class="str">"Loitering Detection"</span>, version=<span class="str">"1.0.0"</span>,
+    category=<span class="str">"perimeter"</span>, summary=<span class="str">"Alerts when a watched object dwells in a zone."</span>,
+    requires_tasks=[<span class="str">"object_detection"</span>],          <span class="com"># checked vs GET /api/v1/adapters</span>
+    subscribes=<span class="str">"opennvr.inference.&gt;"</span>,
+    params=[
+        <span class="fn">Param</span>(<span class="str">"watch_labels"</span>, <span class="kw">list</span>, default=[<span class="str">"person"</span>]),
+        <span class="fn">Param</span>(<span class="str">"threshold_s"</span>, <span class="kw">float</span>, default=<span class="num">30.0</span>),
+        <span class="fn">Param</span>(<span class="str">"zones"</span>, <span class="str">"geometry.polygon"</span>, per_camera=<span class="kw">True</span>),  <span class="com"># drawn in the catalog UI</span>
+    ],
+    emits=[<span class="fn">AlertType</span>(<span class="str">"loitering"</span>, severity=<span class="str">"high"</span>)],
+)
+
+<span class="kw">class</span> <span class="em">Loitering</span>(Detector):
+    manifest = MANIFEST
+
+    <span class="kw">def</span> <span class="fn">setup</span>(self):
+        self.dwell = self.<span class="fn">keyed_state</span>(ttl=self.cfg.threshold_s * <span class="num">2</span>)
+
+    <span class="kw">def</span> <span class="fn">on_detections</span>(self, camera_id, dets, event):
+        zone = self.<span class="fn">zone_for</span>(camera_id)                  <span class="com"># from validated per-camera config</span>
+        <span class="kw">for</span> d <span class="kw">in</span> dets:
+            <span class="kw">if</span> d.label <span class="kw">not in</span> self.cfg.watch_labels: <span class="kw">continue</span>
+            <span class="kw">if</span> <span class="kw">not</span> zone.<span class="fn">contains</span>(<span class="fn">bbox_center</span>(d.bbox, self.<span class="fn">frame_size</span>(camera_id))): <span class="kw">continue</span>
+            st = self.dwell.<span class="fn">touch</span>((camera_id, d.label), at=event.completed_at)
+            <span class="kw">if</span> st.age &gt;= self.cfg.threshold_s <span class="kw">and</span> <span class="kw">not</span> st.alerted:
+                st.alerted = <span class="kw">True</span>
+                <span class="kw">yield</span> <span class="fn">Alert</span>(title=<span class="str">"Loitering detected"</span>, camera_id=camera_id, severity=<span class="str">"high"</span>,
+                            correlation_id=event.correlation_id,
+                            evidence={<span class="str">"dwell_s"</span>: <span class="fn">round</span>(st.age, <span class="num">1</span>), <span class="str">"label"</span>: d.label})
+
+<span class="kw">if</span> __name__ == <span class="str">"__main__"</span>:
+    <span class="fn">app</span>(Loitering).<span class="fn">run</span>()   <span class="com"># CLI · signals · NATS loop · /health · /manifest · self-register · dispatcher</span>
+</pre>
+    </div>
+
+    <div class="two" style="margin-top:14px">
+      <div class="code-wrap">
+        <div class="code-head"><span class="fn">the SDK provides</span></div>
+<pre><span class="fn">Detector</span> / <span class="fn">FrameApp</span> / <span class="fn">AlertSubscriber</span>   base loops
+<span class="fn">Alert</span>, <span class="fn">AlertDispatcher</span>, <span class="fn">build_dispatcher</span>  §11.5 wire
+<span class="fn">keyed_state</span>(ttl=...)                    TTL + latch + GC
+<span class="fn">geometry</span>: Point, Zone, Tripwire, bbox_center
+<span class="fn">config</span>: load + validate + per-camera parse
+<span class="fn">app(...).run()</span>                        CLI · signals · server
+<span class="fn">InferenceEvent</span> typed view of the NATS payload</pre>
+      </div>
+      <div class="code-wrap">
+        <div class="code-head"><span class="fn">you write</span></div>
+<pre><span class="em">MANIFEST</span>       one declarative block
+<span class="em">setup()</span>       optional — allocate state
+<span class="em">on_detections()</span> / on_frame() / on_alert()
+              <span class="com"># the rule. yields Alerts.</span>
+
+<span class="com"># everything else is inherited.</span>
+<span class="com"># the alert wire shape is unchanged, so</span>
+<span class="com"># alerts-subscriber &amp; HA-relay keep working.</span></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- 05 MANIFEST / REGISTRY -->
+  <section>
+    <div class="sec-head"><span class="sec-num">05</span><h2>The registry API that doesn't exist yet</h2></div>
+    <p class="sec-intro prose">OpenNVR has adapter and model endpoints but <strong>no app-registration API</strong> — the missing seam. Add one service and table, modeled on KAI-C's registry. The manifest is the schema that makes config safe and the UI generatable.</p>
+
+    <div class="two">
+      <div class="code-wrap">
+        <div class="code-head"><span class="fn">table: installed_apps</span></div>
+<pre>id            <span class="com"># "loitering-detection"</span>
+name          category      version
+url           <span class="com"># http://loitering:9200</span>
+manifest_json <span class="com"># the AppManifest snapshot</span>
+config_json   <span class="com"># validated against manifest.params</span>
+enabled       status        last_seen</pre>
+      </div>
+      <div class="code-wrap">
+        <div class="code-head"><span class="fn">routes — /api/v1/apps</span></div>
+<pre><span class="kw">GET</span>  /apps                 <span class="com"># catalog: installed + bundled index</span>
+<span class="kw">POST</span> /apps/register        <span class="com"># app calls this on boot</span>
+<span class="kw">POST</span> /apps/{id}/enable
+<span class="kw">POST</span> /apps/{id}/disable
+<span class="kw">PUT</span>  /apps/{id}/config     <span class="com"># validated vs manifest.params</span>
+<span class="kw">GET</span>  /apps/{id}/status     <span class="com"># proxies /health + /state</span></pre>
+      </div>
+    </div>
+    <div class="callout">
+      <div class="cl">Why the manifest is load-bearing</div>
+      <p>Because <code>params</code> is typed and declarative, <code>PUT /config</code> can <strong>validate</strong> without app-specific code, and the catalog can <strong>render the config form</strong> without app-specific code. A <code>"geometry.polygon"</code> param becomes a zone editor on a camera still; a <code>float</code> becomes a slider. One schema, three consumers: the app, the API, the UI.</p>
+    </div>
+  </section>
+
+  <!-- 06 CATALOG UI -->
+  <section>
+    <div class="sec-head"><span class="sec-num">06</span><h2>The catalog, in the AI / Detections app</h2></div>
+    <p class="sec-intro prose">An app store for detectors. Cards read from <code>GET /apps</code>; each checks its <code>requires_tasks</code> against <code>GET /api/v1/adapters</code> and shows whether the backing model is present. Enable, configure, and watch — no YAML, no redeploy.</p>
+
+    <div class="mock">
+      <div class="mock-bar">
+        <div class="dots"><i style="background:var(--crit)"></i><i style="background:var(--warn)"></i><i style="background:var(--good)"></i></div>
+        <span class="t">AI / Detections &rsaquo; App Catalog</span>
+      </div>
+      <div class="mock-body">
+        <div class="appcard">
+          <div class="ac-h"><div class="ico">⏱</div><div><div class="nm">Loitering</div><div class="cat">perimeter</div></div></div>
+          <div class="desc">Alerts when a watched object dwells in a zone too long.</div>
+          <div class="dep ok">● requires YOLOv8 — available</div>
+          <div class="row"><div class="toggle"><i></i></div><span class="cfg">configure ›</span></div>
+        </div>
+        <div class="appcard">
+          <div class="ac-h"><div class="ico">↔</div><div><div class="nm">Line Crossing</div><div class="cat">perimeter</div></div></div>
+          <div class="desc">Directional tripwire and entry / exit counting.</div>
+          <div class="dep ok">● requires YOLOv8 + tracking — available</div>
+          <div class="row"><div class="toggle"><i></i></div><span class="cfg">configure ›</span></div>
+        </div>
+        <div class="appcard">
+          <div class="ac-h"><div class="ico">🦺</div><div><div class="nm">PPE Compliance</div><div class="cat">safety · roadmap</div></div></div>
+          <div class="desc">Flags missing hard hat / vest in work zones.</div>
+          <div class="dep miss">● requires PPE adapter — not installed</div>
+          <div class="row"><div class="toggle off"><i></i></div><span class="cfg" style="color:var(--text-faint)">needs adapter</span></div>
+        </div>
+      </div>
+    </div>
+
+    <p class="sec-intro prose" style="margin:26px 0 12px">Enabling opens a config drawer generated from the manifest; the running app reports to a live dashboard fed by <code>/health</code> + <code>/state</code>:</p>
+    <div class="dash">
+      <div class="metric"><div class="mv good">running</div><div class="ml">status</div></div>
+      <div class="metric"><div class="mv">14.2/s</div><div class="ml">events in</div></div>
+      <div class="metric"><div class="mv warn">3</div><div class="ml">alerts · 1h</div></div>
+      <div class="metric"><div class="mv">7</div><div class="ml">active tracks</div></div>
+      <div class="metric"><div class="mv">0.3s</div><div class="ml">last event age</div></div>
+    </div>
+  </section>
+
+  <!-- 07 CONVERGENCE -->
+  <section>
+    <div class="sec-head"><span class="sec-num">07</span><h2>One rule library, two front doors</h2></div>
+    <p class="sec-intro prose">This is the payoff that ties back to the blueprint. The camera agent already ships <code>monitor</code> primitives — notify, count, crossing — that reimplement the same rules as the standalone examples, down to sharing ByteTrack. Don't maintain both.</p>
+    <div class="flow">
+      <div class="node" style="border-top:3px solid var(--sec)">
+        <div class="nl">front door A</div>
+        <div class="nt">Catalog app</div>
+        <div class="nd">headless, always-on, operator-configured via the manifest form</div>
+      </div>
+      <div class="mid">both call the<br>same<br>Detector</div>
+      <div class="node" style="border-top:3px solid var(--agent)">
+        <div class="nl">front door B</div>
+        <div class="nt">Agent monitor</div>
+        <div class="nd">"watch the driveway, alert if &gt;3 cars" — spun up conversationally</div>
+      </div>
+    </div>
+    <p class="flow-note">the agent's <code>create_monitor</code> instantiates an SDK <code>Detector</code> at runtime instead of a bespoke loop</p>
+  </section>
+
+  <!-- 08 ROLLOUT -->
+  <section>
+    <div class="sec-head"><span class="sec-num">08</span><h2>Rollout — prove it on one, then sweep</h2></div>
+    <div class="seq">
+      <div class="seq-step"><div class="m">1</div><div><h3>Extract the SDK</h3><p>Promote <code>alerts.py</code> + <code>zone.py</code> + <code>line.py</code> + the loop/CLI boilerplate into <code>opennvr-app-sdk</code> (Apache-2.0, PyPI) — a sibling to <code>opennvr-adapter-sdk</code>. Add <code>keyed_state</code>, <code>AppManifest</code>, and the contract server.</p></div></div>
+      <div class="seq-step"><div class="m">2</div><div><h3>Migrate loitering as the reference — plus one hard example per archetype</h3><p>Rewrite loitering on the SDK (575 → ~40 lines). <span class="proof">Green bar = its existing tests pass unchanged</span> → parity proven before touching the rest. But loitering is the <em>easy</em> shape: before declaring the SDK stable, also validate <code>keyed_state</code> against <code>package-delivery</code> (per-track state machine) and <code>FrameApp</code> against <code>license-plate-recognition</code> (two-adapter chain) — otherwise the sweep in step 5 discovers the SDK only fits InferenceSubscriber and forces breaking changes mid-migration.</p></div></div>
+      <div class="seq-step"><div class="m">3</div><div><h3>Add the app registry</h3><p><code>installed_apps</code> table + the six <code>/api/v1/apps</code> routes + health polling. RBAC-gated like every other resource.</p></div></div>
+      <div class="seq-step"><div class="m">4</div><div><h3>Build the catalog view</h3><p>Card gallery, manifest-driven config drawer, live dashboard — in the AI / Detections app, reusing the shell's design system.</p></div></div>
+      <div class="seq-step"><div class="m">5</div><div><h3>Sweep the remaining detectors</h3><p>Each shrinks to its rule. New roadmap apps (PPE, crowd, queue) start on the SDK — 40 lines, not a forked folder.</p></div></div>
+      <div class="seq-step"><div class="m">6</div><div><h3>Re-point the agent's monitors</h3><p><code>create_monitor</code> instantiates SDK detectors. The duplication with the examples disappears; one rule library, two front doors.</p></div></div>
+    </div>
+  </section>
+
+  <footer>
+    OpenNVR App SDK &amp; Catalog spec · grounded in kai-c/events.py, the /api/v1/adapters registry, and the 8 detector examples · companion to the platform blueprint.
+  </footer>
+
+</div>
+</div>
