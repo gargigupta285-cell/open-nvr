@@ -415,6 +415,27 @@ A few notes on the shape:
   UI just renders it. We do not constrain the vocabulary in v1. If
   the community converges on common names, we can canonicalize them
   later.
+- **`capabilities` (contract v1.1, optional).** An adapter MAY describe
+  each advertised task richly, alongside the bare strings. Each entry is a
+  `CapabilityDescriptor`; `task` must match an entry in `tasks_advertised`,
+  which stays the canonical key. Adapters that omit this field are fully
+  conformant — consumers fall back to the bare task string. This feeds the
+  capability catalog (choose-by-task and developer views); use-case mapping
+  is deliberately **not** the adapter's job — OpenNVR curates that in
+  `server/config/use_case_map.yml`.
+
+  ```json
+  "capabilities": [
+    {
+      "task": "object_detection",
+      "label": "Object Detection",
+      "summary": "Detects and classifies objects in a frame.",
+      "categories": ["security", "analytics"],
+      "tags": ["person", "vehicle", "perimeter"],
+      "example_result": {"detections": [{"label": "person", "confidence": 0.92}]}
+    }
+  ]
+  ```
 - `permissions` is the **sandboxing declaration** (§8). KAI-C reads
   this and applies the declared scope as container constraints when
   managing the adapter's lifecycle.

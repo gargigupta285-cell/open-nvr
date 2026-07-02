@@ -401,6 +401,9 @@ services:
       - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY}
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - MEDIAMTX_SECRET=${MEDIAMTX_SECRET}
+      # Server inference path through KAI-C: governed (default, audited
+      # /api/v1/infer + NATS fan-out) | v1 | legacy — see .env.example.
+      - OPENNVR_ADAPTER_CONTRACT=${OPENNVR_ADAPTER_CONTRACT:-governed}
       # KAI-C points at the yolov8 adapter as "default" — the
       # camera-agent overlay extends this with explicit per-model
       # routes (whisper, piper, ollama). Operators enabling more

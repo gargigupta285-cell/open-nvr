@@ -26,8 +26,11 @@ This router provides endpoints for:
 
 import json
 from datetime import datetime
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
+import yaml
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -51,6 +54,24 @@ class KaiCHealthResponse(BaseModel):
 class CapabilitiesResponse(BaseModel):
     kai_c: dict[str, Any]
     adapters: dict[str, Any]
+
+
+class UseCaseEntry(BaseModel):
+    use_case: str
+    intent: str | None = None
+    needs_capability: str
+    also_needs: list[str] = []
+    suggested_apps: list[str] = []
+    suggested_adapters: list[str] = []
+
+
+USE_CASE_MAP_PATH = Path(__file__).resolve().parent.parent / "config" / "use_case_map.yml"
+
+
+@lru_cache(maxsize=1)
+def _load_use_case_map() -> list[UseCaseEntry]:
+    raw = yaml.safe_load(USE_CASE_MAP_PATH.read_text()) or []
+    return [UseCaseEntry(**entry) for entry in raw]
 
 
 class InferenceRequest(BaseModel):
@@ -145,6 +166,25 @@ async def get_capabilities(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch capabilities: {e!s}",
+        )
+
+
+@router.get("/use-cases", response_model=list[UseCaseEntry])
+async def get_use_cases(
+    current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)
+):
+    """
+    The curated intent map: use case -> required capability -> suggested
+    apps and adapters. Product-owned editorial content (adapters never
+    declare use cases themselves); powers the capability catalog's
+    use-case door.
+    """
+    try:
+        return _load_use_case_map()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load use-case map: {e!s}",
         )
 
 

@@ -36,23 +36,33 @@ from services.adapter_contract import build_infer_payload, flatten_infer_respons
 from services.frame_capture import PersistentCapturePool
 
 # Frame-transport mode for the live inference loop.
-#   "governed" → AI Adapter Contract v1 over KAI-C's governed
+#   "governed" (default) → AI Adapter Contract v1 over KAI-C's governed
 #               /api/v1/infer/{adapter} surface: persistent-pool JPEG
 #               bytes, base64 in the body (+ camera_id + internal key).
 #               KAI-C applies sovereignty/fingerprint governance AND
 #               publishes the result on NATS, so subscriber example apps
-#               see the server's own camera inference. Requires the
-#               adapter to be registered in KAI-C's v1 registry.
-#   "v1" (default) → same contract body, but POSTed to the legacy
-#               /infer/local passthrough (no NATS/governance). Safe when
-#               the v1 registry isn't configured. Works with SDK
-#               adapters (yolov8, blip, vlm, …); no shared volume.
+#               and the metrics tap see the server's own camera
+#               inference. KAI-C seeds its v1 registry from
+#               ADAPTER_REGISTRY at startup, so adapters that were
+#               reachable at KAI-C boot are governed with no extra setup;
+#               an adapter that came up later can be re-registered via
+#               POST /api/v1/adapters/register.
+#   "v1"      → same contract body, but POSTed to the legacy
+#               /infer/local passthrough (no NATS, no audit, no
+#               correlation IDs). Escape hatch for registry problems.
 #   "legacy"  → original behaviour: write latest.jpg, send an
 #               opennvr:// file URI, expect a flat response. Only works
 #               with the in-tree app/ adapters over a shared volume.
-# Default to v1 (contract-correct + safe). Set "governed" once adapters
-# are registered to get NATS fan-out + governance from server inference.
-_ADAPTER_CONTRACT_MODE = os.environ.get("OPENNVR_ADAPTER_CONTRACT", "v1").strip().lower()
+_ADAPTER_CONTRACT_MODE = os.environ.get("OPENNVR_ADAPTER_CONTRACT", "governed").strip().lower()
+if _ADAPTER_CONTRACT_MODE not in ("governed", "v1", "legacy"):
+    # A typo must not silently demote inference to the ungoverned path.
+    import logging
+
+    logging.getLogger("main").warning(
+        "OPENNVR_ADAPTER_CONTRACT=%r is not one of governed|v1|legacy; using 'governed'",
+        _ADAPTER_CONTRACT_MODE,
+    )
+    _ADAPTER_CONTRACT_MODE = "governed"
 
 try:
     import cv2

@@ -114,6 +114,10 @@ def _capabilities_diff(
             list(old.tasks_advertised),
             list(new.tasks_advertised),
         ]
+    if [c.model_dump() for c in old.capabilities] != [c.model_dump() for c in new.capabilities]:
+        # v1.1 descriptors are self-descriptive metadata — benign drift,
+        # but it belongs in the audit trail like any other change.
+        diff["capabilities"] = "changed"
     if old.endpoints.model_dump() != new.endpoints.model_dump():
         diff["endpoints"] = "changed"
     return diff
