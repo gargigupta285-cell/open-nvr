@@ -1,571 +1,310 @@
 #!/usr/bin/env bash
-# ============================================================
-# OpenNVR - Interactive Installation Wizard (Linux / macOS)
-# ============================================================
-# Called automatically by start.sh on first run.
-# Can also be re-run manually: ./scripts/install.sh
-# ============================================================
-
-set -euo pipefail
+# OpenNVR interactive installer for Linux and macOS.
+set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+BASE_COMPOSE="docker-compose.yml"
+# MODE controls how already-set values behave:
+#   install     — fresh setup; fill missing values, keep existing ones.
+#   reconfigure — editing an existing install; re-prompt values with the
+#                 current value as the default (Enter keeps, typing changes).
+MODE="${1:-install}"
 cd "$PROJECT_ROOT"
 
-# ── ANSI colours ──────────────────────────────────────────
-BOLD='\033[1m'
-ORANGE='\033[38;5;208m'
-AMBER='\033[38;5;214m'
-BRIGHT_BLUE='\033[1;34m'
-DARK_BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-BRIGHT_CYAN='\033[1;36m'
-GREEN='\033[0;32m'
-BRIGHT_GREEN='\033[1;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-WHITE='\033[1;37m'
-GRAY='\033[38;5;245m'
-NC='\033[0m'
+if [[ ! -t 0 ]]; then
+    echo "This installer is interactive. Run it from a terminal: ./scripts/install.sh" >&2
+    exit 1
+fi
 
-# ── Collected settings (populated by wizard) ──────────────
-OS_NAME=""
-COMPOSE_FILE=""
-DEPLOY_MODE="quick"
-RECORDINGS_PATH=""
-AI_ENABLED=false
-AI_REPO_URL="https://github.com/open-nvr/ai-adapter.git"
-ADMIN_USERNAME="admin"
-ADMIN_EMAIL="admin@opennvr.local"
-POSTGRES_PASSWORD=""
-SECRET_KEY=""
-CREDENTIAL_ENCRYPTION_KEY=""
-INTERNAL_API_KEY=""
-MEDIAMTX_SECRET=""
-
-# ╔══════════════════════════════════════════════════════════╗
-# ║  LOGO                                                    ║
-# ╚══════════════════════════════════════════════════════════╝
-print_logo() {
-    clear
-    echo ""
-    echo -e "${WHITE}${BOLD}  ██████╗ ██████╗ ███████╗███╗   ██╗${NC}${DARK_BLUE}${BOLD} ███╗   ██╗██╗   ██╗██████╗ ${NC}"
-    echo -e "${WHITE}${BOLD} ██╔═══██╗██╔══██╗██╔════╝████╗  ██║${NC}${DARK_BLUE}${BOLD} ████╗  ██║██║   ██║██╔══██╗${NC}"
-    echo -e "${WHITE}${BOLD} ██║   ██║██████╔╝█████╗  ██╔██╗ ██║${NC}${DARK_BLUE}${BOLD} ██╔██╗ ██║██║   ██║██████╔╝${NC}"
-    echo -e "${WHITE}${BOLD} ██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║${NC}${DARK_BLUE}${BOLD} ██║╚██╗██║╚██╗ ██╔╝██╔══██╗${NC}"
-    echo -e "${WHITE}${BOLD} ╚██████╔╝██║     ███████╗██║ ╚████║${NC}${DARK_BLUE}${BOLD} ██║ ╚████║ ╚████╔╝ ██║  ██║${NC}"
-    echo -e "${WHITE}${BOLD}  ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝${NC}${DARK_BLUE}${BOLD} ╚═╝  ╚═══╝  ╚═══╝  ╚═╝  ╚═╝${NC}"
-    echo ""
-    echo -e "  ${WHITE}${BOLD}Open Source Network Video Recorder${NC}"
-    echo -e "  ${GRAY}Self-Hosted · AI-Ready · Privacy-First${NC}"
-    echo ""
-    echo -e "  ${GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  ${AMBER}  Installation Wizard${NC}"
-    echo -e "  ${GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
+info() { printf '  %s\n' "$*"; }
+ok() { printf '  ✓ %s\n' "$*"; }
+warn() { printf '  ⚠ %s\n' "$*"; }
+die() { printf '  ✗ %s\n' "$*" >&2; exit 1; }
+ask_yes_no() {
+    local prompt="$1" default="${2:-n}" answer hint
+    [[ "$default" == "y" ]] && hint="Y/n" || hint="y/N"
+    read -r -p "  $prompt [$hint]: " answer
+    answer="${answer:-$default}"
+    [[ "$answer" =~ ^[Yy] ]]
 }
-
-# ╔══════════════════════════════════════════════════════════╗
-# ║  UI HELPERS                                              ║
-# ╚══════════════════════════════════════════════════════════╝
-section() {
-    echo ""
-    echo -e "  ${BRIGHT_CYAN}${BOLD}◈  $1${NC}"
-    echo -e "  ${GRAY}$(printf '─%.0s' {1..50})${NC}"
-    echo ""
+ask_value() {
+    local prompt="$1" default="$2" answer
+    read -r -p "  $prompt [$default]: " answer
+    REPLY="${answer:-$default}"
 }
-
-ok()   { echo -e "  ${GREEN}✓${NC}  $1"; }
-warn() { echo -e "  ${YELLOW}⚠${NC}  $1"; }
-fail() { echo -e "  ${RED}✗${NC}  $1"; }
-info() { echo -e "  ${GRAY}·${NC}  $1"; }
-step() { echo -e "  ${CYAN}→${NC}  $1"; }
-
-ask() {
-    local prompt="$1"
-    local default="$2"
-    local result
-    read -r -p "$(echo -e "  ${YELLOW}?${NC}  ${WHITE}${prompt}${NC} ${GRAY}[${default}]${NC}: ")" result
-    echo "${result:-$default}"
-}
-
-ask_yn() {
-    local prompt="$1"
-    local default="${2:-n}"
-    local hint result
-    [ "$default" = "y" ] && hint="${BRIGHT_GREEN}Y${NC}${GRAY}/n${NC}" || hint="${GRAY}y/${NC}${RED}N${NC}"
-    read -r -p "$(echo -e "  ${YELLOW}?${NC}  ${WHITE}${prompt}${NC} ${GRAY}[${hint}${GRAY}]${NC}: ")" result
-    result="${result:-$default}"
-    [[ "$result" =~ ^[Yy] ]]
-}
-
 ask_secret() {
-    local prompt="$1"
-    local result
-    read -r -s -p "$(echo -e "  ${YELLOW}?${NC}  ${WHITE}${prompt}${NC}: ")" result
-    echo ""
-    echo "$result"
+    local prompt="$1" answer
+    read -r -s -p "  $prompt: " answer
+    printf '\n'
+    REPLY="$answer"
+}
+# Print a short "what this is" block before a prompt.
+#   explain <what-it-is> <required?> <default> [where-to-get-it]
+explain() {
+    printf '  %s\n' "$1"
+    printf '    required: %-4s  default: %s\n' "$2" "$3"
+    [[ -n "${4:-}" ]] && printf '    note: %s\n' "$4"
+}
+# Curated, ALWAYS-prompted value with an explanation. Enter keeps the current
+# .env value (or the given default on a fresh install); typing overrides it.
+configure_value() {
+    local key="$1" label="$2" default="$3" what="$4" required="$5" where="${6:-}" current
+    current=$(env_get "$key")
+    [[ -n "$current" ]] && default="$current"
+    printf '\n'
+    explain "$what" "$required" "$default" "$where"
+    ask_value "$label" "$default"
+    env_set "$key" "$REPLY"
 }
 
-ask_choice() {
-    local prompt="$1"
-    shift
-    local default="$1"
-    shift
-    local choice
-    read -r -p "$(echo -e "  ${YELLOW}?${NC}  ${WHITE}${prompt}${NC} ${GRAY}[${default}]${NC}: ")" choice
-    echo "${choice:-$default}"
+banner() {
+    cat <<'LOGO'
+
+   ___                   _   ___     ______
+  / _ \ _ __   ___ _ __ | \ | \ \   / /  _ \
+ | | | | '_ \ / _ \ '_ \|  \| |\ \ / /| |_) |
+ | |_| | |_) |  __/ | | | |\  | \ V / |  _ <
+  \___/| .__/ \___|_| |_|_| \_|  \_/  |_| \_\
+       |_|
+  Self-hosted NVR — the cameras are yours.
+
+LOGO
 }
 
-spinner_pid=""
-start_spinner() {
-    local msg="$1"
-    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-    local i=0
-    while true; do
-        printf "\r  ${BRIGHT_CYAN}${frames[$((i % 10))]}${NC}  $msg"
-        i=$((i + 1))
-        sleep 0.08
-    done &
-    spinner_pid=$!
-    disown "$spinner_pid" 2>/dev/null || true
-}
-
-stop_spinner() {
-    if [[ -n "${spinner_pid:-}" ]]; then
-        kill "$spinner_pid" 2>/dev/null || true
-        wait "$spinner_pid" 2>/dev/null || true
-        spinner_pid=""
-        printf "\r\033[K"
-    fi
-}
-
-# ╔══════════════════════════════════════════════════════════╗
-# ║  STEP 1 — PREREQUISITES                                  ║
-# ╚══════════════════════════════════════════════════════════╝
-detect_os() {
-    OS_TYPE="$(uname -s)"
-    case "$OS_TYPE" in
-        Linux*)
-            OS_NAME="Linux"
-            COMPOSE_FILE="docker-compose.linux.yml"
-            ;;
-        Darwin*)
-            OS_NAME="macOS"
-            COMPOSE_FILE="docker-compose.yml"
-            ;;
-        *)
-            OS_NAME="Unknown"
-            COMPOSE_FILE="docker-compose.yml"
-            warn "Unrecognised OS: $OS_TYPE — defaulting to bridge network mode"
-            ;;
+detect_platform() {
+    case "$(uname -s)" in
+        Linux*) PLATFORM="Linux"; DEFAULT_RECORDINGS="/var/lib/opennvr/recordings" ;;
+        Darwin*) PLATFORM="macOS"; DEFAULT_RECORDINGS="/Users/Shared/opennvr-recordings" ;;
+        *) die "Unsupported platform. On Windows run .\\scripts\\install.ps1" ;;
     esac
+    ok "Detected $PLATFORM (Docker bridge mode)"
 }
 
-check_prereqs() {
-    section "Checking prerequisites"
-    local errors=0
+check_prerequisites() {
+    command -v docker >/dev/null 2>&1 || die "Docker is not installed. Install Docker, then re-run."
+    docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required. Update Docker and re-run."
+    docker info >/dev/null 2>&1 || die "Docker is not running. Start the Docker daemon, then re-run."
+    command -v openssl >/dev/null 2>&1 || die "openssl is required to generate credentials"
+    [[ -f "$BASE_COMPOSE" ]] || die "$BASE_COMPOSE was not found in $PROJECT_ROOT"
+}
 
-    info "Detected OS: ${WHITE}${OS_NAME}${NC}"
-    info "Compose file: ${WHITE}${COMPOSE_FILE}${NC}"
-    echo ""
+env_get() {
+    local key="$1" value
+    value=$(grep -E "^${key}=" .env 2>/dev/null | tail -n 1 | cut -d= -f2- || true)
+    value=$(printf '%s' "$value" | sed -E 's/[[:space:]]+#.*$//; s/^"(.*)"$/\1/; s/^'"'"'(.*)'"'"'$/\1/')
+    printf '%s' "$value"
+}
+env_set() {
+    local key="$1" value="$2" tmp found=false line
+    tmp=$(mktemp "${PROJECT_ROOT}/.env.tmp.XXXXXX")
+    if [[ -f .env ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ "$line" == "$key="* ]]; then
+                if [[ "$found" == false ]]; then printf '%s=%s\n' "$key" "$value" >> "$tmp"; found=true; fi
+            else
+                printf '%s\n' "$line" >> "$tmp"
+            fi
+        done < .env
+    fi
+    [[ "$found" == true ]] || printf '\n%s=%s\n' "$key" "$value" >> "$tmp"
+    mv "$tmp" .env
+}
+is_missing_or_placeholder() {
+    local value="$1"
+    [[ -z "$value" || "$value" =~ ^(dev_|insecure_|change_me|your_|changeme|placeholder|dummy|CKLghtP4rWz8J9vN2xQ5mT7yU8kF6bD3eH1aG4cS0wE=) ]]
+}
+random_hex() { openssl rand -hex "$1"; }
+random_password() { openssl rand -hex 16; }
+random_fernet() { openssl rand -base64 32 | tr '/+' '_-' | tr -d '\n'; }
 
-    if ! command -v docker &>/dev/null; then
-        fail "Docker is not installed"
-        step "Install: https://docs.docker.com/get-docker/"
-        errors=$((errors + 1))
+ensure_plain_value() {
+    local key="$1" label="$2" default="$3" current
+    current=$(env_get "$key")
+    if [[ -n "$current" ]]; then
+        # Fresh install: keep whatever's already there, don't nag.
+        [[ "$MODE" == "reconfigure" ]] || return 0
+        # Reconfigure: offer the current value as the default so the operator
+        # can change it, but Enter keeps it.
+        default="$current"
+    fi
+    ask_value "$label" "$default"
+    env_set "$key" "$REPLY"
+}
+ensure_secret_value() {
+    local key="$1" label="$2" generated="$3" current
+    current=$(env_get "$key")
+    if ! is_missing_or_placeholder "$current"; then
+        ok "$label already configured"
+        return 0
+    fi
+    if ask_yes_no "$label is missing or insecure. Use a newly generated value?" y; then
+        env_set "$key" "$generated"
     else
-        ok "Docker  $(docker --version 2>/dev/null | sed 's/Docker version /v/' | cut -d',' -f1)"
+        ask_secret "Enter $label"
+        [[ -n "$REPLY" ]] || die "$label cannot be empty"
+        env_set "$key" "$REPLY"
     fi
+    ok "$label configured"
+}
 
-    if command -v docker &>/dev/null && ! docker info &>/dev/null 2>&1; then
-        fail "Docker daemon is not running"
-        step "Start Docker Desktop or: sudo systemctl start docker"
-        errors=$((errors + 1))
-    elif command -v docker &>/dev/null; then
-        ok "Docker daemon is running"
-    fi
-
-    if ! docker compose version &>/dev/null 2>&1; then
-        fail "Docker Compose v2 not found (required)"
-        step "Update Docker Desktop or: https://docs.docker.com/compose/install/"
-        errors=$((errors + 1))
+prepare_environment() {
+    if [[ ! -f .env ]]; then
+        [[ -f .env.example ]] || die ".env.example is missing"
+        cp .env.example .env
+        ok "Created .env from .env.example"
     else
-        ok "Docker Compose  $(docker compose version 2>/dev/null | sed 's/Docker Compose version /v/')"
+        ok "Using existing .env; existing values will be preserved"
     fi
 
-    if ! command -v git &>/dev/null; then
-        warn "Git is not installed — AI adapter cloning will not be available"
-    else
-        ok "Git  $(git --version 2>/dev/null)"
-    fi
+    # Secrets — generated automatically. Never prompted unless the value is
+    # still a placeholder from .env.example (or empty).
+    ensure_secret_value POSTGRES_PASSWORD "PostgreSQL password" "$(random_password)"
+    ensure_secret_value SECRET_KEY "JWT signing key" "$(random_hex 32)"
+    ensure_secret_value CREDENTIAL_ENCRYPTION_KEY "credential encryption key" "$(random_fernet)"
+    ensure_secret_value INTERNAL_API_KEY "internal API key" "$(random_password)"
+    ensure_secret_value MEDIAMTX_SECRET "MediaMTX webhook secret" "$(random_hex 32)"
 
-    if [[ $errors -gt 0 ]]; then
-        echo ""
-        fail "Please fix the errors above and re-run the installer."
-        exit 1
-    fi
+    # Rarely-changed database identifiers — filled only if missing (no nagging
+    # on a fresh install, editable in reconfigure mode).
+    ensure_plain_value POSTGRES_USER "PostgreSQL user" "opennvr_user"
+    ensure_plain_value POSTGRES_DB "PostgreSQL database" "opennvr_db"
+
+    # Curated settings most people set. Press Enter to accept the default shown
+    # in [brackets]; type a value to change it. All are local — no accounts,
+    # no API keys.
+    printf '\n  ── Basic settings ─────────────────────────────────────\n'
+    configure_value DEFAULT_ADMIN_USERNAME "Administrator username" "admin" \
+        "Login name for the first OpenNVR admin account." "yes" \
+        "You pick this yourself — no external account involved."
+    configure_value DEFAULT_ADMIN_EMAIL "Administrator email" "admin@opennvr.local" \
+        "Contact email tied to the admin account." "yes" \
+        "Any address works; the placeholder is fine for an offline setup."
+    configure_value RECORDINGS_PATH "Recordings folder on this machine" "$DEFAULT_RECORDINGS" \
+        "Host directory where recorded video segments are written." "yes" \
+        "Created automatically if it does not exist yet."
+
+    mkdir -p "$(env_get RECORDINGS_PATH)" 2>/dev/null || warn "Could not create the recordings directory; Docker will try"
 }
 
-# ╔══════════════════════════════════════════════════════════╗
-# ║  STEP 2 — DEPLOYMENT MODE                               ║
-# ╚══════════════════════════════════════════════════════════╝
-ask_deploy_mode() {
-    section "Deployment mode"
-    echo -e "  ${WHITE}How do you want to set up OpenNVR?${NC}"
-    echo ""
-    echo -e "   ${BRIGHT_CYAN}1${NC}  ${WHITE}Quick start${NC}   ${GRAY}· Sensible dev defaults · Up in seconds${NC}"
-    echo -e "   ${BRIGHT_CYAN}2${NC}  ${WHITE}Production${NC}    ${GRAY}· Strong auto-generated secrets · Recommended${NC}"
-    echo ""
-    local choice
-    choice=$(ask_choice "Choose" "1")
-    case "$choice" in
-        2) DEPLOY_MODE="production"; ok "Production mode — all secrets will be uniquely generated" ;;
-        *) DEPLOY_MODE="quick";      ok "Quick start mode — you can harden later with: ./scripts/generate-secrets.sh --write" ;;
-    esac
-}
-
-# ╔══════════════════════════════════════════════════════════╗
-# ║  STEP 3 — RECORDING STORAGE                             ║
-# ╚══════════════════════════════════════════════════════════╝
-ask_recordings_path() {
-    section "Recording storage"
-    echo -e "  ${WHITE}Where should camera recordings be stored on this machine?${NC}"
-    echo -e "  ${GRAY}This path is bind-mounted into the Docker containers.${NC}"
-    echo ""
-
-    local default_path
-    case "$OS_NAME" in
-        Linux)  default_path="/var/lib/opennvr/recordings" ;;
-        macOS)  default_path="/Users/Shared/opennvr-recordings" ;;
-        *)      default_path="./recordings" ;;
-    esac
-
-    RECORDINGS_PATH=$(ask "Recordings path" "$default_path")
-
-    if [[ ! -d "$RECORDINGS_PATH" ]]; then
-        if mkdir -p "$RECORDINGS_PATH" 2>/dev/null; then
-            ok "Created: $RECORDINGS_PATH"
-        else
-            warn "Could not create directory — Docker will attempt to create it on start"
-        fi
-    else
-        ok "Directory exists: $RECORDINGS_PATH"
-    fi
-}
-
-# ╔══════════════════════════════════════════════════════════╗
-# ║  STEP 4 — AI DETECTION                                  ║
-# ╚══════════════════════════════════════════════════════════╝
-ask_ai() {
-    section "AI-powered detection (optional)"
-    echo -e "  ${WHITE}OpenNVR supports AI object detection via a separate adapter service.${NC}"
-    echo -e "  ${GRAY}Requires cloning an extra repository (done automatically).${NC}"
-    echo ""
-
-    if ask_yn "Enable AI detection?" "n"; then
-        AI_ENABLED=true
-        echo ""
-        AI_REPO_URL=$(ask "AI adapter repository URL" "https://github.com/open-nvr/ai-adapter.git")
-        ok "AI detection will be enabled"
-    else
-        AI_ENABLED=false
-        ok "AI detection disabled — enable later by re-running: ./scripts/install.sh"
-    fi
-}
-
-# ╔══════════════════════════════════════════════════════════╗
-# ║  STEP 5 — ADMIN ACCOUNT                                 ║
-# ╚══════════════════════════════════════════════════════════╝
-ask_admin() {
-    section "Administrator account"
-    echo -e "  ${WHITE}Set a username and email for the default admin account.${NC}"
-    echo -e "  ${GRAY}You will complete the full account setup (including password)${NC}"
-    echo -e "  ${GRAY}at the first-time setup page after installation.${NC}"
-    echo ""
-
-    ADMIN_USERNAME=$(ask "Username" "admin")
-    ADMIN_EMAIL=$(ask "Email"    "admin@opennvr.local")
-}
-
-# ╔══════════════════════════════════════════════════════════╗
-# ║  STEP 6 — SECRETS                                       ║
-# ╚══════════════════════════════════════════════════════════╝
-generate_secrets() {
-    section "Generating secrets"
-
-    POSTGRES_PASSWORD=$(openssl rand -base64 32 | tr -d '=+/' | cut -c1-32)
-    SECRET_KEY=$(openssl rand -hex 32)
-    INTERNAL_API_KEY=$(openssl rand -base64 32 | tr -d '\n=')
-    MEDIAMTX_SECRET=$(openssl rand -hex 32)
-
-    CREDENTIAL_ENCRYPTION_KEY=""
-    for pybin in python3 python; do
-        if command -v "$pybin" &>/dev/null; then
-            CREDENTIAL_ENCRYPTION_KEY=$("$pybin" -c \
-                "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" \
-                2>/dev/null || true)
-            [[ -n "$CREDENTIAL_ENCRYPTION_KEY" ]] && break
-        fi
+find_example_compose() {
+    local name="$1" candidate
+    for candidate in "docker-compose.${name}.yml" "docker-compose.${name}.yaml" \
+                     "examples/${name}/docker-compose.yml" "examples/${name}/docker-compose.yaml" \
+                     "examples/${name}/compose.yml" "examples/${name}/compose.yaml"; do
+        [[ -f "$candidate" ]] && { printf '%s' "$candidate"; return 0; }
     done
-
-    if [[ -z "$CREDENTIAL_ENCRYPTION_KEY" ]]; then
-        warn "Python cryptography library not found — using openssl fallback"
-        info "For proper Fernet keys: pip install cryptography"
-        CREDENTIAL_ENCRYPTION_KEY=$(openssl rand -base64 32 | tr -d '\n')
-    fi
-
-    ok "Database password generated"
-    ok "JWT secret key generated"
-    ok "Credential encryption key generated"
-    ok "Internal API key generated"
-    ok "MediaMTX webhook secret generated"
+    return 1
 }
 
-# ╔══════════════════════════════════════════════════════════╗
-# ║  STEP 7 — CLONE AI ADAPTER                              ║
-# ╚══════════════════════════════════════════════════════════╝
-clone_ai_adapter() {
-    [[ "$AI_ENABLED" != true ]] && return 0
+prompt_overlay_defaults() {
+    local file="$1" spec body key default current
+    while IFS= read -r spec; do
+        [[ -n "$spec" ]] || continue
+        body="${spec#\$\{}"; body="${body%\}}"
+        key="${body%%:-*}"; default="${body#*:-}"
+        current=$(env_get "$key")
+        [[ -n "$current" ]] && continue
+        ask_value "$key" "$default"
+        env_set "$key" "$REPLY"
+    done < <(grep -oE '\$\{[A-Z][A-Z0-9_]*:-[^}]+\}' "$file" | sort -u || true)
+}
 
-    section "Cloning AI adapter"
-    local target_dir
-    target_dir="$(cd "$PROJECT_ROOT/.." && pwd)/ai-adapter"
+choose_example() {
+    EXAMPLE_NAME=""; EXAMPLE_COMPOSE=""; EXAMPLE_PROFILE=""
+    env_set OPENNVR_EXAMPLE ""
+    env_set OPENNVR_EXAMPLE_COMPOSE ""
+    env_set OPENNVR_EXAMPLE_PROFILE ""
 
-    if [[ -d "$target_dir" ]]; then
-        warn "Directory already exists: $target_dir"
-        if ask_yn "Skip cloning and use existing directory?" "y"; then
-            ok "Using existing ai-adapter at: $target_dir"
-            return 0
+    printf '\n  ── Example app ────────────────────────────────────────\n'
+    info "Examples add an AI app on top of the core NVR. The Camera Agent lets you"
+    info "ask your cameras questions out loud or by chat. Everything runs locally."
+    ask_yes_no "Set up an example app now?" n || return 0
+    local names=() dir name manifest choice index
+    while IFS= read -r dir; do names+=("$(basename "$dir")"); done < <(find examples -mindepth 1 -maxdepth 1 -type d | sort)
+    [[ ${#names[@]} -gt 0 ]] || { warn "No examples were found"; return 0; }
+
+    printf '\n  Available examples:\n'
+    index=1
+    for name in "${names[@]}"; do
+        if manifest=$(find_example_compose "$name"); then
+            printf '  %2d. %-30s [installable: %s]\n' "$index" "$name" "$manifest"
+        else
+            printf '  %2d. %-30s [no Compose manifest]\n' "$index" "$name"
         fi
-        step "Removing existing directory..."
-        rm -rf "$target_dir"
-    fi
+        index=$((index + 1))
+    done
+    printf '   0. Core stack only\n\n'
+    read -r -p "  Select an example [0]: " choice
+    choice="${choice:-0}"
+    [[ "$choice" =~ ^[0-9]+$ ]] || die "Invalid selection"
+    (( choice == 0 )) && return 0
+    (( choice >= 1 && choice <= ${#names[@]} )) || die "Selection out of range"
 
-    if ! command -v git &>/dev/null; then
-        fail "Git is not installed — cannot clone AI adapter"
-        warn "Clone manually: git clone $AI_REPO_URL $target_dir"
-        AI_ENABLED=false
-        return 0
-    fi
+    name="${names[$((choice - 1))]}"
+    manifest=$(find_example_compose "$name") || die "The '$name' example has no Docker Compose manifest"
+    EXAMPLE_NAME="$name"; EXAMPLE_COMPOSE="$manifest"; EXAMPLE_PROFILE="$name"
+    if [[ "$name" == "camera-agent" ]]; then
+        printf '\n'
+        explain "Camera Agent runs in VOICE mode (speak, hear spoken answers) or CHAT mode (type, read answers). Voice adds Whisper speech-to-text and Piper text-to-speech; chat is lighter." \
+            "pick one" "1 (voice)"
+        ask_value "Camera Agent mode: 1=voice, 2=chat" "1"
+        [[ "$REPLY" == "2" ]] && EXAMPLE_PROFILE="camera-agent-chat" || EXAMPLE_PROFILE="camera-agent"
 
-    start_spinner "Cloning $AI_REPO_URL ..."
-    if git clone "$AI_REPO_URL" "$target_dir" 2>/dev/null; then
-        stop_spinner
-        ok "AI adapter cloned to: $target_dir"
-
-        # Fix model_weights ownership for container user (uid 1000)
-        local weights_dir="$target_dir/model_weights"
-        mkdir -p "$weights_dir"
-        chown -R 1000:1000 "$weights_dir" 2>/dev/null || true
+        printf '\n  ── Camera Agent models (all local, no API keys) ───────\n'
+        configure_value OLLAMA_MODEL "Local LLM model (Ollama)" "qwen2.5:1.5b" \
+            "The local chat model that answers your questions; must support tool calling." "yes" \
+            "Pulled automatically. qwen2.5:0.5b (low RAM) | 1.5b (default) | 3b (better, slower)."
+        if [[ "$EXAMPLE_PROFILE" == "camera-agent" ]]; then
+            configure_value WHISPER_MODEL_SIZE "Whisper speech-to-text model" "base.en" \
+                "Transcribes your spoken questions (voice mode only)." "yes" \
+                "tiny.en (fastest) | base.en (default) | small.en (most accurate)."
+        fi
+        configure_value CAPTION_ADAPTER "Scene-description model" "moondream" \
+            "Describes what a camera sees. moondream answers questions (VQA); blip writes plain captions." "yes" \
+            "moondream | blip — both run locally."
     else
-        stop_spinner
-        fail "Clone failed — check the URL and your internet connection"
-        warn "Continuing without AI detection"
-        AI_ENABLED=false
+        # Generic examples: prompt for any ${VAR:-default} the overlay exposes.
+        prompt_overlay_defaults "$manifest"
+    fi
+    env_set OPENNVR_EXAMPLE "$EXAMPLE_NAME"
+    env_set OPENNVR_EXAMPLE_COMPOSE "$EXAMPLE_COMPOSE"
+    env_set OPENNVR_EXAMPLE_PROFILE "$EXAMPLE_PROFILE"
+    ok "Selected $EXAMPLE_NAME ($EXAMPLE_PROFILE)"
+    if [[ "$name" == "camera-agent" ]]; then
+        info "The local LLM model downloads on first start — usually the slowest step."
     fi
 }
 
-# ╔══════════════════════════════════════════════════════════╗
-# ║  STEP 8 — WRITE .env                                    ║
-# ╚══════════════════════════════════════════════════════════╝
-write_env() {
-    section "Writing configuration"
+pull_and_build() {
+    printf '\n'
+    info "First-time setup downloads several container images (and, for the"
+    info "Camera Agent, a local LLM model of ~1 GB). Depending on your network"
+    info "this can take 8-15 minutes. Later starts are much faster — everything"
+    info "is cached, so you only pay this cost once."
+    printf '\n'
+    info "Pulling the OpenNVR core stack..."
+    docker compose -f "$BASE_COMPOSE" pull --ignore-buildable
 
-    local adapter_url_line
-    if [[ "$AI_ENABLED" == true ]]; then
-        case "$OS_NAME" in
-            Linux) adapter_url_line="ADAPTER_URL=http://127.0.0.1:9100" ;;
-            *)     adapter_url_line="ADAPTER_URL=http://opennvr_ai:9100" ;;
-        esac
-    else
-        adapter_url_line="# ADAPTER_URL=  # Uncomment when AI adapters are enabled"
+    choose_example
+    COMPOSE_ARGS=(-f "$BASE_COMPOSE")
+    if [[ -n "$EXAMPLE_COMPOSE" ]]; then
+        COMPOSE_ARGS+=(-f "$EXAMPLE_COMPOSE" --profile "$EXAMPLE_PROFILE")
+        info "Pulling images for $EXAMPLE_NAME..."
+        docker compose "${COMPOSE_ARGS[@]}" pull --ignore-buildable
     fi
-
-    cat > .env <<EOF
-# ============================================================
-# OpenNVR Configuration
-# Generated by installer on $(date '+%Y-%m-%d %H:%M:%S')
-# ============================================================
-
-# ── DATABASE ─────────────────────────────────────────────
-POSTGRES_USER=opennvr_user
-POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-POSTGRES_DB=opennvr_db
-
-# ── SECURITY ─────────────────────────────────────────────
-SECRET_KEY=${SECRET_KEY}
-ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=120
-# WARNING: Never change CREDENTIAL_ENCRYPTION_KEY after first run
-CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY}
-INTERNAL_API_KEY=${INTERNAL_API_KEY}
-MEDIAMTX_SECRET=${MEDIAMTX_SECRET}
-
-# ── APPLICATION ───────────────────────────────────────────
-DEBUG=False
-HOST=0.0.0.0
-PORT=8000
-APPLICATION_URL=http://localhost:8000
-API_PREFIX=/api/v1
-
-# ── MEDIAMTX ─────────────────────────────────────────────
-MEDIAMTX_BASE_URL=http://localhost:8889
-MEDIAMTX_ADMIN_API=http://localhost:9997/v3
-MEDIAMTX_API_URL=http://localhost:9997
-MEDIAMTX_HLS_URL=http://localhost:8888
-MEDIAMTX_RTSP_URL=rtsp://localhost:8554
-MEDIAMTX_PLAYBACK_URL=http://localhost:9996
-MEDIAMTX_STREAM_PREFIX=cam-
-MEDIAMTX_PATH_MODE=id
-MEDIAMTX_AUTO_PROVISION=True
-
-# ── DOCKER NETWORKING ─────────────────────────────────────
-BACKEND_HOST=opennvr_core
-BACKEND_PORT=8000
-
-# ── RECORDING STORAGE ─────────────────────────────────────
-RECORDINGS_PATH=${RECORDINGS_PATH}
-
-# ── AI INFERENCE ──────────────────────────────────────────
-AI_ENABLED=$([ "$AI_ENABLED" = true ] && echo "true" || echo "false")
-KAI_C_URL=http://127.0.0.1:8100
-KAI_C_IP=127.0.0.1
-${adapter_url_line}
-
-# ── ADMIN USER ────────────────────────────────────────────
-DEFAULT_ADMIN_USERNAME=${ADMIN_USERNAME}
-DEFAULT_ADMIN_EMAIL=${ADMIN_EMAIL}
-DEFAULT_ADMIN_FIRST_NAME=System
-DEFAULT_ADMIN_LAST_NAME=Administrator
-
-# ── LOGGING ───────────────────────────────────────────────
-LOG_LEVEL=INFO
-LOG_FILE_ENABLED=True
-LOG_FILE_PATH=logs/server.log
-LOG_FILE_MAX_SIZE_MB=50
-LOG_FILE_BACKUP_COUNT=10
-LOG_CONSOLE_ENABLED=True
-LOG_JSON_FORMAT=False
-EOF
-
-    ok ".env written successfully"
+    info "Building services that do not publish a pre-built image..."
+    docker compose "${COMPOSE_ARGS[@]}" build
 }
 
-# ╔══════════════════════════════════════════════════════════╗
-# ║  SUMMARY                                                 ║
-# ╚══════════════════════════════════════════════════════════╝
-print_summary() {
-    echo ""
-    echo -e "  ${GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-    echo -e "  ${WHITE}${BOLD}  Installation Summary${NC}"
-    echo ""
-    echo -e "  ${GRAY}  Platform       ${NC}${WHITE}${OS_NAME}${NC}  ${GRAY}(${COMPOSE_FILE})${NC}"
-    echo -e "  ${GRAY}  Mode           ${NC}${WHITE}${DEPLOY_MODE}${NC}"
-    echo -e "  ${GRAY}  Recordings     ${NC}${WHITE}${RECORDINGS_PATH}${NC}"
-
-    if [[ "$AI_ENABLED" == true ]]; then
-        echo -e "  ${GRAY}  AI Detection   ${NC}${BRIGHT_GREEN}enabled${NC}"
-    else
-        echo -e "  ${GRAY}  AI Detection   ${NC}${GRAY}disabled${NC}"
-    fi
-
-    echo ""
-    echo -e "  ${GRAY}  Admin user     ${NC}${WHITE}${ADMIN_USERNAME}${NC}"
-    echo -e "  ${GRAY}  Admin email    ${NC}${WHITE}${ADMIN_EMAIL}${NC}"
-    echo ""
-    echo -e "  ${CYAN}  → Complete password setup at the first-time setup page.${NC}"
-    echo ""
-    echo -e "  ${GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-}
-
-# ╔══════════════════════════════════════════════════════════╗
-# ║  LAUNCH                                                  ║
-# ╚══════════════════════════════════════════════════════════╝
-launch_services() {
-    echo ""
-    if ! ask_yn "Build and start OpenNVR now?" "y"; then
-        echo ""
-        info "Configuration saved to .env"
-        echo ""
-        step "To start later:"
-        echo -e "  ${BRIGHT_CYAN}  ./start.sh build${NC}   ${GRAY}(first run — builds Docker images)${NC}"
-        echo -e "  ${BRIGHT_CYAN}  ./start.sh${NC}          ${GRAY}(subsequent starts)${NC}"
-        echo ""
-        return 0
-    fi
-
-    echo ""
-    section "Starting OpenNVR"
-
-    local profile_arg=""
-    [[ "$AI_ENABLED" == true ]] && profile_arg="--profile ai"
-
-    start_spinner "Building Docker images (this may take a few minutes on first run) ..."
-    if docker compose -f "$COMPOSE_FILE" $profile_arg build 2>&1 | \
-        grep -E "^(Step|STEP|#[0-9]|Successfully|ERROR)" || true; then
-        :
-    fi
-    stop_spinner
-    ok "Docker images built"
-
-    start_spinner "Starting all services ..."
-    docker compose -f "$COMPOSE_FILE" $profile_arg up -d
-    stop_spinner
-    ok "All services started"
-
-    # Wait briefly for the health check to get going
-    sleep 3
-
-    echo ""
-    echo -e "  ${GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-    echo -e "  ${BRIGHT_GREEN}${BOLD}  ✓  OpenNVR is running!${NC}"
-    echo ""
-    echo -e "  ${GRAY}  Web Interface${NC}  →  ${BRIGHT_CYAN}http://localhost:8000${NC}"
-    echo -e "  ${GRAY}  API Docs     ${NC}  →  ${BRIGHT_CYAN}http://localhost:8000/docs${NC}"
-    echo -e "  ${GRAY}  First-time setup page opens automatically on first visit.${NC}"
-    echo ""
-    echo -e "  ${GRAY}  Useful commands:${NC}"
-    echo -e "  ${GRAY}    ./start.sh logs    ${NC}${WHITE}# follow live logs${NC}"
-    echo -e "  ${GRAY}    ./start.sh status  ${NC}${WHITE}# check container health${NC}"
-    echo -e "  ${GRAY}    ./start.sh down    ${NC}${WHITE}# stop all services${NC}"
-    echo ""
-    echo -e "  ${GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-}
-
-# ╔══════════════════════════════════════════════════════════╗
-# ║  MAIN                                                    ║
-# ╚══════════════════════════════════════════════════════════╝
 main() {
-    print_logo
-
-    # If .env already exists, confirm overwrite
-    if [[ -f "$PROJECT_ROOT/.env" ]]; then
-        echo -e "  ${YELLOW}⚠  An existing .env was found.${NC}"
-        echo ""
-        if ! ask_yn "Reconfigure and overwrite existing settings?" "n"; then
-            echo ""
-            info "Installation cancelled. Your .env is unchanged."
-            echo ""
-            exit 0
-        fi
-        echo ""
-    fi
-
-    detect_os
-    check_prereqs
-    ask_deploy_mode
-    ask_recordings_path
-    ask_ai
-    ask_admin
-    generate_secrets
-    clone_ai_adapter
-    write_env
-    print_summary
-    launch_services
+    banner
+    printf '  OpenNVR interactive installer\n\n'
+    detect_platform
+    check_prerequisites
+    prepare_environment
+    pull_and_build
+    printf '\n  Configuration and images are ready. Starting OpenNVR...\n\n'
+    exec "$PROJECT_ROOT/start.sh" up
 }
-
-main
+main "$@"

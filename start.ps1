@@ -1,21 +1,26 @@
 ﻿# ============================================================
 # OpenNVR - Smart Launcher (Windows PowerShell)
 # ============================================================
-# First run → launches the interactive installer automatically.
-# Subsequent runs → validates and starts services.
+# One command does it all: run .\start.ps1 with no arguments. On a fresh
+# checkout it launches the interactive installer (creates and configures .env,
+# builds, and starts). On later runs it asks whether to start as-is or
+# reconfigure. The sub-commands below are for scripted / power use.
 #
 # Usage:
-#   .\start.ps1              # start (or install on first run)
+#   .\start.ps1              # smart start: install on first run, else start/reconfigure
+#   .\start.ps1 up           # start now using the existing .env (no prompt)
 #   .\start.ps1 build        # rebuild images and start
-#   .\start.ps1 install      # re-run the interactive installer
+#   .\start.ps1 install      # re-run the interactive installer (reconfigure)
+#   .\start.ps1 reconfigure  # alias for install
 #   .\start.ps1 down         # stop all services
 #   .\start.ps1 logs         # tail logs
 #   .\start.ps1 status       # show container status
 #   .\start.ps1 validate     # run pre-flight checks only
+#   .\start.ps1 token        # re-print the first-time setup token
 # ============================================================
 
 param(
-    [string]$Command = "up"
+    [string]$Command = "start"
 )
 
 $ComposeFile = "docker-compose.yml"
@@ -29,7 +34,10 @@ function Write-Color($Text, $Color = "White") {
 function Get-EnvVar {
     param([string]$Key)
     if (-not (Test-Path ".env")) { return $null }
-    $line = Get-Content ".env" | Where-Object { $_ -match "^${Key}=" } | Select-Object -First 1
+    # Read as UTF-8 explicitly — Windows PowerShell 5.1's Get-Content defaults to
+    # ANSI, which mis-decodes any non-ASCII the installer wrote as UTF-8.
+    $lines = [IO.File]::ReadAllLines((Resolve-Path ".env"), (New-Object Text.UTF8Encoding($false)))
+    $line = $lines | Where-Object { $_ -match "^${Key}=" } | Select-Object -First 1
     if ($line) { return ($line -split '=', 2)[1].Trim('"').Trim("'") }
     return $null
 }
@@ -37,8 +45,13 @@ function Get-EnvVar {
 # ── Build Compose profile args ─────────────────────────────
 function Get-ComposeArgs {
     $args = @("-f", $ComposeFile)
-    $ai = Get-EnvVar "AI_ENABLED"
-    if ($ai -eq "true") { $args += @("--profile", "ai") }
+    $exampleCompose = Get-EnvVar "OPENNVR_EXAMPLE_COMPOSE"
+    $exampleProfile = Get-EnvVar "OPENNVR_EXAMPLE_PROFILE"
+    if ($exampleCompose) {
+        if (-not (Test-Path $exampleCompose)) { throw "Configured example Compose file not found: $exampleCompose" }
+        $args += @("-f", $exampleCompose)
+    }
+    if ($exampleProfile) { $args += @("--profile", $exampleProfile) }
     return $args
 }
 
@@ -56,9 +69,12 @@ function Invoke-Validate {
     Write-Color "  Running pre-flight checks..." Cyan
     Write-Color ""
 
-    # 1. Docker
-    $null = docker info 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    # 1. Docker — probe with the error-action policy relaxed so the daemon's
+    # stderr (when it's down) doesn't surface as a NativeCommandError stack trace.
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'
+    docker info 2>$null | Out-Null; $dockerUp = ($LASTEXITCODE -eq 0)
+    $ErrorActionPreference = $prevEAP
+    if (-not $dockerUp) {
         Write-Color "  ✗ Docker is not running" Red
         Write-Color "      → Start Docker Desktop and retry."
         $errors++
@@ -141,7 +157,7 @@ function Show-FirstTimeSetupToken {
     # can copy it from the wizard's terminal instead of grepping logs.
     #
     # ISSUE-5 fix: the previous version polled docker logs for 30s
-    # after `compose up -d`. But `up -d` returns when containers are
+    # after `compose up -d --remove-orphans`. But `up -d` returns when containers are
     # *scheduled*, not when they're *healthy*. Post-ISSUE-3 the
     # yolov8-weights-init container takes ~3 min on x86 / ~10-15 min
     # on a Pi 5 to export the ONNX model before opennvr-core even
@@ -254,11 +270,13 @@ function Show-FirstTimeSetupToken {
         $raw = & docker compose @ComposeArgs logs `
             --no-color --no-log-prefix --tail 5000 opennvr-core 2>$null
         if ($raw) {
-            $lines = $raw -split "`n"
+            $lines = $raw -split "
+"
             for ($i = $lines.Length - 1; $i -ge 0; $i--) {
                 if ($lines[$i] -match "first-time setup token") {
                     $end = [Math]::Min($i + 6, $lines.Length - 1)
-                    $banner = ($lines[$i..$end] -join "`n")
+                    $banner = ($lines[$i..$end] -join "
+")
                     break
                 }
             }
@@ -271,13 +289,14 @@ function Show-FirstTimeSetupToken {
     if ($banner) {
         Write-Color "  🔑 First-time setup token (one-time use — copy into the UI):" Yellow
         Write-Color ""
-        foreach ($line in ($banner -split "`n")) { Write-Color ("  " + $line) White }
+        foreach ($line in ($banner -split "
+")) { Write-Color ("  " + $line) White }
         Write-Color ""
     } else {
         # Container healthy AND no banner = admin already activated on
         # a previous boot. Unambiguous now.
         $adminUser = "admin"
-        try { $adminUser = (Get-EnvVar "DEFAULT_ADMIN_USERNAME") } catch { }
+        try { $got = Get-EnvVar "DEFAULT_ADMIN_USERNAME"; if (-not [string]::IsNullOrWhiteSpace($got)) { $adminUser = $got } } catch { }
         Write-Color "  First-time setup is already complete." Green
         Write-Color ("  Log in at http://localhost:8000 as " + $adminUser + ".") DarkGray
         Write-Color "  (To re-arm the setup token, wipe the database volume and restart.)" DarkGray
@@ -297,60 +316,95 @@ function Show-Banner {
     Write-Color ""
 }
 
+function Show-RunningInfo {
+    $u = Get-EnvVar "DEFAULT_ADMIN_USERNAME"
+    if ([string]::IsNullOrWhiteSpace($u)) { $u = 'admin' }
+    Write-Color ""
+    Write-Color "  ✓ OpenNVR is running!" Green
+    Write-Color "  Web UI (local) → http://localhost:8000  (login: $u)" Cyan
+    Write-Color "  Web UI (LAN)   → https://<this-host-ip>/  (via the TLS proxy)" Cyan
+    Write-Color "  API Docs       → http://localhost:8000/docs" Cyan
+    if ((Get-EnvVar "OPENNVR_EXAMPLE") -eq 'camera-agent') {
+        Write-Color "  Camera Agent   → http://localhost:9100/demo  (ask your cameras - voice or chat)" Cyan
+    }
+    Write-Color "  First-time setup page opens automatically on first visit." DarkGray
+}
+
+# ── Raw start / build (no front-door prompt) ───────────────
+# These assume .env exists — the smart Invoke-Start and the installer
+# guarantee that before calling them. Kept separate so the installer can call
+# `start.ps1 up` without re-triggering the front door (which would loop).
+function Invoke-Up {
+    if (-not (Test-Path ".env")) {
+        Write-Color "  No .env found. Run .\start.ps1 (no arguments) to set up." Red
+        exit 1
+    }
+    Show-Banner
+    if (-not (Invoke-Validate)) { exit 1 }
+    $ca = Get-ComposeArgs
+    Write-Color "  Starting all services ..." Green
+    docker compose @ca up -d --remove-orphans
+    Show-RunningInfo
+    Show-FirstTimeSetupToken -ComposeArgs $ca
+}
+
+function Invoke-Build {
+    if (-not (Test-Path ".env")) {
+        Write-Color "  No .env found. Run .\start.ps1 (no arguments) to set up." Red
+        exit 1
+    }
+    Show-Banner
+    if (-not (Invoke-Validate)) { exit 1 }
+    $ca = Get-ComposeArgs
+    Write-Color "  Building images and starting all services ..." Green
+    docker compose @ca build
+    docker compose @ca up -d --remove-orphans
+    Show-RunningInfo
+    Show-FirstTimeSetupToken -ComposeArgs $ca
+}
+
+# ── Smart front door (bare .\start.ps1) ────────────────────
+# No .env yet          → run the installer (creates/configures .env, builds, starts).
+# .env exists + console → ask start-as-is vs reconfigure.
+# .env exists, no TTY   → just start (CI / piped input: never block).
+function Invoke-Start {
+    $installer = Join-Path $PSScriptRoot "scripts\install.ps1"
+    if (-not (Test-Path ".env")) {
+        Write-Color "  First run — launching the OpenNVR installer ..." Green
+        & $installer
+        exit $LASTEXITCODE
+    }
+    $interactive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+    if ($interactive) {
+        Write-Color ""
+        Write-Color "  An existing OpenNVR configuration (.env) was found." White
+        Write-Color "    1) Start with the current configuration" Gray
+        Write-Color "    2) Reconfigure (change settings / example), then start" Gray
+        Write-Color "    3) Quit" Gray
+        Write-Color ""
+        $choice = Read-Host "  Your choice [1]"
+        if ([string]::IsNullOrWhiteSpace($choice)) { $choice = "1" }
+        switch ($choice) {
+            "1" { Invoke-Up }
+            "2" { & $installer reconfigure; exit $LASTEXITCODE }
+            "3" { Write-Color "  Nothing started." Gray; exit 0 }
+            default { Write-Color "  Invalid choice: $choice" Red; exit 1 }
+        }
+    } else {
+        Invoke-Up
+    }
+}
+
 # ── Run command ────────────────────────────────────────────
 switch ($Command) {
 
-    "install" {
-        $installScript = Join-Path $PSScriptRoot "scripts\install.ps1"
-        & $installScript
-    }
+    "start" { Invoke-Start }
 
-    "up" {
-        if (-not (Test-Path ".env")) {
-            Write-Color "  No .env found — launching installer..." Yellow
-            Write-Color ""
-            $installScript = Join-Path $PSScriptRoot "scripts\install.ps1"
-            & $installScript
-            exit $LASTEXITCODE
-        }
-        Show-Banner
-        $ok = Invoke-Validate
-        if (-not $ok) { exit 1 }
-        $ca = Get-ComposeArgs
-        Write-Color "  Starting all services ..." Green
-        docker compose @ca up -d
-        Write-Color ""
-        $u = Get-EnvVar "DEFAULT_ADMIN_USERNAME"
-        Write-Color "  ✓ OpenNVR is running!" Green
-        Write-Color "  Web UI   → http://localhost:8000  (login: $u)" Cyan
-        Write-Color "  API Docs → http://localhost:8000/docs" Cyan
-        Write-Color "  First-time setup page opens automatically on first visit." DarkGray
-        Show-FirstTimeSetupToken -ComposeArgs $ca
-    }
+    "install"     { & (Join-Path $PSScriptRoot "scripts\install.ps1") reconfigure; exit $LASTEXITCODE }
+    "reconfigure" { & (Join-Path $PSScriptRoot "scripts\install.ps1") reconfigure; exit $LASTEXITCODE }
 
-    "build" {
-        if (-not (Test-Path ".env")) {
-            Write-Color "  No .env found — launching installer..." Yellow
-            Write-Color ""
-            $installScript = Join-Path $PSScriptRoot "scripts\install.ps1"
-            & $installScript
-            exit $LASTEXITCODE
-        }
-        Show-Banner
-        $ok = Invoke-Validate
-        if (-not $ok) { exit 1 }
-        $ca = Get-ComposeArgs
-        Write-Color "  Building images and starting all services ..." Green
-        docker compose @ca build
-        docker compose @ca up -d
-        Write-Color ""
-        $u = Get-EnvVar "DEFAULT_ADMIN_USERNAME"
-        Write-Color "  ✓ OpenNVR is running!" Green
-        Write-Color "  Web UI   → http://localhost:8000  (login: $u)" Cyan
-        Write-Color "  API Docs → http://localhost:8000/docs" Cyan
-        Write-Color "  First-time setup page opens automatically on first visit." DarkGray
-        Show-FirstTimeSetupToken -ComposeArgs $ca
-    }
+    "up"    { Invoke-Up }
+    "build" { Invoke-Build }
 
     "down" {
         Show-Banner
@@ -377,9 +431,16 @@ switch ($Command) {
         Invoke-Validate | Out-Null
     }
 
+    "token" {
+        # Re-surface the first-time setup token on demand. Mints nothing — just
+        # reads what opennvr-core already printed. Says so if setup is complete.
+        $ca = if (Test-Path ".env") { Get-ComposeArgs } else { @("-f", $ComposeFile) }
+        Show-FirstTimeSetupToken -ComposeArgs $ca
+    }
+
     default {
         Write-Color "Unknown command: $Command" Red
-        Write-Color "Usage: .\start.ps1 [up|build|down|logs|status|validate|install]"
+        Write-Color "Usage: .\start.ps1 [start|up|build|down|logs|status|validate|token|install|reconfigure]"
         exit 1
     }
 }

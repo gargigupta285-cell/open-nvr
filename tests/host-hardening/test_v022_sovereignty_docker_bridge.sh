@@ -6,7 +6,7 @@
 # CONTEXT
 # -------
 # Operator hit ``RuntimeError: V-022: AI_SOVEREIGNTY=local_only
-# requires every adapter URL to be loopback`` on a tier0 deploy
+# requires every adapter URL to be loopback`` on a standard deploy
 # because the registry has ``ADAPTER_URL=http://yolov8-adapter:9002``
 # (Docker service DNS) which the validator's loopback-only check
 # rejected.
@@ -138,7 +138,7 @@ if echo "$result" | grep -q "^ok"; then
 else
     fail "${result}
 V-022 host check must accept bridge URLs and reject peer hosts. See
-ISSUE-28 — the check was previously loopback-only which broke tier0."
+ISSUE-28 — the check was previously loopback-only which broke standard."
 fi
 
 # ── 3. the user-facing error message names the bridge subnet ─
@@ -150,18 +150,18 @@ if grep -q "Docker bridge subnet" "${REPO_ROOT}/kai-c/main.py"; then
     pass
 else
     fail "kai-c/main.py's V-022 error must reference the Docker bridge subnet
-so operators know what URLs are accepted in tier0 mode."
+so operators know what URLs are accepted in standard mode."
 fi
 
 # ── 4. AdapterRegistry's default URL is sovereignty-compatible ──
-# tier0.yml ships ADAPTER_URL=http://yolov8-adapter:9002 which must
+# docker-compose.yml ships ADAPTER_URL=http://yolov8-adapter:9002 which must
 # pass the bridge check. Verify the compose value would survive the
 # validator's parse step.
-start_test "tier0.yml's default ADAPTER_URL is sovereignty-local"
+start_test "docker-compose.yml's default ADAPTER_URL is sovereignty-local"
 adapter_url=$(python3 - "${REPO_ROOT}" <<'PY'
 import sys, yaml
 from pathlib import Path
-c = yaml.safe_load((Path(sys.argv[1]) / "docker-compose.tier0.yml").read_text())
+c = yaml.safe_load((Path(sys.argv[1]) / "docker-compose.yml").read_text())
 env = c["services"]["opennvr-core"].get("environment", []) or []
 for entry in env:
     if isinstance(entry, str) and entry.startswith("ADAPTER_URL="):
@@ -174,7 +174,7 @@ case "$adapter_url" in
         pass
         ;;
     *)
-        fail "tier0.yml ships ADAPTER_URL='${adapter_url}' — must be a
+        fail "docker-compose.yml ships ADAPTER_URL='${adapter_url}' — must be a
 sovereignty-local URL (Docker service DNS, loopback, or bridge IP)."
         ;;
 esac

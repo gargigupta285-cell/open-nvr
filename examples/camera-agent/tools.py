@@ -44,7 +44,7 @@ def build_tool_definitions(
 
     ``enabled`` optionally restricts the exposed tools by name. Fewer
     tools mean a shorter prompt (faster CPU prefill) AND fewer wrong-tool
-    picks by small models — so the Tier-0 demo advertises only the tools
+    picks by small models — so the standard demo advertises only the tools
     that actually work (object detection + scene description), instead of
     face recognition / footage search whose adapters aren't registered.
     """
@@ -276,7 +276,7 @@ class CameraTools:
             if caption:
                 return f"{camera_id}: {caption}"
         except Exception:
-            # No caption adapter registered (e.g. the Tier-0 stack ships
+            # No caption adapter registered (e.g. the standard stack ships
             # only the object detector). Fall back to describing the scene
             # from detected objects so the user still gets a useful answer
             # instead of an error.

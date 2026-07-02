@@ -13,15 +13,32 @@ Five minutes from `git clone` to YOLOv8 detection running on your camera feed, u
 - A camera with **ONVIF or RTSP** support. Most modern IP cameras
   qualify. Phone webcams via apps like IP Webcam also work for testing.
 
-## Tier 0 — NVR + YOLOv8
+## standard stack — NVR + YOLOv8
+
+**One command:**
 
 ```bash
 git clone https://github.com/open-nvr/open-nvr.git
 cd open-nvr
+./start.sh            # Windows: start.ps1
+```
+
+On a fresh checkout `./start.sh` creates `.env`, generates all secrets, walks you
+through a few settings (Enter accepts the local defaults), optionally sets up an
+example (pick **Camera Agent** to bring up core + agent together), then builds and
+starts the stack and prints the first-time setup token. Run it again later to
+**start as-is** or **reconfigure**; `./start.sh up` starts without prompting.
+
+<details>
+<summary>Prefer to drive Compose by hand?</summary>
+
+```bash
 cp .env.example .env
 ./scripts/generate-secrets.sh --write          # Windows: .\scripts\generate-secrets.ps1 -Write
-docker compose -f docker-compose.tier0.yml up -d
+docker compose -f docker-compose.yml up -d
 ```
+
+</details>
 
 The generate-secrets script writes cryptographically random values into
 `.env` for the four secrets the core validates at boot (`SECRET_KEY`,
@@ -35,7 +52,7 @@ than the minimum length.
 On first start the core prints a **setup token** to its log. Grab it:
 
 ```bash
-docker compose -f docker-compose.tier0.yml logs opennvr-core | grep -i 'setup token'
+docker compose -f docker-compose.yml logs opennvr-core | grep -i 'setup token'
 ```
 
 Open <http://localhost:8000>, paste the token on the setup screen, choose
@@ -45,7 +62,7 @@ subsequent restarts skip the setup flow because an admin already exists.
 ### What you should see
 
 ```bash
-docker compose -f docker-compose.tier0.yml ps
+docker compose -f docker-compose.yml ps
 ```
 
 ```
@@ -76,18 +93,18 @@ exchange transparently when you open a stream from the web UI.
 
 ## Adding the camera-agent voice overlay
 
-Once Tier 0 is running, the camera-agent overlay layers Whisper STT,
+Once standard stack is running, the camera-agent overlay layers Whisper STT,
 Piper TTS, and an Ollama-hosted LLM on top so you can talk to your
 cameras.
 
 ```bash
 # Pull the LLM model the agent uses (~2 GB, one-time)
-docker compose -f docker-compose.tier0.yml \
+docker compose -f docker-compose.yml \
                -f docker-compose.camera-agent.yml \
                --profile camera-agent run --rm ollama-model-pull
 
 # Bring up the overlay
-docker compose -f docker-compose.tier0.yml \
+docker compose -f docker-compose.yml \
                -f docker-compose.camera-agent.yml \
                --profile camera-agent up -d
 ```
@@ -100,18 +117,18 @@ frame, runs YOLOv8 + BLIP via tool calls, and speaks the answer back.
 
 ```bash
 # Stop everything
-docker compose -f docker-compose.tier0.yml down
+docker compose -f docker-compose.yml down
 
 # Tail logs (all services, or a specific one)
-docker compose -f docker-compose.tier0.yml logs -f
-docker compose -f docker-compose.tier0.yml logs -f opennvr-core
+docker compose -f docker-compose.yml logs -f
+docker compose -f docker-compose.yml logs -f opennvr-core
 
 # Refresh to the latest published images
-docker compose -f docker-compose.tier0.yml pull
-docker compose -f docker-compose.tier0.yml up -d
+docker compose -f docker-compose.yml pull
+docker compose -f docker-compose.yml up -d
 
 # Restart a single service after editing .env
-docker compose -f docker-compose.tier0.yml restart opennvr-core
+docker compose -f docker-compose.yml restart opennvr-core
 ```
 
 ## Customisation
@@ -133,11 +150,11 @@ RECORDINGS_PATH=/Users/Shared/opennvr-recordings
 RECORDINGS_PATH=D:/opennvr-recordings
 ```
 
-Then `docker compose -f docker-compose.tier0.yml up -d` to remount.
+Then `docker compose -f docker-compose.yml up -d` to remount.
 
 ### Use a different YOLOv8 model
 
-The default is `yolov8n` (nano, ~6 MB). Because Ultralytics retired the pre-built ONNX from its public URLs, the Tier 0 init container downloads the official `yolov8n.pt` checkpoint and exports it to ONNX with `ultralytics` on first boot — one-time, takes 1–3 min on x86 and 10–15 min on a Raspberry Pi 5, cached on the `opennvr_yolov8_weights` volume thereafter.
+The default is `yolov8n` (nano, ~6 MB). Because Ultralytics retired the pre-built ONNX from its public URLs, the standard stack init container downloads the official `yolov8n.pt` checkpoint and exports it to ONNX with `ultralytics` on first boot — one-time, takes 1–3 min on x86 and 10–15 min on a Raspberry Pi 5, cached on the `opennvr_yolov8_weights` volume thereafter.
 
 If you have a fine-tuned model or a private mirror that already serves a pre-built ONNX, point `YOLOV8_WEIGHTS_URL` at it in `.env`; the init container skips the `.pt` → ONNX export entirely:
 
@@ -150,9 +167,9 @@ To pin a different upstream checkpoint instead, override `YOLOV8_PT_URL` (any `y
 Wipe the cached weights volume to force a re-download/re-export after changing either:
 
 ```bash
-docker compose -f docker-compose.tier0.yml down
+docker compose -f docker-compose.yml down
 docker volume rm open-nvr_opennvr_yolov8_weights
-docker compose -f docker-compose.tier0.yml up -d
+docker compose -f docker-compose.yml up -d
 ```
 
 ### Change the admin password
@@ -179,14 +196,14 @@ You skipped the `generate-secrets.sh` step or `.env` still has the
 
 ```bash
 ./scripts/generate-secrets.sh --write
-docker compose -f docker-compose.tier0.yml up -d
+docker compose -f docker-compose.yml up -d
 ```
 
 ### Port already in use
 
 Another service is listening on 8000, 8888, 8889, or 5432. Find and
 stop it, or override the host-side port in
-`docker-compose.tier0.yml` (change `"127.0.0.1:8000:8000"` to
+`docker-compose.yml` (change `"127.0.0.1:8000:8000"` to
 `"127.0.0.1:8080:8000"` for example).
 
 ### YOLOv8 adapter never goes healthy
@@ -194,7 +211,7 @@ stop it, or override the host-side port in
 Check the init container's logs:
 
 ```bash
-docker compose -f docker-compose.tier0.yml logs yolov8-weights-init
+docker compose -f docker-compose.yml logs yolov8-weights-init
 ```
 
 The init container downloads `yolov8n.pt` (with retries) and exports it to ONNX via `ultralytics`. Failure modes worth checking: a network blocked from reaching `github.com/ultralytics/assets/releases/...` (set `YOLOV8_PT_URL` to your own mirror); pip can't install `ultralytics` (offline or proxied environment — same fix, host the wheels on a private index, or set `YOLOV8_WEIGHTS_URL` to a pre-built ONNX you already have). The container retries transient errors five times with backoff before failing.
@@ -204,8 +221,8 @@ The init container downloads `yolov8n.pt` (with retries) and exports it to ONNX 
 Check the inference event bus:
 
 ```bash
-docker compose -f docker-compose.tier0.yml logs nats
-docker compose -f docker-compose.tier0.yml logs opennvr-core | grep -i kai_c
+docker compose -f docker-compose.yml logs nats
+docker compose -f docker-compose.yml logs opennvr-core | grep -i kai_c
 ```
 
 KAI-C polls the YOLOv8 adapter on a per-camera schedule; if the schedule
@@ -224,16 +241,16 @@ aggressively. Configure retention in the web UI's per-camera settings.
 
 ## Production deployment
 
-Tier 0 is intended for the demo + homelab use case. For an internet-
+standard stack is intended for the demo + homelab use case. For an internet-
 facing deployment you'll want:
 
 1. **Front the service with a real reverse proxy.** Caddy, Traefik, or
    nginx with a real TLS certificate. Don't expose 127.0.0.1:8000
    directly.
-2. **Use host-mode networking on Linux.** ONVIF camera discovery uses
-   UDP multicast, which doesn't traverse Docker's bridge driver. See
-   [`docker-compose.linux.yml`](docker-compose.linux.yml).
-3. **Restrict the MediaMTX listeners.** The Tier 0 compose binds them
+2. **Keep Docker bridge networking enabled.** Discover cameras through
+   explicit IPs or operator-approved unicast subnet scanning; do not expose
+   the application stack through host networking.
+3. **Restrict the MediaMTX listeners.** The standard stack compose binds them
    to 127.0.0.1; expose only via your reverse proxy with auth.
 4. **Back up the database.** The `opennvr_db_data` volume holds your
    camera list, user accounts, and audit log.
@@ -248,7 +265,7 @@ Full production hardening checklist in
 1. **Add a camera.** Web UI → Cameras → Add. ONVIF discovery is the
    easiest route; RTSP URL works if ONVIF isn't supported.
 2. **Configure AI detection.** Web UI → AI Models. YOLOv8 is enabled by
-   default in Tier 0; toggle per-camera as needed.
+   default in standard stack; toggle per-camera as needed.
 3. **Configure retention.** Web UI → Cameras → per-camera recording
    settings. Default is 7 days.
 4. **Browse the API.** <http://localhost:8000/docs> — every endpoint is

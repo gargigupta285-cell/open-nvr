@@ -39,7 +39,7 @@ Then pick the path that matches what you're doing:
 
 ### Fast iteration (Docker)
 
-Best for testing your changes end-to-end against the same stack the Tier 0
+Best for testing your changes end-to-end against the same stack the standard stack
 install runs on. Slower per-iteration than the bare-metal path below because
 every change rebuilds an image.
 

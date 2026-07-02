@@ -13,7 +13,7 @@ not pulled — only the adapters/runtimes below are pulled.
 
 | Image | Profile(s) | Source |
 |-------|-----------|--------|
-| `ghcr.io/open-nvr/core` (+ mediamtx, nats, postgres, nginx, `yolov8-adapter`, `yolov8-weights`) | both (Tier 0) | published |
+| `ghcr.io/open-nvr/core` (+ mediamtx, nats, postgres, nginx, `yolov8-adapter`, `yolov8-weights`) | both (standard stack) | published |
 | `ghcr.io/open-nvr/blip-adapter` (default caption) | `camera-agent`, `camera-agent-chat` | published |
 | `ollama/ollama:0.21.2` | `camera-agent`, `camera-agent-chat` | upstream |
 | `ghcr.io/open-nvr/whisper-adapter` | `camera-agent` (voice only) | published |

@@ -19,7 +19,7 @@ set -u
 require_python_yaml
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-COMPOSE_TIER0="${REPO_ROOT}/docker-compose.tier0.yml"
+COMPOSE_STANDARD="${REPO_ROOT}/docker-compose.yml"
 START_SH="${REPO_ROOT}/start.sh"
 
 TMPDIR="$(mktemp -d)"
@@ -36,7 +36,7 @@ get_init_command() {
     local service="$1"
     python3 - <<PY
 import yaml
-c = yaml.safe_load(open("${COMPOSE_TIER0}"))
+c = yaml.safe_load(open("${COMPOSE_STANDARD}"))
 cmd = c["services"]["${service}"]["command"]
 # command may be a list ["sh","-c",SCRIPT] — take the SCRIPT.
 if isinstance(cmd, list) and len(cmd) >= 3:
@@ -66,7 +66,7 @@ for svc in nginx-certs-init mediamtx-certs-init; do
     start_test "${svc} declares OPENNVR_HOST_IP in environment"
     result=$(python3 - <<PY
 import yaml
-c = yaml.safe_load(open("${COMPOSE_TIER0}"))
+c = yaml.safe_load(open("${COMPOSE_STANDARD}"))
 env = c["services"]["${svc}"].get("environment", [])
 print(any("OPENNVR_HOST_IP" in str(e) for e in env))
 PY

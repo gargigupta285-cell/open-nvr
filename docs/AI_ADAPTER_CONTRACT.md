@@ -1210,7 +1210,7 @@ Seven adapters ship in v0.1, all conforming to this contract and pulled from `gh
 
 | Adapter | Body shape | Tasks advertised | Notes |
 |---|---|---|---|
-| YOLOv8 | IMAGE | object_detection | ONNX runtime, CPU + GPU. The most-used adapter; Tier 0 install enables it by default. |
+| YOLOv8 | IMAGE | object_detection | ONNX runtime, CPU + GPU. The most-used adapter; standard stack install enables it by default. |
 | InsightFace | IMAGE | face_detection, face_recognition | REST-based face DB (no shared-volume coupling). |
 | Whisper | AUDIO | speech_to_text | `faster-whisper` runtime, CPU + GPU. |
 | Piper | AUDIO | text_to_speech | Inline-audio response option for low-latency loops. |

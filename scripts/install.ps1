@@ -1,509 +1,269 @@
-﻿# ============================================================
-# OpenNVR - Interactive Installation Wizard (Windows)
-# ============================================================
-# Called automatically by start.ps1 on first run.
-# Can also be re-run manually: .\scripts\install.ps1
-# ============================================================
-
-param()
-
-$ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ProjectRoot = Split-Path -Parent $ScriptDir
+﻿# OpenNVR interactive installer for Windows (also detects PowerShell on Linux/macOS).
+# Mode: 'install' (fresh; fill missing, keep existing) or 'reconfigure'
+# (re-prompt values with the current value as default).
+param([string]$Mode = 'install')
+$ErrorActionPreference = 'Stop'
+$ProjectRoot = Split-Path -Parent $PSScriptRoot
+$BaseCompose = 'docker-compose.yml'
 Set-Location $ProjectRoot
 
-$ComposeFile = "docker-compose.yml"
-
-# ── Collected settings ─────────────────────────────────────
-$DeployMode    = "quick"
-$RecordingsPath = ""
-$AiEnabled     = $false
-$AiRepoUrl     = "https://github.com/open-nvr/ai-adapter.git"
-$AdminUsername  = "admin"
-$AdminEmail     = "admin@opennvr.local"
-$PostgresPassword          = ""
-$SecretKey                 = ""
-$CredentialEncryptionKey   = ""
-$InternalApiKey            = ""
-$MediamtxSecret            = ""
-
-# ── Colour helpers ─────────────────────────────────────────
-function WC($Text, $Color = "White") { Write-Host $Text -ForegroundColor $Color }
-function WCN($Text, $Color = "White") { Write-Host $Text -ForegroundColor $Color -NoNewline }
-
-function OK($msg)   { WC "  $([char]0x2713)  $msg" Green  }
-function WARN($msg) { WC "  $([char]0x26A0)  $msg" Yellow }
-function FAIL($msg) { WC "  $([char]0x2717)  $msg" Red    }
-function INFO($msg) { WC "  $([char]0x00B7)  $msg" DarkGray }
-function STEP($msg) { WC "  $([char]0x2192)  $msg" Cyan   }
-
-# ── Logo ───────────────────────────────────────────────────
+function Info([string]$Message) { Write-Host "  $Message" }
+function Ok([string]$Message) { Write-Host "  ✓ $Message" -ForegroundColor Green }
+function Warn([string]$Message) { Write-Host "  ⚠ $Message" -ForegroundColor Yellow }
+function Fail([string]$Message) { Write-Host "  X $Message" -ForegroundColor Red; exit 1 }
 function Show-Logo {
-    Clear-Host
-    WC ""
-    WCN "  ██████╗ ██████╗ ███████╗███╗   ██╗" White
-    WC " ███╗   ██╗██╗   ██╗██████╗ " DarkBlue
-    WCN " ██╔═══██╗██╔══██╗██╔════╝████╗  ██║" White
-    WC " ████╗  ██║██║   ██║██╔══██╗" DarkBlue
-    WCN " ██║   ██║██████╔╝█████╗  ██╔██╗ ██║" White
-    WC " ██╔██╗ ██║██║   ██║██████╔╝" DarkBlue
-    WCN " ██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║" White
-    WC " ██║╚██╗██║╚██╗ ██╔╝██╔══██╗" DarkBlue
-    WCN " ╚██████╔╝██║     ███████╗██║ ╚████║" White
-    WC " ██║ ╚████║ ╚████╔╝ ██║  ██║" DarkBlue
-    WCN "  ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝" White
-    WC " ╚═╝  ╚═══╝  ╚═══╝  ╚═╝  ╚═╝" DarkBlue
-    WC ""
-    WC "  Open Source Network Video Recorder" White
-    WC "  Self-Hosted  ·  AI-Ready  ·  Privacy-First" DarkGray
-    WC ""
-    WC "  $('━' * 52)" DarkGray
-    WC "    Installation Wizard" DarkYellow
-    WC "  $('━' * 52)" DarkGray
-    WC ""
+    $c = 'Cyan'
+    Write-Host ''
+    Write-Host '   ___                   _   ___     ______ ' -ForegroundColor $c
+    Write-Host '  / _ \ _ __   ___ _ __ | \ | \ \   / /  _ \' -ForegroundColor $c
+    Write-Host " | | | | '_ \ / _ \ '_ \|  \| |\ \ / /| |_) |" -ForegroundColor $c
+    Write-Host ' | |_| | |_) |  __/ | | | |\  | \ V / |  _ < ' -ForegroundColor $c
+    Write-Host '  \___/| .__/ \___|_| |_|_| \_|  \_/  |_| \_\' -ForegroundColor $c
+    Write-Host '       |_|                                   ' -ForegroundColor $c
+    Write-Host '  Self-hosted NVR — the cameras are yours.' -ForegroundColor DarkGray
+    Write-Host ''
+}
+function Ask-YesNo([string]$Prompt, [bool]$Default = $false) {
+    $hint = if ($Default) { 'Y/n' } else { 'y/N' }
+    $answer = Read-Host "  $Prompt [$hint]"
+    if ([string]::IsNullOrWhiteSpace($answer)) { return $Default }
+    return $answer -match '^[Yy]'
+}
+function Ask-Value([string]$Prompt, [string]$Default) {
+    $answer = Read-Host "  $Prompt [$Default]"
+    if ([string]::IsNullOrWhiteSpace($answer)) { return $Default }
+    return $answer
+}
+function Ask-Secret([string]$Prompt) {
+    $secure = Read-Host "  $Prompt" -AsSecureString
+    $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
+    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+}
+function Explain([string]$What, [string]$Required, [string]$Default, [string]$Where = '') {
+    Write-Host "  $What"
+    Write-Host ("    required: {0,-4}  default: {1}" -f $Required, $Default)
+    if ($Where) { Write-Host "    note: $Where" }
+}
+# Curated, ALWAYS-prompted value with an explanation. Enter keeps the current
+# .env value (or the given default on a fresh install); typing overrides it.
+function Configure-Value([string]$Key, [string]$Label, [string]$Default, [string]$What, [string]$Required, [string]$Where = '') {
+    $current = Get-EnvValue $Key
+    if (-not [string]::IsNullOrWhiteSpace($current)) { $Default = $current }
+    Write-Host ''
+    Explain $What $Required $Default $Where
+    Set-EnvValue $Key (Ask-Value $Label $Default)
 }
 
-# ── Section header ─────────────────────────────────────────
-function Section($title) {
-    WC ""
-    WC "  ◈  $title" Cyan
-    WC "  $('─' * 50)" DarkGray
-    WC ""
+function Detect-Platform {
+    if ($IsLinux) { $script:Platform = 'Linux'; $script:DefaultRecordings = '/var/lib/opennvr/recordings' }
+    elseif ($IsMacOS) { $script:Platform = 'macOS'; $script:DefaultRecordings = '/Users/Shared/opennvr-recordings' }
+    else { $script:Platform = 'Windows'; $script:DefaultRecordings = 'C:/opennvr/recordings' }
+    Ok "Detected $script:Platform (Docker bridge mode)"
 }
-
-# ── Prompt helpers ─────────────────────────────────────────
-function Ask($prompt, $default) {
-    WCN "  ?  " Yellow
-    WCN "$prompt " White
-    WCN "[$default]" DarkGray
-    WCN ": " White
-    $val = Read-Host
-    if ([string]::IsNullOrWhiteSpace($val)) { return $default }
-    return $val
-}
-
-function AskYN($prompt, $default = "n") {
-    $hint = if ($default -eq "y") { "Y/n" } else { "y/N" }
-    WCN "  ?  " Yellow
-    WCN "$prompt " White
-    WCN "[$hint]" DarkGray
-    WCN ": " White
-    $val = Read-Host
-    $val = if ([string]::IsNullOrWhiteSpace($val)) { $default } else { $val }
-    return $val -match '^[Yy]'
-}
-
-function AskSecret($prompt) {
-    WCN "  ?  " Yellow
-    WCN "$prompt" White
-    WCN ": " White
-    $ss = Read-Host -AsSecureString
-    return [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-        [Runtime.InteropServices.Marshal]::SecureStringToBSTR($ss))
-}
-
-function AskChoice($prompt, $default = "1") {
-    WCN "  ?  " Yellow
-    WCN "$prompt " White
-    WCN "[$default]" DarkGray
-    WCN ": " White
-    $val = Read-Host
-    if ([string]::IsNullOrWhiteSpace($val)) { return $default }
-    return $val
-}
-
-# ── Random string generator ────────────────────────────────
-function New-RandString([int]$Len = 32, [switch]$Hex) {
-    $bytes = New-Object byte[] $(if ($Hex) { [int]($Len / 2) } else { $Len + 8 })
-    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
-    if ($Hex) { return ($bytes | ForEach-Object { $_.ToString('x2') }) -join '' }
-    $encoded = [Convert]::ToBase64String($bytes)
-    return $encoded.Replace('+','').Replace('/','').Replace('=','').Substring(0, $Len)
-}
-
-# ── STEP 1: Prerequisites ──────────────────────────────────
-function Check-Prereqs {
-    Section "Checking prerequisites"
-
-    INFO "Platform: Windows (bridge network mode)"
-    INFO "Compose file: $ComposeFile"
-    WC ""
-
-    $errors = 0
-
-    $dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
-    if (-not $dockerCmd) {
-        FAIL "Docker is not installed"
-        STEP "Install from: https://docs.docker.com/desktop/install/windows-install/"
-        $errors++
-    } else {
-        $ver = (docker --version 2>&1) -replace 'Docker version ',''
-        OK "Docker $ver"
+function Check-Prerequisites {
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        Fail 'Docker is not installed. Install Docker Desktop, then re-run.'
     }
+    # Native commands (docker) write to stderr when the daemon is down. Under
+    # $ErrorActionPreference='Stop' that stderr becomes a NativeCommandError
+    # that prints an ugly stack trace and aborts before our friendly message.
+    # Silence the policy + stderr around the probes and judge by exit code only.
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    docker compose version 2>$null | Out-Null; $composeOk = ($LASTEXITCODE -eq 0)
+    docker info 2>$null | Out-Null;            $dockerOk  = ($LASTEXITCODE -eq 0)
+    $ErrorActionPreference = $prevEAP
+    if (-not $composeOk) { Fail 'Docker Compose v2 is required. Update Docker Desktop and re-run.' }
+    if (-not $dockerOk)  { Fail 'Docker is not running. Start Docker Desktop, wait until it is ready, then re-run.' }
+    if (-not (Test-Path $BaseCompose)) { Fail "$BaseCompose was not found in $ProjectRoot" }
+}
 
-    if ($dockerCmd) {
-        $null = docker info 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            FAIL "Docker Desktop is not running"
-            STEP "Open Docker Desktop and wait for it to start"
-            $errors++
-        } else {
-            OK "Docker daemon is running"
+# CRITICAL: read AND write .env with the SAME explicit encoding (UTF-8, no BOM).
+# Windows PowerShell 5.1's Get-Content defaults to ANSI (Windows-1252) while we
+# write UTF-8 — so any non-ASCII byte in the file (an em-dash in a comment, an
+# accented value) is re-decoded wrong and re-encoded larger on every rewrite.
+# Across the ~13 Set-EnvValue calls per install that compounds into a multi-MB
+# .env of mojibake. Pinning both sides to UTF-8 makes the round trip byte-stable.
+$script:Utf8NoBom = New-Object Text.UTF8Encoding($false)
+function Read-EnvLines {
+    $p = Join-Path $ProjectRoot '.env'
+    if (-not (Test-Path $p)) { return @() }
+    return [IO.File]::ReadAllLines($p, $script:Utf8NoBom)
+}
+function Get-EnvValue([string]$Key) {
+    $line = Read-EnvLines | Where-Object { $_ -match ('^' + [regex]::Escape($Key) + '=') } | Select-Object -Last 1
+    if (-not $line) { return '' }
+    $value = ($line -split '=', 2)[1] -replace '\s+#.*$', ''
+    return $value.Trim().Trim('"').Trim("'")
+}
+function Set-EnvValue([string]$Key, [string]$Value) {
+    $lines = [Collections.Generic.List[string]](Read-EnvLines)
+    $pattern = '^' + [regex]::Escape($Key) + '='
+    $output = [Collections.Generic.List[string]]::new(); $written = $false
+    foreach ($line in $lines) {
+        if ($line -match $pattern) {
+            if (-not $written) { $output.Add("$Key=$Value"); $written = $true }
+        } else { $output.Add($line) }
+    }
+    if (-not $written) { $output.Add(''); $output.Add("$Key=$Value") }
+    [IO.File]::WriteAllLines((Join-Path $ProjectRoot '.env'), $output, $script:Utf8NoBom)
+}
+function Test-MissingOrPlaceholder([string]$Value) {
+    return [string]::IsNullOrWhiteSpace($Value) -or $Value -match '^(dev_|insecure_|change_me|your_|changeme|placeholder|dummy|CKLghtP4rWz8J9vN2xQ5mT7yU8kF6bD3eH1aG4cS0wE=)'
+}
+function New-RandomBytes([int]$Count) { $b = New-Object byte[] $Count; $rng = [Security.Cryptography.RandomNumberGenerator]::Create(); try { $rng.GetBytes($b) } finally { $rng.Dispose() }; return $b }
+function New-Hex([int]$Bytes) { return ((New-RandomBytes $Bytes) | ForEach-Object { $_.ToString('x2') }) -join '' }
+function New-Password { return [Convert]::ToBase64String((New-RandomBytes 36)).Replace('+','').Replace('/','').Replace('=','').Substring(0,32) }
+function New-FernetKey { return [Convert]::ToBase64String((New-RandomBytes 32)).Replace('+','-').Replace('/','_') }
+function Ensure-PlainValue([string]$Key, [string]$Label, [string]$Default) {
+    $current = Get-EnvValue $Key
+    if (-not [string]::IsNullOrWhiteSpace($current)) {
+        # Fresh install: keep existing, don't nag. Reconfigure: offer current as default.
+        if ($script:Mode -ne 'reconfigure') { return }
+        $Default = $current
+    }
+    Set-EnvValue $Key (Ask-Value $Label $Default)
+}
+function Ensure-SecretValue([string]$Key, [string]$Label, [string]$Generated) {
+    $current = Get-EnvValue $Key
+    if (-not (Test-MissingOrPlaceholder $current)) { Ok "$Label already configured"; return }
+    if (Ask-YesNo "$Label is missing or insecure. Use a newly generated value?" $true) { $value = $Generated }
+    else { $value = Ask-Secret "Enter $Label"; if ([string]::IsNullOrWhiteSpace($value)) { Fail "$Label cannot be empty" } }
+    Set-EnvValue $Key $value; Ok "$Label configured"
+}
+function Prepare-Environment {
+    if (-not (Test-Path '.env')) {
+        if (-not (Test-Path '.env.example')) { Fail '.env.example is missing' }
+        Copy-Item '.env.example' '.env'; Ok 'Created .env from .env.example'
+    } else { Ok 'Using existing .env; secrets are preserved, and you can update values below' }
+
+    # Secrets — generated automatically; prompted only if still a placeholder.
+    Ensure-SecretValue POSTGRES_PASSWORD 'PostgreSQL password' (New-Password)
+    Ensure-SecretValue SECRET_KEY 'JWT signing key' (New-Hex 32)
+    Ensure-SecretValue CREDENTIAL_ENCRYPTION_KEY 'credential encryption key' (New-FernetKey)
+    Ensure-SecretValue INTERNAL_API_KEY 'internal API key' (New-Password)
+    Ensure-SecretValue MEDIAMTX_SECRET 'MediaMTX webhook secret' (New-Hex 32)
+
+    # Rarely-changed identifiers — filled only if missing.
+    Ensure-PlainValue POSTGRES_USER 'PostgreSQL user' 'opennvr_user'
+    Ensure-PlainValue POSTGRES_DB 'PostgreSQL database' 'opennvr_db'
+
+    # Curated, explained settings. Enter keeps the [default]; all local.
+    Write-Host ''
+    Write-Host '  -- Basic settings -------------------------------------'
+    Configure-Value DEFAULT_ADMIN_USERNAME 'Administrator username' 'admin' `
+        'Login name for the first OpenNVR admin account.' 'yes' `
+        'You pick this yourself - no external account involved.'
+    Configure-Value DEFAULT_ADMIN_EMAIL 'Administrator email' 'admin@opennvr.local' `
+        'Contact email tied to the admin account.' 'yes' `
+        'Any address works; the placeholder is fine for an offline setup.'
+    Configure-Value RECORDINGS_PATH 'Recordings folder on this machine' $script:DefaultRecordings `
+        'Host directory where recorded video segments are written.' 'yes' `
+        'Created automatically if it does not exist yet.'
+
+    $recordings = Get-EnvValue RECORDINGS_PATH
+    if (-not (Test-Path $recordings)) { try { New-Item -ItemType Directory -Force -Path $recordings | Out-Null } catch { Warn 'Could not create recordings directory; Docker will try' } }
+}
+
+function Find-ExampleCompose([string]$Name) {
+    $candidates = @("docker-compose.$Name.yml", "docker-compose.$Name.yaml", "examples/$Name/docker-compose.yml", "examples/$Name/docker-compose.yaml", "examples/$Name/compose.yml", "examples/$Name/compose.yaml")
+    foreach ($candidate in $candidates) { if (Test-Path $candidate) { return $candidate } }
+    return $null
+}
+function Prompt-OverlayDefaults([string]$File) {
+    $text = [IO.File]::ReadAllText((Resolve-Path $File))
+    $seen = @{}
+    foreach ($match in [regex]::Matches($text, '\$\{([A-Z][A-Z0-9_]*):-([^}]+)\}')) {
+        $key = $match.Groups[1].Value; $default = $match.Groups[2].Value
+        if ($seen[$key]) { continue }; $seen[$key] = $true
+        if ([string]::IsNullOrWhiteSpace((Get-EnvValue $key))) { Set-EnvValue $key (Ask-Value $key $default) }
+    }
+}
+function Choose-Example {
+    $script:ExampleName = ''; $script:ExampleCompose = ''; $script:ExampleProfile = ''
+    Set-EnvValue OPENNVR_EXAMPLE ''; Set-EnvValue OPENNVR_EXAMPLE_COMPOSE ''; Set-EnvValue OPENNVR_EXAMPLE_PROFILE ''
+    Write-Host ''
+    Write-Host '  -- Example app ----------------------------------------'
+    Info 'Examples add an AI app on top of the core NVR. The Camera Agent lets you'
+    Info 'ask your cameras questions out loud or by chat. Everything runs locally.'
+    if (-not (Ask-YesNo 'Set up an example app now?' $false)) { return }
+    $examples = @(Get-ChildItem 'examples' -Directory | Sort-Object Name)
+    if ($examples.Count -eq 0) { Warn 'No examples were found'; return }
+    Write-Host ''; Info 'Available examples:'
+    for ($i=0; $i -lt $examples.Count; $i++) {
+        $manifest = Find-ExampleCompose $examples[$i].Name
+        $status = if ($manifest) { "installable: $manifest" } else { 'no Compose manifest' }
+        Write-Host ('  {0,2}. {1,-30} [{2}]' -f ($i+1), $examples[$i].Name, $status)
+    }
+    Write-Host '   0. Core stack only'; Write-Host ''
+    $choiceRaw = Read-Host '  Select an example [0]'; if ([string]::IsNullOrWhiteSpace($choiceRaw)) { $choiceRaw = '0' }
+    $choice = 0; if (-not [int]::TryParse($choiceRaw, [ref]$choice)) { Fail 'Invalid selection' }
+    if ($choice -eq 0) { return }
+    if ($choice -lt 1 -or $choice -gt $examples.Count) { Fail 'Selection out of range' }
+    $name = $examples[$choice-1].Name; $manifest = Find-ExampleCompose $name
+    if (-not $manifest) { Fail "The '$name' example has no Docker Compose manifest" }
+    # $prof, not $profile — $PROFILE is an automatic PowerShell variable.
+    $prof = $name
+    if ($name -eq 'camera-agent') {
+        Write-Host ''
+        Explain 'Camera Agent runs in VOICE mode (speak, hear spoken answers) or CHAT mode (type, read answers). Voice adds Whisper speech-to-text and Piper text-to-speech; chat is lighter.' 'pick one' '1 (voice)'
+        $mode = Ask-Value 'Camera Agent mode: 1=voice, 2=chat' '1'
+        $prof = if ($mode -eq '2') { 'camera-agent-chat' } else { 'camera-agent' }
+
+        Write-Host ''
+        Write-Host '  -- Camera Agent models (all local, no API keys) -------'
+        Configure-Value OLLAMA_MODEL 'Local LLM model (Ollama)' 'qwen2.5:1.5b' `
+            'The local chat model that answers your questions; must support tool calling.' 'yes' `
+            'Pulled automatically. qwen2.5:0.5b (low RAM) | 1.5b (default) | 3b (better, slower).'
+        if ($prof -eq 'camera-agent') {
+            Configure-Value WHISPER_MODEL_SIZE 'Whisper speech-to-text model' 'base.en' `
+                'Transcribes your spoken questions (voice mode only).' 'yes' `
+                'tiny.en (fastest) | base.en (default) | small.en (most accurate).'
         }
-    }
-
-    $null = docker compose version 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        FAIL "Docker Compose v2 not found"
-        STEP "Update Docker Desktop: https://docs.docker.com/desktop/release-notes/"
-        $errors++
+        Configure-Value CAPTION_ADAPTER 'Scene-description model' 'moondream' `
+            'Describes what a camera sees. moondream answers questions (VQA); blip writes plain captions.' 'yes' `
+            'moondream | blip - both run locally.'
     } else {
-        $cv = (docker compose version 2>&1) -replace 'Docker Compose version ',''
-        OK "Docker Compose $cv"
+        Prompt-OverlayDefaults $manifest
     }
-
-    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-        WARN "Git not found — AI adapter cloning will not be available"
-    } else {
-        $gv = (git --version 2>&1)
-        OK "$gv"
-    }
-
-    if ($errors -gt 0) {
-        WC ""
-        FAIL "Fix the errors above then re-run: .\start.ps1"
-        exit 1
+    $script:ExampleName=$name; $script:ExampleCompose=$manifest; $script:ExampleProfile=$prof
+    Set-EnvValue OPENNVR_EXAMPLE $name; Set-EnvValue OPENNVR_EXAMPLE_COMPOSE $manifest; Set-EnvValue OPENNVR_EXAMPLE_PROFILE $prof
+    Ok "Selected $name ($prof)"
+    if ($name -eq 'camera-agent') {
+        Info 'The local LLM model downloads on first start - usually the slowest step.'
     }
 }
-
-# ── STEP 2: Deployment mode ────────────────────────────────
-function Ask-DeployMode {
-    Section "Deployment mode"
-    WC "  How do you want to set up OpenNVR?" White
-    WC ""
-    WC "   1  Quick start    · Dev defaults · Up in seconds" Cyan
-    WC "   2  Production     · Strong auto-generated secrets · Recommended" Cyan
-    WC ""
-    $choice = AskChoice "Choose" "1"
-    if ($choice -eq "2") {
-        $script:DeployMode = "production"
-        OK "Production mode — all secrets will be uniquely generated"
-    } else {
-        $script:DeployMode = "quick"
-        OK "Quick start mode — harden later with: .\scripts\generate-secrets.ps1 -Write"
+function Pull-AndBuild {
+    Write-Host ''
+    Info 'First-time setup downloads several container images (and, for the'
+    Info 'Camera Agent, a local LLM model of ~1 GB). Depending on your network'
+    Info 'this can take 8-15 minutes. Later starts are much faster - everything'
+    Info 'is cached, so you only pay this cost once.'
+    Write-Host ''
+    Info 'Pulling the OpenNVR core stack...'
+    docker compose -f $BaseCompose pull --ignore-buildable
+    if ($LASTEXITCODE -ne 0) { Fail 'Failed to pull the core stack' }
+    Choose-Example
+    $script:ComposeArgs = @('-f', $BaseCompose)
+    if ($script:ExampleCompose) {
+        $script:ComposeArgs += @('-f', $script:ExampleCompose, '--profile', $script:ExampleProfile)
+        Info "Pulling images for $script:ExampleName..."
+        docker compose @script:ComposeArgs pull --ignore-buildable
+        if ($LASTEXITCODE -ne 0) { Fail "Failed to pull $script:ExampleName" }
     }
+    Info 'Building services that do not publish a pre-built image...'
+    docker compose @script:ComposeArgs build
+    if ($LASTEXITCODE -ne 0) { Fail 'Docker build failed' }
 }
 
-# ── STEP 3: Recordings path ────────────────────────────────
-function Ask-RecordingsPath {
-    Section "Recording storage"
-    WC "  Where should camera recordings be stored on this machine?" White
-    WC "  This path is bind-mounted into the Docker containers." DarkGray
-    WC ""
-
-    $default = "C:\opennvr\recordings"
-    $path = Ask "Recordings path" $default
-    $script:RecordingsPath = $path -replace '\\','/'
-
-    if (-not (Test-Path $path)) {
-        try {
-            New-Item -ItemType Directory -Force -Path $path | Out-Null
-            OK "Created: $path"
-        } catch {
-            WARN "Could not create directory — Docker will attempt to create it"
-        }
-    } else {
-        OK "Directory exists: $path"
-    }
-}
-
-# ── STEP 4: AI detection ───────────────────────────────────
-function Ask-AI {
-    Section "AI-powered detection (optional)"
-    WC "  OpenNVR supports AI object detection via a separate adapter service." White
-    WC "  Requires cloning an extra repository (done automatically)." DarkGray
-    WC ""
-
-    if (AskYN "Enable AI detection?" "n") {
-        $script:AiEnabled = $true
-        WC ""
-        $script:AiRepoUrl = Ask "AI adapter repository URL" "https://github.com/open-nvr/ai-adapter.git"
-        OK "AI detection will be enabled"
-    } else {
-        $script:AiEnabled = $false
-        OK "AI detection disabled — enable later by re-running: .\scripts\install.ps1"
-    }
-}
-
-# ── STEP 5: Admin account ──────────────────────────────────
-function Ask-Admin {
-    Section "Administrator account"
-    WC "  Set a username and email for the default admin account." White
-    WC "  You will complete the full account setup (including password)" White
-    WC "  at the first-time setup page after installation." DarkGray
-    WC ""
-
-    $script:AdminUsername = Ask "Username" "admin"
-    $script:AdminEmail    = Ask "Email"    "admin@opennvr.local"
-}
-
-# ── STEP 6: Secrets ────────────────────────────────────────
-function Generate-Secrets {
-    Section "Generating secrets"
-
-    $script:PostgresPassword        = New-RandString 32
-    $script:SecretKey               = New-RandString 64 -Hex
-    $script:InternalApiKey          = New-RandString 32
-    $script:MediamtxSecret          = New-RandString 64 -Hex
-    $script:CredentialEncryptionKey = $null
-
-    $pyCmd = $null
-    foreach ($cmd in @('python','python3')) {
-        if (Get-Command $cmd -ErrorAction SilentlyContinue) { $pyCmd = $cmd; break }
-    }
-    if ($pyCmd) {
-        try {
-            $key = & $pyCmd -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" 2>$null
-            if ($LASTEXITCODE -eq 0 -and $key) { $script:CredentialEncryptionKey = $key.Trim() }
-        } catch {}
-    }
-    if (-not $script:CredentialEncryptionKey) {
-        WARN "Python cryptography not found — using fallback key"
-        INFO "Install for proper Fernet keys: pip install cryptography"
-        $script:CredentialEncryptionKey = New-RandString 32
-    }
-
-    OK "Database password generated"
-    OK "JWT secret key generated"
-    OK "Credential encryption key generated"
-    OK "Internal API key generated"
-    OK "MediaMTX webhook secret generated"
-}
-
-# ── STEP 7: Clone AI adapter ───────────────────────────────
-function Clone-AI {
-    if (-not $script:AiEnabled) { return }
-
-    Section "Cloning AI adapter"
-
-    $parentDir  = Split-Path -Parent $ProjectRoot
-    $targetDir  = Join-Path $parentDir "ai-adapter"
-
-    if (Test-Path $targetDir) {
-        WARN "Directory already exists: $targetDir"
-        if (AskYN "Skip cloning and use existing directory?" "y") {
-            OK "Using existing ai-adapter at: $targetDir"
-            return
-        }
-        Remove-Item -Recurse -Force $targetDir
-    }
-
-    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-        FAIL "Git is not installed — cannot clone AI adapter"
-        WARN "Clone manually: git clone $($script:AiRepoUrl) $targetDir"
-        $script:AiEnabled = $false
-        return
-    }
-
-    WCN "  → Cloning $($script:AiRepoUrl) ..." Cyan
-    try {
-        $null = git clone $script:AiRepoUrl $targetDir 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            WC " done" Green
-            OK "AI adapter cloned to: $targetDir"
-
-            $weightsDir = Join-Path $targetDir "model_weights"
-            if (-not (Test-Path $weightsDir)) { New-Item -ItemType Directory -Path $weightsDir | Out-Null }
-        } else {
-            throw "git clone failed"
-        }
-    } catch {
-        WC " failed" Red
-        FAIL "Clone failed — check the URL and your internet connection"
-        WARN "Continuing without AI detection"
-        $script:AiEnabled = $false
-    }
-}
-
-# ── STEP 8: Write .env ─────────────────────────────────────
-function Write-EnvFile {
-    Section "Writing configuration"
-
-    $adapterLine = if ($script:AiEnabled) {
-        "ADAPTER_URL=http://opennvr_ai:9100"
-    } else {
-        "# ADAPTER_URL=  # Uncomment when AI adapters are enabled"
-    }
-
-    $aiEnabledStr = if ($script:AiEnabled) { "true" } else { "false" }
-
-    $content = @"
-# ============================================================
-# OpenNVR Configuration
-# Generated by installer on $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-# ============================================================
-
-# -- DATABASE -------------------------------------------------
-POSTGRES_USER=opennvr_user
-POSTGRES_PASSWORD=$($script:PostgresPassword)
-POSTGRES_DB=opennvr_db
-
-# -- SECURITY -------------------------------------------------
-SECRET_KEY=$($script:SecretKey)
-ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=120
-# WARNING: Never change CREDENTIAL_ENCRYPTION_KEY after first run
-CREDENTIAL_ENCRYPTION_KEY=$($script:CredentialEncryptionKey)
-INTERNAL_API_KEY=$($script:InternalApiKey)
-MEDIAMTX_SECRET=$($script:MediamtxSecret)
-
-# -- APPLICATION ----------------------------------------------
-DEBUG=False
-HOST=0.0.0.0
-PORT=8000
-APPLICATION_URL=http://localhost:8000
-API_PREFIX=/api/v1
-
-# -- MEDIAMTX -------------------------------------------------
-MEDIAMTX_BASE_URL=http://localhost:8889
-MEDIAMTX_ADMIN_API=http://localhost:9997/v3
-MEDIAMTX_API_URL=http://localhost:9997
-MEDIAMTX_HLS_URL=http://localhost:8888
-MEDIAMTX_RTSP_URL=rtsp://localhost:8554
-MEDIAMTX_PLAYBACK_URL=http://localhost:9996
-MEDIAMTX_STREAM_PREFIX=cam-
-MEDIAMTX_PATH_MODE=id
-MEDIAMTX_AUTO_PROVISION=True
-
-# -- DOCKER NETWORKING ----------------------------------------
-BACKEND_HOST=opennvr_core
-BACKEND_PORT=8000
-
-# -- RECORDING STORAGE ----------------------------------------
-RECORDINGS_PATH=$($script:RecordingsPath)
-
-# -- AI INFERENCE ---------------------------------------------
-AI_ENABLED=$aiEnabledStr
-KAI_C_URL=http://127.0.0.1:8100
-KAI_C_IP=127.0.0.1
-$adapterLine
-
-# -- ADMIN USER -----------------------------------------------
-DEFAULT_ADMIN_USERNAME=$($script:AdminUsername)
-DEFAULT_ADMIN_EMAIL=$($script:AdminEmail)
-DEFAULT_ADMIN_FIRST_NAME=System
-DEFAULT_ADMIN_LAST_NAME=Administrator
-
-# -- LOGGING --------------------------------------------------
-LOG_LEVEL=INFO
-LOG_FILE_ENABLED=True
-LOG_FILE_PATH=logs/server.log
-LOG_FILE_MAX_SIZE_MB=50
-LOG_FILE_BACKUP_COUNT=10
-LOG_CONSOLE_ENABLED=True
-LOG_JSON_FORMAT=False
-"@
-
-    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-    [System.IO.File]::WriteAllText((Join-Path (Get-Location) ".env"), $content, $utf8NoBom)
-    OK ".env written successfully"
-}
-
-# ── Summary ────────────────────────────────────────────────
-function Show-Summary {
-    WC ""
-    WC "  $('━' * 52)" DarkGray
-    WC ""
-    WC "    Installation Summary" White
-    WC ""
-    WC "    Platform        Windows ($ComposeFile)" DarkGray
-    WC "    Mode            $($script:DeployMode)" DarkGray
-    WC "    Recordings      $($script:RecordingsPath)" DarkGray
-    $aiStatus = if ($script:AiEnabled) { "enabled" } else { "disabled" }
-    WC "    AI Detection    $aiStatus" $(if ($script:AiEnabled) { "Green" } else { "DarkGray" })
-    WC ""
-    WC "    Admin user      $($script:AdminUsername)" DarkGray
-    WC "    Admin email     $($script:AdminEmail)" DarkGray
-    WC ""
-    WC "  → Complete password setup at the first-time setup page." Cyan
-    WC ""
-    WC "  $('━' * 52)" DarkGray
-}
-
-# ── Launch services ────────────────────────────────────────
-function Start-Services {
-    WC ""
-    if (-not (AskYN "Build and start OpenNVR now?" "y")) {
-        WC ""
-        INFO "Configuration saved to .env"
-        WC ""
-        STEP "To start later:"
-        WC "    .\start.ps1 build   # first run — builds images" Cyan
-        WC "    .\start.ps1         # subsequent starts" Cyan
-        WC ""
-        return
-    }
-
-    WC ""
-    Section "Starting OpenNVR"
-
-    $profileArg = @()
-    if ($script:AiEnabled) { $profileArg = @("--profile", "ai") }
-
-    WCN "  → Building Docker images (may take a few minutes on first run) ..." Cyan
-    docker compose -f $ComposeFile @profileArg build 2>&1 | Where-Object { $_ -match '^(Step|STEP|#\d|Successfully|ERROR)' } | ForEach-Object { Write-Host "     $_" -ForegroundColor DarkGray }
-    if ($LASTEXITCODE -ne 0) { FAIL "Build failed — check the output above"; exit 1 }
-    WC " done" Green
-    OK "Docker images built"
-
-    WCN "  → Starting all services ..." Cyan
-    docker compose -f $ComposeFile @profileArg up -d
-    if ($LASTEXITCODE -ne 0) { FAIL "Failed to start services — check the output above"; exit 1 }
-    WC " done" Green
-    OK "All services started"
-
-    Start-Sleep 3
-
-    WC ""
-    WC "  $('━' * 52)" DarkGray
-    WC ""
-    WC "  ✓  OpenNVR is running!" Green
-    WC ""
-    WC "  Web Interface  →  http://localhost:8000" Cyan
-    WC "  API Docs       →  http://localhost:8000/docs" Cyan
-    WC "  First-time setup page opens automatically on first visit." DarkGray
-    WC ""
-    WC "  Useful commands:" DarkGray
-    WC "    .\start.ps1 logs    # follow live logs" DarkGray
-    WC "    .\start.ps1 status  # check container health" DarkGray
-    WC "    .\start.ps1 down    # stop all services" DarkGray
-    WC ""
-    WC "  $('━' * 52)" DarkGray
-    WC ""
-}
-
-# ── MAIN ───────────────────────────────────────────────────
 Show-Logo
-
-if (Test-Path ".env") {
-    WARN "An existing .env was found."
-    WC ""
-    if (-not (AskYN "Reconfigure and overwrite existing settings?" "n")) {
-        WC ""
-        INFO "Installation cancelled. Your .env is unchanged."
-        WC ""
-        exit 0
-    }
-    WC ""
-}
-
-Check-Prereqs
-Ask-DeployMode
-Ask-RecordingsPath
-Ask-AI
-Ask-Admin
-Generate-Secrets
-Clone-AI
-Write-EnvFile
-Show-Summary
-Start-Services
+Write-Host '  OpenNVR interactive installer'; Write-Host ''
+Detect-Platform
+Check-Prerequisites
+Prepare-Environment
+Pull-AndBuild
+Write-Host ''; Info 'Configuration and images are ready. Starting OpenNVR...'; Write-Host ''
+if ($script:Platform -eq 'Windows') { & (Join-Path $ProjectRoot 'start.ps1') up; exit $LASTEXITCODE }
+& bash (Join-Path $ProjectRoot 'start.sh') up
+exit $LASTEXITCODE

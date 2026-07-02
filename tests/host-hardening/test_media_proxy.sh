@@ -2,7 +2,7 @@
 # ============================================================
 # Tests for the media-plane proxy paths (ISSUE-6 v8):
 #   * nginx /webrtc/, /hls/, /playback/ proxy to mediamtx
-#   * docker-compose tier0 emits HTTPS URLs through nginx
+#   * docker-compose standard emits HTTPS URLs through nginx
 #   * recordings.py:get_playback_url uses the external URL chain
 #     (regression test for the bug where it emitted the internal
 #     Docker URL, breaking recording playback on LAN browsers)
@@ -28,7 +28,7 @@ echo "Running media-proxy tests"
 echo ""
 
 NGINX_CONF="${REPO_ROOT}/nginx/opennvr.conf"
-COMPOSE_TIER0="${REPO_ROOT}/docker-compose.tier0.yml"
+COMPOSE_STANDARD="${REPO_ROOT}/docker-compose.yml"
 RECORDINGS_PY="${REPO_ROOT}/server/routers/recordings.py"
 
 # ── 1-3. nginx config has the three media proxy locations ────
@@ -72,11 +72,11 @@ for kind in webrtc hls playback; do
     fi
 done
 
-# ── 7. Tier 0 compose emits HTTPS URLs through nginx ─────────
-start_test "Tier 0 MEDIAMTX_EXTERNAL_* URLs go through nginx (HTTPS, sub-paths)"
+# ── 7. standard stack compose emits HTTPS URLs through nginx ─────────
+start_test "standard stack MEDIAMTX_EXTERNAL_* URLs go through nginx (HTTPS, sub-paths)"
 core_env=$(python3 - <<PY
 import yaml
-c = yaml.safe_load(open("${COMPOSE_TIER0}"))
+c = yaml.safe_load(open("${COMPOSE_STANDARD}"))
 env = c["services"]["opennvr-core"]["environment"]
 for e in env:
     if "EXTERNAL_BASE_URL" in str(e) or "EXTERNAL_HLS_URL" in str(e) or "EXTERNAL_PLAYBACK_URL" in str(e):
@@ -88,14 +88,14 @@ if echo "$core_env" | grep -q "MEDIAMTX_PUBLIC_URL.*\/webrtc" \
    && echo "$core_env" | grep -q "MEDIAMTX_PUBLIC_URL.*\/playback"; then
     pass
 else
-    fail "Tier 0 compose external URLs must interpolate MEDIAMTX_PUBLIC_URL with sub-paths; got: ${core_env}"
+    fail "standard stack compose external URLs must interpolate MEDIAMTX_PUBLIC_URL with sub-paths; got: ${core_env}"
 fi
 
 # ── 8. WebRTC UDP+TCP ports published on NGINX_BIND_HOST ────
 start_test "WebRTC ICE port 8189 published on NGINX_BIND_HOST (uplink-side)"
 result=$(python3 - <<PY
 import yaml
-c = yaml.safe_load(open("${COMPOSE_TIER0}"))
+c = yaml.safe_load(open("${COMPOSE_STANDARD}"))
 ports = c["services"]["mediamtx"]["ports"]
 udp = any("8189:8189/udp" in str(p) and "NGINX_BIND_HOST" in str(p) for p in ports)
 tcp = any("8189:8189/tcp" in str(p) and "NGINX_BIND_HOST" in str(p) for p in ports)
@@ -112,7 +112,7 @@ fi
 start_test "mediamtx env has MTX_WEBRTCADDITIONALHOSTS interpolated from MEDIAMTX_WEBRTC_HOSTS"
 mtx_env=$(python3 - <<PY
 import yaml
-c = yaml.safe_load(open("${COMPOSE_TIER0}"))
+c = yaml.safe_load(open("${COMPOSE_STANDARD}"))
 env = c["services"]["mediamtx"]["environment"]
 for e in env:
     if "WEBRTC" in str(e):
@@ -130,7 +130,7 @@ fi
 start_test "opennvr-core still binds host port 127.0.0.1:8000 (V-015 trust zone intact)"
 result=$(python3 - <<PY
 import yaml
-c = yaml.safe_load(open("${COMPOSE_TIER0}"))
+c = yaml.safe_load(open("${COMPOSE_STANDARD}"))
 print("127.0.0.1:8000:8000" in c["services"]["opennvr-core"]["ports"])
 PY
 )
@@ -253,11 +253,11 @@ pass
 # race by accident (it waits on mediamtx via service_healthy too), but
 # on recovery boots (post compose-file switch + stale Docker networks)
 # the race surfaces. Lock the dependency explicitly.
-start_test "tier0 nginx service depends_on: mediamtx with service_healthy"
+start_test "standard nginx service depends_on: mediamtx with service_healthy"
 dep_check=$(python3 - "${REPO_ROOT}" <<'PY'
 import sys, yaml
 from pathlib import Path
-c = yaml.safe_load((Path(sys.argv[1]) / "docker-compose.tier0.yml").read_text())
+c = yaml.safe_load((Path(sys.argv[1]) / "docker-compose.yml").read_text())
 nginx = c["services"]["nginx"]
 deps = nginx.get("depends_on", {})
 if not isinstance(deps, dict):

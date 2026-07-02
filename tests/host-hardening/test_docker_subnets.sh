@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# Tests that the Docker bridge subnet declared in tier0.yml
+# Tests that the Docker bridge subnet declared in docker-compose.yml
 # (ISSUE-6 v7) is:
 #   1. Deterministic (pinned, not auto-assigned by Docker)
 #   2. Inside V-015's trust zone (RFC1918 / IPv6 ULA / link-local)
@@ -10,10 +10,10 @@
 #
 # ISSUE-17 simplification: the old docker-compose.yml declared
 # two separate networks (sentinel_internal + public_uplink) with
-# their own OPENNVR_PUBLIC_SUBNET override. tier0.yml uses a
+# their own OPENNVR_PUBLIC_SUBNET override. docker-compose.yml uses a
 # single opennvr_internal network — simpler, easier to reason
 # about for V-015 trust-zone classification. docker-compose.yml
-# is now an include shim → tier0.yml, so there's only one
+# is the direct implementation, so there's only one
 # network architecture to validate.
 #
 # Run with: bash tests/host-hardening/test_docker_subnets.sh
@@ -35,11 +35,11 @@ fail() { echo "FAIL"; echo "      $1"; TESTS_FAILED=$((TESTS_FAILED + 1)); }
 echo "Running Docker subnet tests"
 echo ""
 
-# ── 1. Tier 0 compose declares a pinned bridge subnet ────────
-start_test "docker-compose.tier0.yml pins opennvr_internal subnet"
+# ── 1. standard stack compose declares a pinned bridge subnet ────────
+start_test "docker-compose.yml pins opennvr_internal subnet"
 result=$(python3 - <<PY
 import yaml
-c = yaml.safe_load(open("${REPO_ROOT}/docker-compose.tier0.yml"))
+c = yaml.safe_load(open("${REPO_ROOT}/docker-compose.yml"))
 n = c["networks"]["opennvr_internal"]
 configs = n.get("ipam", {}).get("config", [])
 print(configs[0]["subnet"] if configs else "")
@@ -55,7 +55,7 @@ fi
 start_test "opennvr_internal subnet is RFC1918 (inside V-015 trust zone)"
 result=$(python3 - <<PY
 import yaml, ipaddress
-c = yaml.safe_load(open("${REPO_ROOT}/docker-compose.tier0.yml"))
+c = yaml.safe_load(open("${REPO_ROOT}/docker-compose.yml"))
 ok = True
 for name, cfg in c.get("networks", {}).items():
     if not isinstance(cfg, dict): continue
@@ -77,12 +77,12 @@ else
 fi
 
 # ── 3. Override via env var works (interpolation preserved) ──
-start_test "OPENNVR_DOCKER_SUBNET interpolation is preserved in tier0.yml"
+start_test "OPENNVR_DOCKER_SUBNET interpolation is preserved in docker-compose.yml"
 if grep -q '\${OPENNVR_DOCKER_SUBNET:-172.28.0.0/16}' \
-        "${REPO_ROOT}/docker-compose.tier0.yml"; then
+        "${REPO_ROOT}/docker-compose.yml"; then
     pass
 else
-    fail "OPENNVR_DOCKER_SUBNET interpolation missing from tier0.yml"
+    fail "OPENNVR_DOCKER_SUBNET interpolation missing from docker-compose.yml"
 fi
 
 # ── 4. .env.example documents the override var ──────────────
@@ -113,26 +113,13 @@ else
     fail "default Docker subnet overlaps a common consumer LAN range"
 fi
 
-# ── 6. ISSUE-17 contract: docker-compose.yml is an include shim ──
-# (Repeats the test_build_resilience.sh assertion in this file so
-# the subnet-related contract is self-contained — if docker-compose.yml
-# ever grows its own networks: block, that would shadow tier0's
-# subnet pinning silently.)
-start_test "docker-compose.yml has no own networks: block (include shim only)"
-result=$(python3 - <<PY
-import yaml
-c = yaml.safe_load(open("${REPO_ROOT}/docker-compose.yml"))
-print("HAS_NETWORKS" if c.get("networks") else "INCLUDE_ONLY")
-PY
-)
-if echo "$result" | grep -q "INCLUDE_ONLY"; then
+# ── 6. Legacy compose filename is gone ──────────────────────
+start_test "legacy docker-compose.tier0.yml is removed"
+if [ ! -e "${REPO_ROOT}/docker-compose.tier0.yml" ]; then
     pass
 else
-    fail "docker-compose.yml grew a networks: block — that shadows the
-tier0.yml include and would silently break OPENNVR_DOCKER_SUBNET
-operator overrides on bare ``docker compose up -d`` invocations."
+    fail "docker-compose.tier0.yml must not coexist with the canonical docker-compose.yml"
 fi
-
 echo ""
 echo "────────────────────────────────────────────"
 echo "Tests run    : ${TESTS_RUN}"

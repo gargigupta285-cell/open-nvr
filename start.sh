@@ -2,17 +2,22 @@
 # ============================================================
 # OpenNVR - Smart Launcher (Linux / macOS)
 # ============================================================
-# First run → launches the interactive installer automatically.
-# Subsequent runs → validates and starts services.
+# One command does it all: run ./start.sh with no arguments. On a fresh
+# checkout it launches the interactive installer (creates and configures .env,
+# builds, and starts). On later runs it asks whether to start as-is or
+# reconfigure. The sub-commands below are for scripted / power use.
 #
 # Usage:
-#   ./start.sh              # start (or install on first run)
+#   ./start.sh              # smart start: install on first run, else start/reconfigure
+#   ./start.sh up           # start now using the existing .env (no prompt)
 #   ./start.sh build        # rebuild images and start
-#   ./start.sh install      # re-run the interactive installer
+#   ./start.sh install      # re-run the interactive installer (reconfigure)
+#   ./start.sh reconfigure  # alias for install
 #   ./start.sh down         # stop all services
 #   ./start.sh logs         # tail logs
 #   ./start.sh status       # show container status
 #   ./start.sh validate     # run pre-flight checks only
+#   ./start.sh token        # re-print the first-time setup token
 # ============================================================
 
 set -e
@@ -27,33 +32,14 @@ WHITE='\033[1;37m'
 NC='\033[0m'
 
 # ── Detect OS ──────────────────────────────────────────────
-# ISSUE-12 + ISSUE-13: Linux defaults to docker-compose.tier0.yml
-# (the canonical hardened path) instead of the historical
-# docker-compose.linux.yml. Reasons:
-#   * tier0.yml ships nginx + nginx-certs-init for the TLS edge
-#     this script's print_access_urls promises (``https://<lan-ip>/``).
-#     linux.yml had no TLS terminator, so operators following the
-#     printed URL hit "connection refused" on :443.
-#   * tier0.yml ships yolov8-weights-init + yolov8-adapter so the
-#     README's "YOLOv8 detection out of the box" actually works.
-#     linux.yml had detection only behind the opt-in --profile ai.
-#   * tier0.yml ships nats so the audit/events bus that downstream
-#     services subscribe to is actually present.
-#
-# Trade-off: tier0.yml uses Docker bridge networking (with the
-# subnet pinned to 172.28.0.0/16 — ISSUE-6 v7) instead of host
-# networking. ONVIF WS-Discovery (multicast 239.255.255.250:3702)
-# doesn't cross Docker bridges by default — operators relying on
-# multicast camera auto-discovery should add cameras by IP manually,
-# or set OPENNVR_COMPOSE_FILE=docker-compose.linux.yml to revert to
-# the host-networking variant for that specific use case. The vast
-# majority of installs use a known camera IP list (dual-NIC camera-
-# LAN topology) where multicast discovery isn't the path anyway.
+# All supported platforms use the canonical bridge-networked stack.
+# Camera discovery must use explicit IPs or unicast subnet scanning;
+# multicast WS-Discovery and host-network Compose are not supported.
 OS="$(uname -s)"
 case "$OS" in
   Linux*)
-    COMPOSE_FILE="docker-compose.tier0.yml"
-    OS_LABEL="Linux (Tier 0 — bridge networking + TLS edge)"
+    COMPOSE_FILE="docker-compose.yml"
+    OS_LABEL="Linux (standard stack — bridge networking + TLS edge)"
     ;;
   Darwin*)
     COMPOSE_FILE="docker-compose.yml"
@@ -67,8 +53,7 @@ case "$OS" in
 esac
 
 # Operator escape hatch — pin a specific compose file regardless of
-# OS detection. Useful for: testing the legacy linux.yml host-mode
-# path, dev workflows on docker-compose.yml, custom overlay files.
+# OS detection. Useful for testing custom Compose overlays.
 if [ -n "${OPENNVR_COMPOSE_FILE:-}" ]; then
     if [ -f "${OPENNVR_COMPOSE_FILE}" ]; then
         COMPOSE_FILE="${OPENNVR_COMPOSE_FILE}"
@@ -79,7 +64,7 @@ if [ -n "${OPENNVR_COMPOSE_FILE:-}" ]; then
     fi
 fi
 
-COMMAND="${1:-up}"
+COMMAND="${1:-start}"
 
 # ── Helper: read a value from .env ────────────────────────
 get_env_var() {
@@ -89,10 +74,18 @@ get_env_var() {
 
 # ── Build Docker Compose profile args ─────────────────────
 compose_args() {
-    local ai_enabled
-    ai_enabled=$(get_env_var "AI_ENABLED")
     local args="-f $COMPOSE_FILE"
-    [[ "$ai_enabled" == "true" ]] && args="$args --profile ai"
+    local example_compose example_profile
+    example_compose=$(get_env_var "OPENNVR_EXAMPLE_COMPOSE")
+    example_profile=$(get_env_var "OPENNVR_EXAMPLE_PROFILE")
+    if [[ -n "$example_compose" ]]; then
+        [[ -f "$example_compose" ]] || {
+            echo "Configured example Compose file not found: $example_compose" >&2
+            return 1
+        }
+        args="$args -f $example_compose"
+    fi
+    [[ -n "$example_profile" ]] && args="$args --profile $example_profile"
     echo "$args"
 }
 
@@ -280,8 +273,8 @@ nic_ip() {
 
 # Returns "single", "dual-declared", or "multi-undeclared" on stdout.
 # Side effects: exports NGINX_BIND_HOST so the subsequent
-# `docker compose up -d` picks it up via the compose interpolation
-# in docker-compose.tier0.yml.
+# `docker compose up -d --remove-orphans` picks it up via the compose interpolation
+# in docker-compose.yml.
 configure_nginx_bind_host() {
     local nics nic_count mode
     nics=$(detect_routable_nics)
@@ -718,6 +711,10 @@ print_access_urls() {
     fi
     echo -e "  Web UI (local)  → ${CYAN}https://localhost/${NC}"
     echo -e "  API Docs        → ${CYAN}https://localhost/docs${NC}"
+    # If the camera-agent example is active, surface its demo UI too.
+    if [ "$(get_env_var OPENNVR_EXAMPLE 2>/dev/null)" = "camera-agent" ]; then
+        echo -e "  Camera Agent    → ${CYAN}http://localhost:9100/demo${NC}  ${GRAY}(ask your cameras — voice or chat)${NC}"
+    fi
     echo ""
     echo -e "  ${YELLOW}First visit:${NC} the browser will warn about a self-signed"
     echo -e "  certificate. Click ${WHITE}Advanced → Accept the risk${NC}. The cert is"
@@ -733,11 +730,11 @@ print_access_urls() {
 #
 # V-001 / M0 C-1 UX: the OpenNVR server mints a one-time setup token
 # on first boot and prints it to its stdout (so /auth/first-time-setup
-# can refuse anonymous LAN access). With `docker compose up -d` the
+# can refuse anonymous LAN access). With `docker compose up -d --remove-orphans` the
 # operator never sees that stdout — they have to grep the logs.
 #
 # ISSUE-5 fix: the previous version polled for 30s after `compose up
-# -d`, but `compose up -d` returns the moment containers are
+# -d`, but `compose up -d --remove-orphans` returns the moment containers are
 # *scheduled*, not when they're *healthy*. Post-ISSUE-3 the
 # yolov8-weights-init container takes ~3 min on x86 / ~10-15 min on a
 # Pi 5 to export the ONNX model before opennvr-core even starts
@@ -866,6 +863,7 @@ print_first_time_setup_token() {
         # right next step.
         local admin_user
         admin_user=$(get_env_var "DEFAULT_ADMIN_USERNAME" 2>/dev/null || echo "admin")
+        admin_user=${admin_user:-admin}
         echo ""
         echo -e "  ${GREEN}First-time setup is already complete.${NC}"
         echo -e "  ${GRAY}Log in at ${CYAN}http://localhost:8000${GRAY} as ${WHITE}${admin_user}${GRAY}.${NC}"
@@ -874,42 +872,36 @@ print_first_time_setup_token() {
     fi
 }
 
-# ── Run command ────────────────────────────────────────────
-case "$COMMAND" in
+# ── Raw start / build (no front-door prompt) ───────────────
+# These assume .env already exists — the smart `start` front door and the
+# installer guarantee that before calling them. Kept as their own commands so
+# the installer can `exec start.sh up` without re-triggering the front door
+# (which would loop), and so power users can bypass the prompt.
+INSTALLER="$(dirname "$0")/scripts/install.sh"
 
-  install)
-    # Force re-run installer
-    bash "$(dirname "$0")/scripts/install.sh"
-    ;;
-
-  up)
-    # First run check
+run_up() {
     if [ ! -f ".env" ]; then
-        echo -e "${YELLOW}  No .env found — launching installer...${NC}"
-        echo ""
-        bash "$(dirname "$0")/scripts/install.sh"
-        exit $?
+        echo -e "${RED}  No .env found. Run ./start.sh (no arguments) to set up.${NC}"
+        exit 1
     fi
     print_banner
     run_validate || exit 1
     ARGS=$(compose_args)
     configure_nginx_bind_host || exit 1
     echo -e "  ${GREEN}Starting all services ...${NC}"
-    docker compose $ARGS up -d
+    docker compose $ARGS up -d --remove-orphans
     echo ""
     ADMIN_USER=$(get_env_var "DEFAULT_ADMIN_USERNAME")
+    ADMIN_USER=${ADMIN_USER:-admin}
     print_access_urls "$ADMIN_USER"
     print_security_posture
     print_first_time_setup_token "$ARGS"
-    ;;
+}
 
-  build)
-    # First run check
+run_build() {
     if [ ! -f ".env" ]; then
-        echo -e "${YELLOW}  No .env found — launching installer...${NC}"
-        echo ""
-        bash "$(dirname "$0")/scripts/install.sh"
-        exit $?
+        echo -e "${RED}  No .env found. Run ./start.sh (no arguments) to set up.${NC}"
+        exit 1
     fi
     print_banner
     run_validate || exit 1
@@ -917,12 +909,66 @@ case "$COMMAND" in
     configure_nginx_bind_host || exit 1
     echo -e "  ${GREEN}Building images and starting all services ...${NC}"
     docker compose $ARGS build
-    docker compose $ARGS up -d
+    docker compose $ARGS up -d --remove-orphans
     echo ""
     ADMIN_USER=$(get_env_var "DEFAULT_ADMIN_USERNAME")
+    ADMIN_USER=${ADMIN_USER:-admin}
     print_access_urls "$ADMIN_USER"
     print_security_posture
     print_first_time_setup_token "$ARGS"
+}
+
+# ── Smart front door (bare `./start.sh`) ───────────────────
+# One command for everything:
+#   * No .env yet            → run the interactive installer, which creates
+#                              .env, configures it, builds, and starts.
+#   * .env exists + a TTY    → ask whether to start as-is or reconfigure.
+#   * .env exists, no TTY    → just start (CI / piped: never block on a prompt).
+run_start() {
+    if [ ! -f ".env" ]; then
+        echo -e "  ${GREEN}First run — launching the OpenNVR installer ...${NC}"
+        exec bash "$INSTALLER"
+    fi
+
+    if [ -t 0 ] && [ -t 1 ]; then
+        echo ""
+        echo -e "  ${WHITE}An existing OpenNVR configuration (.env) was found.${NC}"
+        echo -e "    ${WHITE}1)${NC} ${GRAY}Start with the current configuration${NC}"
+        echo -e "    ${WHITE}2)${NC} ${GRAY}Reconfigure (change settings / example), then start${NC}"
+        echo -e "    ${WHITE}3)${NC} ${GRAY}Quit${NC}"
+        echo ""
+        local choice
+        read -rp "  Your choice [1]: " choice
+        choice="${choice:-1}"
+        case "$choice" in
+            1) run_up ;;
+            2) exec bash "$INSTALLER" reconfigure ;;
+            3) echo -e "  ${GRAY}Nothing started.${NC}"; exit 0 ;;
+            *) echo -e "  ${RED}Invalid choice: $choice${NC}"; exit 1 ;;
+        esac
+    else
+        run_up
+    fi
+}
+
+# ── Run command ────────────────────────────────────────────
+case "$COMMAND" in
+
+  start)
+    run_start
+    ;;
+
+  install|reconfigure)
+    # Force the interactive installer in reconfigure mode (edit existing values).
+    exec bash "$INSTALLER" reconfigure
+    ;;
+
+  up)
+    run_up
+    ;;
+
+  build)
+    run_build
     ;;
 
   down)
@@ -948,6 +994,15 @@ case "$COMMAND" in
   validate)
     print_banner
     run_validate
+    ;;
+
+  token)
+    # Re-surface the first-time setup token on demand (e.g. if it scrolled off
+    # or you started the stack outside this launcher). Mints nothing — it just
+    # reads what opennvr-core already printed. If setup is already complete,
+    # it says so and reminds you how to re-arm.
+    ARGS=$(compose_args 2>/dev/null || echo "-f $COMPOSE_FILE")
+    print_first_time_setup_token "$ARGS"
     ;;
 
   refresh-certs)
@@ -984,7 +1039,7 @@ case "$COMMAND" in
     echo -e "  ${GREEN}✓ Old certs removed.${NC}"
     echo -e "  ${YELLOW}Restarting stack to regenerate certs ...${NC}"
     configure_nginx_bind_host || exit 1
-    docker compose $ARGS up -d
+    docker compose $ARGS up -d --remove-orphans
     echo ""
     echo -e "  ${GREEN}✓ Fresh certs will be generated by the init containers.${NC}"
     echo -e "  ${GRAY}You'll need to accept the new cert in your browser on next visit.${NC}"
@@ -992,7 +1047,7 @@ case "$COMMAND" in
 
   *)
     echo -e "${RED}Unknown command: $COMMAND${NC}"
-    echo "Usage: ./start.sh [up|build|down|logs|status|validate|install|refresh-certs]"
+    echo "Usage: ./start.sh [start|up|build|down|logs|status|validate|token|install|reconfigure|refresh-certs]"
     exit 1
     ;;
 esac

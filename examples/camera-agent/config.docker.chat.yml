@@ -19,11 +19,11 @@ llm_think: false   # Qwen3 default: snappy non-thinking tool-calling
 llm_temperature: 0.3
 llm_max_tokens: 220
 
-# detect_objects -> YOLOv8 (name "default"); describe_camera -> BLIP caption
-# adapter (auto-registered by caption-adapter-register once healthy).
-# describe_camera falls back to the detector until BLIP is registered in KAI-C.
+# detect_objects -> YOLOv8 (name "default"); describe_camera -> the caption/VQA
+# adapter selected by CAPTION_ADAPTER (auto-registered by caption-adapter-register
+# once healthy). describe_camera falls back to the detector until it registers.
 detection_adapter: default
-caption_adapter: ${CAPTION_ADAPTER}   # blip — auto-registered by caption-adapter-register
+caption_adapter: ${CAPTION_ADAPTER}   # moondream (default) — auto-registered by caption-adapter-register
 recognition_adapter: insightface
 
 enabled_tools:

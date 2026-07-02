@@ -10,7 +10,7 @@ which adapters you compose and what predicates you write on top of them.
 The examples gallery ([`examples/README.md`](../examples/README.md)) is the
 copy-as-template starting point for any segment-specific app.
 
-Each segment is structured the same way: what about the architecture matches its threat model or operational reality, what's available straight from a Tier 0 install plus shipped adapters, what requires writing a predicate (~50 lines of Python following an example app) or authoring a custom adapter (~30 lines following the template), and the gaps v0.1 will hit. A note on what "custom adapter" means across this page: the SDK wrapping itself is ~30 lines per the template scaffold; the *model* — PPE compliance, weapon detection, fall detection, drone classifiers — is an ML-engineering effort proportional to the false-positive-rate budget the operator can tolerate. For mission-critical FPR thresholds, expect tens of thousands of site-specific annotated frames, not a weekend. The [`SUPPORT.md`](SUPPORT.md) commercial-support track exists for deployments that need this model work delivered under contract.
+Each segment is structured the same way: what about the architecture matches its threat model or operational reality, what's available straight from a standard stack install plus shipped adapters, what requires writing a predicate (~50 lines of Python following an example app) or authoring a custom adapter (~30 lines following the template), and the gaps v0.1 will hit. A note on what "custom adapter" means across this page: the SDK wrapping itself is ~30 lines per the template scaffold; the *model* — PPE compliance, weapon detection, fall detection, drone classifiers — is an ML-engineering effort proportional to the false-positive-rate budget the operator can tolerate. For mission-critical FPR thresholds, expect tens of thousands of site-specific annotated frames, not a weekend. The [`SUPPORT.md`](SUPPORT.md) commercial-support track exists for deployments that need this model work delivered under contract.
 
 ---
 
@@ -23,7 +23,7 @@ to operate without trust in third-party clouds. OpenNVR's offline-first
 posture and customer-managed keys map cleanly to NERC CIP, TSA Pipeline
 Security Directives, and AWWA water-sector guidance.
 
-**Out-of-the-box.** Tier 0 install gives you isolated camera network →
+**Out-of-the-box.** standard stack install gives you isolated camera network →
 encrypted middleware → audit log. YOLOv8 detection on perimeter and yard
 cameras. License-plate logging at access roads via the `fast-plate-ocr`
 adapter and the `license-plate-recognition` example.
@@ -47,7 +47,7 @@ AI — perimeter-classifier weights, behavioural-anomaly thresholds, and
 recognition models cannot leave the base. OpenNVR's AI sovereignty
 enforcement is the mechanism that keeps them inside.
 
-**Out-of-the-box.** Tier 0 install on isolated VLANs with no internet
+**Out-of-the-box.** standard stack install on isolated VLANs with no internet
 default-gateway. InsightFace face recognition with operator-managed face DB.
 End-to-end correlation ID for incident reconstruction. Append-only audit
 log.
@@ -129,7 +129,7 @@ recent incidents demand AI capabilities that schools want to control
 themselves (over-firing alerts, false positives, demographic bias are all
 school-specific tuning concerns).
 
-**Out-of-the-box.** Tier 0 install on the school's own server. YOLOv8
+**Out-of-the-box.** standard stack install on the school's own server. YOLOv8
 detection on hallway / entry cameras. After-hours intrusion alerting via the
 `intrusion-detection` example with school schedules. Per-camera retention
 matching state record-keeping requirements.
@@ -191,7 +191,7 @@ detection via behaviour-anomaly models.
 
 **Caveats.** WMS integration is `alerts-subscriber` work — no out-of-the-box
 WMS adapter. Sort-line speed measurements need higher per-camera FPS than
-default Tier 0 inference loops; tune `inference_interval` per camera.
+default standard stack inference loops; tune `inference_interval` per camera.
 
 ---
 
@@ -231,7 +231,7 @@ states' rules explicitly require operator-controlled retention with audit
 logs. OpenNVR's append-only audit log plus local retention satisfies the
 regulatory shape directly.
 
-**Out-of-the-box.** Tier 0 install with per-camera 24×7 recording at the
+**Out-of-the-box.** standard stack install with per-camera 24×7 recording at the
 retention period your state requires. Audit log for every operator access
 to the video. License-plate logging at vehicle access points. Compliance-
 record export via the `alerts-subscriber` pattern.
@@ -279,7 +279,7 @@ sovereignty matters because passenger / cargo / personnel imagery is
 operationally sensitive. The FCC Covered List substitution argument applies
 here too.
 
-**Out-of-the-box.** Tier 0 install with isolated camera networks per
+**Out-of-the-box.** standard stack install with isolated camera networks per
 terminal / berth. License-plate logging at vehicle gates and cargo lanes.
 YOLOv8 for personnel and vehicle counts.
 
@@ -303,7 +303,7 @@ of what was recorded and who accessed it — exactly what the audit log
 delivers. Privacy advocacy groups (rightly) push back on vendor-controlled
 analytics; OpenNVR's local-only posture preempts that conversation.
 
-**Out-of-the-box.** Tier 0 install per district / precinct / department.
+**Out-of-the-box.** standard stack install per district / precinct / department.
 License-plate logging on roadway cameras. Pedestrian / vehicle counts via
 YOLOv8.
 
@@ -320,7 +320,7 @@ that v0.1 doesn't fully model; commercial-support engagement recommended.
 
 ## What v0.1 doesn't cover well yet
 
-OpenNVR isn't the right answer for everything. Tier 0 scales comfortably to about 50 cameras on commodity hardware; beyond that the project supports multi-host deployments but doesn't yet make them easy. Body-worn cameras with frequent connectivity transitions aren't a first-class target — OpenNVR expects fixed RTSP / ONVIF endpoints, and body-cam buffered-upload patterns require glue you'd need to write. Drone and UAV mobile platforms need the geo-aware moving-camera `TelemetrySource` abstraction planned for v0.2. Audio-first deployments work for the speech path (Whisper STT and Piper TTS ship) but audio-event detection — gunshot, glass-break, dog-bark — requires a new adapter category, also planned for v0.2.
+OpenNVR isn't the right answer for everything. standard stack scales comfortably to about 50 cameras on commodity hardware; beyond that the project supports multi-host deployments but doesn't yet make them easy. Body-worn cameras with frequent connectivity transitions aren't a first-class target — OpenNVR expects fixed RTSP / ONVIF endpoints, and body-cam buffered-upload patterns require glue you'd need to write. Drone and UAV mobile platforms need the geo-aware moving-camera `TelemetrySource` abstraction planned for v0.2. Audio-first deployments work for the speech path (Whisper STT and Piper TTS ship) but audio-event detection — gunshot, glass-break, dog-bark — requires a new adapter category, also planned for v0.2.
 
 For timing on the gaps above see the [Roadmap](ROADMAP.md), and if you want to contribute against them the [Adapter template](https://github.com/open-nvr/ai-adapter/tree/main/templates/adapter-template) is the starting point.
 

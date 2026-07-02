@@ -160,7 +160,7 @@ Pilot deployment, single host:
 git clone https://github.com/open-nvr/open-nvr.git && cd open-nvr
 cp .env.example .env
 ./scripts/generate-secrets.sh --write
-docker compose -f docker-compose.tier0.yml up -d
+docker compose -f docker-compose.yml up -d
 ```
 
 Five minutes later, browse to `https://localhost:8000` and add your
