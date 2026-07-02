@@ -2733,7 +2733,11 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         return {
             "alarms": alarms,
             "events": runtime.alarms.events(),
-            "ringing": any(a["triggered"] for a in alarms),
+            # Ring only for ACTIVE, triggered alarms. list() also returns
+            # disarmed ones; without the active check a stale triggered flag on a
+            # disarmed alarm left the siren banner up while the panel showed
+            # "No alarms armed" (observed: banner stuck the whole session).
+            "ringing": any(a["triggered"] and a["active"] for a in alarms),
         }
 
     @app.post("/alarms")
@@ -3276,6 +3280,14 @@ async def _run_conversation_turn(
     and make the model answer from that result — so a reply about a camera
     is always grounded in an actual frame, never imagined.
     """
+    # Roster/config questions ("how many cameras are configured?") are answered
+    # deterministically from the config — the model can't reliably count them and
+    # tends to narrate a phantom tool. Short-circuit BEFORE the LLM loop so these
+    # are instant: previously they ran the full tool loop (tens of seconds on a
+    # CPU model) only to have the roster answer override the result at the end.
+    if _is_config_question(user_text):
+        return _roster_answer(runtime.cfg.cameras)
+
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": runtime.build_system_prompt()}
     ]

@@ -348,3 +348,37 @@ def test_skill_unknown_404_and_bad_action_400():
     _, client = _skill_runtime()
     assert client.post("/skills/not-a-skill/disable").status_code == 404
     assert client.post("/skills/count/frobnicate").status_code == 400
+
+
+# ── alarm ringing must track ACTIVE alarms only ───────────────────────
+
+
+def test_alarm_ringing_only_when_active_and_triggered():
+    from camera_agent import Alarm
+    rt, client = _skill_runtime()
+    assert client.get("/alarms").json()["ringing"] is False   # nothing armed
+    # Inject an armed, triggered alarm (bypass create() to avoid the async loop).
+    a = Alarm(id=1, name="Fire", target="fire", camera_ids=["cam1"], triggered=True)
+    rt.alarms._alarms[1] = a
+    rt.alarms._order.append(1)
+    assert client.get("/alarms").json()["ringing"] is True
+    # A stale 'triggered' flag on a DISARMED alarm must NOT keep the siren up —
+    # this was the bug: banner rang while the panel showed "No alarms armed".
+    a.active = False
+    assert client.get("/alarms").json()["ringing"] is False
+
+
+# ── roster/config questions skip the LLM (latency) ────────────────────
+
+
+def test_config_question_short_circuits_before_llm():
+    import asyncio
+    rt, _ = _skill_runtime()
+
+    async def boom(**kw):   # the LLM must NOT be called for a roster question
+        raise AssertionError("LLM was called for a config question")
+    rt.ollama.chat = boom
+
+    reply = asyncio.run(ca._run_conversation_turn(
+        rt, [], "how many cameras are configured right now?"))
+    assert "camera" in reply.lower()   # deterministic roster answer, no LLM spend

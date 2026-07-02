@@ -231,11 +231,11 @@
           </div>
           <div id="alarmList"></div>
         </div>
-        <div class="card">
+        <div class="card" id="watchCard">
           <h2>Watching</h2>
           <div id="monitorList"></div>
         </div>
-        <div class="card">
+        <div class="card" id="taskCard">
           <div class="cardhead"><h2>Background tasks</h2><button class="addbtn" id="taskAdd" type="button" title="Add a background task" aria-label="Add a background task">+</button></div>
           <div class="addform" id="taskForm" hidden>
             <input id="taskQuery" type="text" placeholder="e.g. find the red truck earlier today" autocomplete="off">
@@ -243,7 +243,7 @@
           </div>
           <div id="taskList"></div>
         </div>
-        <div class="card">
+        <div class="card" id="reportCard">
           <h2>Scheduled reports</h2>
           <div id="reportList"></div>
         </div>
@@ -663,8 +663,15 @@
     async function loadSkills(){ try{ _skills=(await (await fetch("/skills")).json()).skills||[]; }
       catch{ const c=$("skillsCard"); if(c) c.style.display="none"; return; }
       renderSkills(); }
+    // Only show a rail card when its skill is enabled — don't offer actions the
+    // agent can't currently do (alarm→Alarms, watch→Watching, task→Background
+    // tasks, report→Scheduled reports).
+    function gateRailCards(enabledIds){ const map={alarm:"alarmCard",watch:"watchCard",task:"taskCard",report:"reportCard"};
+      const set=new Set(enabledIds);
+      for(const id in map){ const card=$(map[id]); if(card) card.style.display=set.has(id)?"":"none"; } }
     function renderSkills(){ const el=$("skillsList"); if(!el) return; el.innerHTML="";
       const on=_skills.filter(s=>s.enabled);
+      gateRailCards(on.map(s=>s.id));
       if(!on.length) el.innerHTML='<div class="empty-note">No skills enabled — tap + to add.</div>';
       for(const s of on){ const d=document.createElement("div"); d.className="skill";
         d.innerHTML=`<span class="sk-ic">${s.icon}</span><span class="sk-body"><span class="sk-nm"></span><span class="sk-uses"></span></span><button class="sk-x" title="Remove skill">✕</button>`;
