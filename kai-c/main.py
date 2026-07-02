@@ -955,6 +955,27 @@ async def v1_aggregated_capabilities():
     return get_registry().aggregated_capabilities()
 
 
+@app.get("/api/v1/adapters/{name}/metrics", dependencies=[Depends(require_internal_api_key)])
+async def v1_adapter_metrics(name: str):
+    """Observability spec §05 — the windowed rollup for one adapter,
+    fed by the /metrics scrape on the existing 60s registry poll.
+
+    Serves p50/p95/p99 latency (ms, derived from the adapter's
+    ``adapter_infer_latency_seconds`` histogram), per-outcome counts,
+    the latest saturation gauges against the declared
+    ``scheduling.max_inflight`` ceiling, and the fingerprint-change
+    timeline. All-null fields until the first scrape lands."""
+    registry = get_registry()
+    adapter = registry.get(name)
+    if adapter is None:
+        raise HTTPException(status_code=404, detail=f"unknown adapter: {name}")
+    snapshot = registry.metrics.snapshot(name)
+    # The declared ceiling comes from /capabilities, not /metrics — the
+    # decision view pairs it with the live inflight gauge (§06).
+    snapshot["max_inflight"] = adapter.capabilities.scheduling.max_inflight
+    return snapshot
+
+
 # ── B1 NATS publishing helper ──────────────────────────────────────
 
 

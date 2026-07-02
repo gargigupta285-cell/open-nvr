@@ -914,6 +914,38 @@ class KaiCService:
             main_logger.error(f"Failed to fetch schema from KAI-C: {e}")
             raise
 
+    async def get_adapter_metrics(self, adapter_name: str) -> dict[str, Any]:
+        """
+        Fetch the windowed metrics rollup for one adapter from KAI-C's
+        governed surface (observability spec §05).
+
+        Flow: Backend → KAI-C → (KAI-C serves its in-memory rollup,
+        fed by the /metrics scrape on the 60s registry poll)
+
+        Args:
+            adapter_name: The registered adapter name.
+
+        Returns:
+            The rollup dict (latency percentiles, outcome counts,
+            saturation gauges, fingerprint-change timeline).
+
+        Raises:
+            httpx.HTTPStatusError: KAI-C answered non-2xx (404 for an
+                unknown adapter — the router maps status codes).
+            httpx.HTTPError: KAI-C unreachable.
+        """
+        headers = {"Accept": "application/json"}
+        internal_key = self._internal_api_key()
+        if internal_key:
+            headers["X-Internal-Api-Key"] = internal_key
+        response = await self.http_client.get(
+            f"{self.kai_c_url}/api/v1/adapters/{urlquote(adapter_name, safe='')}/metrics",
+            timeout=10.0,
+            headers=headers,
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def close(self):
         """Cleanup resources."""
         await self.http_client.aclose()

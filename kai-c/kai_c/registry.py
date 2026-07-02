@@ -51,6 +51,7 @@ from kai_c.contract_types import (
     HealthResponse,
     Permissions,
 )
+from kai_c.metrics import MetricsRollup, parse_adapter_metrics
 from kai_c.sovereignty import (
     SovereigntyViolation,
     adapter_summary_for_audit,
@@ -63,6 +64,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_POLL_INTERVAL_SECONDS: int = 60
 DEFAULT_HEALTH_TIMEOUT_SECONDS: float = 2.0
 DEFAULT_CAPABILITIES_TIMEOUT_SECONDS: float = 5.0
+DEFAULT_METRICS_TIMEOUT_SECONDS: float = 2.0
 UNAVAILABLE_THRESHOLD: int = 3  # consecutive health failures → unavailable
 
 # Permissions that are "default-safe" — no operator approval required.
@@ -158,6 +160,14 @@ async def fetch_health(client: httpx.AsyncClient, url: str) -> HealthResponse:
     return HealthResponse.model_validate(response.json())
 
 
+async def fetch_metrics_text(client: httpx.AsyncClient, url: str) -> str:
+    """Fetch the adapter's Prometheus /metrics exposition text.
+    Raises on any failure — callers treat metrics as best-effort."""
+    response = await client.get(f"{url.rstrip('/')}/metrics", timeout=DEFAULT_METRICS_TIMEOUT_SECONDS)
+    response.raise_for_status()
+    return response.text
+
+
 # ── Registry ───────────────────────────────────────────────────────
 
 
@@ -196,6 +206,9 @@ class AdapterRegistry:
         self._poll_interval = poll_interval_seconds
         self._adapters: dict[str, RegisteredAdapter] = {}
         self._lock = threading.Lock()
+        # §05 observability — bounded per-adapter rollups fed by the
+        # /metrics scrape on the same 60s poll (see refresh()).
+        self._metrics = MetricsRollup()
         # ``trust_env=False`` so HTTP_PROXY etc. don't redirect our
         # adapter probes through some operator-side proxy (same logic
         # as the conformance kit).
@@ -219,6 +232,11 @@ class AdapterRegistry:
     @property
     def sovereignty_mode(self) -> str:
         return self._sovereignty_mode
+
+    @property
+    def metrics(self) -> MetricsRollup:
+        """The §05 per-adapter metrics rollup store."""
+        return self._metrics
 
     async def aclose(self) -> None:
         await self.stop_polling()
@@ -280,6 +298,9 @@ class AdapterRegistry:
             adapter = self._adapters.pop(name, None)
         if adapter is None:
             return
+        # Drop the metrics series so the rollup store stays bounded by
+        # the number of LIVE adapters.
+        self._metrics.forget(name)
         self._audit.emit(
             AuditEventType.ADAPTER_DEREGISTERED,
             adapter=name,
@@ -310,6 +331,15 @@ class AdapterRegistry:
                     reason=str(exc),
                     consecutive_failures=adapter.consecutive_health_failures,
                 )
+
+        # Metrics scrape (§05) — same poll, best-effort. A missing or
+        # broken /metrics endpoint never disturbs the health/drift
+        # story; the rollup simply gets no sample this cycle.
+        try:
+            metrics_text = await fetch_metrics_text(self._client, adapter.url)
+            self._metrics.record_sample(name, parse_adapter_metrics(metrics_text))
+        except Exception as exc:
+            logger.debug("metrics poll failed for %s: %s", name, exc)
 
         # Capabilities probe — drift detection vs. cached snapshot.
         try:
@@ -353,6 +383,9 @@ class AdapterRegistry:
                 previous_fingerprint=adapter.fingerprint,
                 current_fingerprint=new_caps.model.fingerprint,
             )
+            # §05 — the drift timeline in the metrics rollup ("the
+            # weights changed under you", per the decision view).
+            self._metrics.record_fingerprint_change(name)
             adapter.fingerprint = new_caps.model.fingerprint
 
         # Permissions ADDED — §11.3 blocking change → de-register.

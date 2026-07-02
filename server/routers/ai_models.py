@@ -30,6 +30,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import httpx
 import yaml
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -166,6 +167,43 @@ async def get_capabilities(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch capabilities: {e!s}",
+        )
+
+
+@router.get("/adapters/{adapter_name}/metrics")
+async def get_adapter_metrics(
+    adapter_name: str,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Fetch the windowed per-adapter metrics rollup from KAI-C
+    (observability spec §05): p50/p95/p99 latency, outcome counts,
+    saturation gauges, and the fingerprint-change timeline.
+
+    KAI-C collects these from each adapter's /metrics on its existing
+    60s registry poll; users never talk to adapters directly.
+
+    Requires authenticated user.
+    """
+    try:
+        kai_c_service = get_kai_c_service()
+        return await kai_c_service.get_adapter_metrics(adapter_name)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == status.HTTP_404_NOT_FOUND:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Unknown adapter: {adapter_name}",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"KAI-C returned {e.response.status_code} for adapter metrics",
+        )
+    except Exception as e:
+        # KAI-C down / unreachable — a gateway problem, not a server bug.
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to fetch adapter metrics from KAI-C: {e!s}",
         )
 
 
