@@ -2,17 +2,22 @@
 # ============================================================
 # OpenNVR - Smart Launcher (Linux / macOS)
 # ============================================================
-# Installation is explicit: run ./start.sh install or ./scripts/install.sh.
-# Subsequent runs → validates and starts services.
+# One command does it all: run ./start.sh with no arguments. On a fresh
+# checkout it launches the interactive installer (creates and configures .env,
+# builds, and starts). On later runs it asks whether to start as-is or
+# reconfigure. The sub-commands below are for scripted / power use.
 #
 # Usage:
-#   ./start.sh              # start an existing installation
+#   ./start.sh              # smart start: install on first run, else start/reconfigure
+#   ./start.sh up           # start now using the existing .env (no prompt)
 #   ./start.sh build        # rebuild images and start
-#   ./start.sh install      # re-run the interactive installer
+#   ./start.sh install      # re-run the interactive installer (reconfigure)
+#   ./start.sh reconfigure  # alias for install
 #   ./start.sh down         # stop all services
 #   ./start.sh logs         # tail logs
 #   ./start.sh status       # show container status
 #   ./start.sh validate     # run pre-flight checks only
+#   ./start.sh token        # re-print the first-time setup token
 # ============================================================
 
 set -e
@@ -59,7 +64,7 @@ if [ -n "${OPENNVR_COMPOSE_FILE:-}" ]; then
     fi
 fi
 
-COMMAND="${1:-up}"
+COMMAND="${1:-start}"
 
 # ── Helper: read a value from .env ────────────────────────
 get_env_var() {
@@ -706,6 +711,10 @@ print_access_urls() {
     fi
     echo -e "  Web UI (local)  → ${CYAN}https://localhost/${NC}"
     echo -e "  API Docs        → ${CYAN}https://localhost/docs${NC}"
+    # If the camera-agent example is active, surface its demo UI too.
+    if [ "$(get_env_var OPENNVR_EXAMPLE 2>/dev/null)" = "camera-agent" ]; then
+        echo -e "  Camera Agent    → ${CYAN}http://localhost:9100/demo${NC}  ${GRAY}(ask your cameras — voice or chat)${NC}"
+    fi
     echo ""
     echo -e "  ${YELLOW}First visit:${NC} the browser will warn about a self-signed"
     echo -e "  certificate. Click ${WHITE}Advanced → Accept the risk${NC}. The cert is"
@@ -854,6 +863,7 @@ print_first_time_setup_token() {
         # right next step.
         local admin_user
         admin_user=$(get_env_var "DEFAULT_ADMIN_USERNAME" 2>/dev/null || echo "admin")
+        admin_user=${admin_user:-admin}
         echo ""
         echo -e "  ${GREEN}First-time setup is already complete.${NC}"
         echo -e "  ${GRAY}Log in at ${CYAN}http://localhost:8000${GRAY} as ${WHITE}${admin_user}${GRAY}.${NC}"
@@ -862,17 +872,16 @@ print_first_time_setup_token() {
     fi
 }
 
-# ── Run command ────────────────────────────────────────────
-case "$COMMAND" in
+# ── Raw start / build (no front-door prompt) ───────────────
+# These assume .env already exists — the smart `start` front door and the
+# installer guarantee that before calling them. Kept as their own commands so
+# the installer can `exec start.sh up` without re-triggering the front door
+# (which would loop), and so power users can bypass the prompt.
+INSTALLER="$(dirname "$0")/scripts/install.sh"
 
-  install)
-    # Force re-run installer
-    bash "$(dirname "$0")/scripts/install.sh"
-    ;;
-
-  up)
+run_up() {
     if [ ! -f ".env" ]; then
-        echo -e "${RED}  No .env found. Run: ./start.sh install${NC}"
+        echo -e "${RED}  No .env found. Run ./start.sh (no arguments) to set up.${NC}"
         exit 1
     fi
     print_banner
@@ -883,14 +892,15 @@ case "$COMMAND" in
     docker compose $ARGS up -d --remove-orphans
     echo ""
     ADMIN_USER=$(get_env_var "DEFAULT_ADMIN_USERNAME")
+    ADMIN_USER=${ADMIN_USER:-admin}
     print_access_urls "$ADMIN_USER"
     print_security_posture
     print_first_time_setup_token "$ARGS"
-    ;;
+}
 
-  build)
+run_build() {
     if [ ! -f ".env" ]; then
-        echo -e "${RED}  No .env found. Run: ./start.sh install${NC}"
+        echo -e "${RED}  No .env found. Run ./start.sh (no arguments) to set up.${NC}"
         exit 1
     fi
     print_banner
@@ -902,9 +912,63 @@ case "$COMMAND" in
     docker compose $ARGS up -d --remove-orphans
     echo ""
     ADMIN_USER=$(get_env_var "DEFAULT_ADMIN_USERNAME")
+    ADMIN_USER=${ADMIN_USER:-admin}
     print_access_urls "$ADMIN_USER"
     print_security_posture
     print_first_time_setup_token "$ARGS"
+}
+
+# ── Smart front door (bare `./start.sh`) ───────────────────
+# One command for everything:
+#   * No .env yet            → run the interactive installer, which creates
+#                              .env, configures it, builds, and starts.
+#   * .env exists + a TTY    → ask whether to start as-is or reconfigure.
+#   * .env exists, no TTY    → just start (CI / piped: never block on a prompt).
+run_start() {
+    if [ ! -f ".env" ]; then
+        echo -e "  ${GREEN}First run — launching the OpenNVR installer ...${NC}"
+        exec bash "$INSTALLER"
+    fi
+
+    if [ -t 0 ] && [ -t 1 ]; then
+        echo ""
+        echo -e "  ${WHITE}An existing OpenNVR configuration (.env) was found.${NC}"
+        echo -e "    ${WHITE}1)${NC} ${GRAY}Start with the current configuration${NC}"
+        echo -e "    ${WHITE}2)${NC} ${GRAY}Reconfigure (change settings / example), then start${NC}"
+        echo -e "    ${WHITE}3)${NC} ${GRAY}Quit${NC}"
+        echo ""
+        local choice
+        read -rp "  Your choice [1]: " choice
+        choice="${choice:-1}"
+        case "$choice" in
+            1) run_up ;;
+            2) exec bash "$INSTALLER" reconfigure ;;
+            3) echo -e "  ${GRAY}Nothing started.${NC}"; exit 0 ;;
+            *) echo -e "  ${RED}Invalid choice: $choice${NC}"; exit 1 ;;
+        esac
+    else
+        run_up
+    fi
+}
+
+# ── Run command ────────────────────────────────────────────
+case "$COMMAND" in
+
+  start)
+    run_start
+    ;;
+
+  install|reconfigure)
+    # Force the interactive installer in reconfigure mode (edit existing values).
+    exec bash "$INSTALLER" reconfigure
+    ;;
+
+  up)
+    run_up
+    ;;
+
+  build)
+    run_build
     ;;
 
   down)
@@ -930,6 +994,15 @@ case "$COMMAND" in
   validate)
     print_banner
     run_validate
+    ;;
+
+  token)
+    # Re-surface the first-time setup token on demand (e.g. if it scrolled off
+    # or you started the stack outside this launcher). Mints nothing — it just
+    # reads what opennvr-core already printed. If setup is already complete,
+    # it says so and reminds you how to re-arm.
+    ARGS=$(compose_args 2>/dev/null || echo "-f $COMPOSE_FILE")
+    print_first_time_setup_token "$ARGS"
     ;;
 
   refresh-certs)
@@ -974,7 +1047,7 @@ case "$COMMAND" in
 
   *)
     echo -e "${RED}Unknown command: $COMMAND${NC}"
-    echo "Usage: ./start.sh [up|build|down|logs|status|validate|install|refresh-certs]"
+    echo "Usage: ./start.sh [start|up|build|down|logs|status|validate|token|install|reconfigure|refresh-certs]"
     exit 1
     ;;
 esac

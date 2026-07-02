@@ -45,26 +45,72 @@ The architecture is published — a peer-citable paper this year, 34 references,
 
 ## Quickstart
 
-**Three commands, five minutes** — `git clone` to YOLOv8 detection on your camera feed. Pre-built images on GHCR, no source build.
+**Clone it, run one command, answer a few on-screen prompts.** That's the whole install — no editing files, no copying `.env`, no separate secret step. Pre-built images on GHCR, no source build.
+
+### 1. Clone
 
 ```bash
 git clone https://github.com/open-nvr/open-nvr.git
 cd open-nvr
-./start.sh install
 ```
 
-The installer detects your platform, preserves existing `.env` values, generates missing credentials, pulls the core stack, and optionally installs a Compose-backed example. It then starts OpenNVR and prints the first-time setup token.
+### 2. Run the launcher
 
-> **Just want to try the AI?** `examples/camera-agent/quickstart.sh` brings up the voice agent in one command (`--chat` for a lighter text version) — no GPU, and you can point it at your laptop webcam. See [Talk to your cameras](#talk-to-your-cameras).
+**Windows (PowerShell):**
+```powershell
+.\start.ps1
+```
 
-### What you'll see when it boots
+**Linux / macOS:**
+```bash
+./start.sh
+```
+
+That's the only command you run. It requires just [Docker](https://docs.docker.com/get-docker/) (Desktop on Windows/macOS, Engine + Compose v2 on Linux) to be installed and running.
+
+### 3. Answer the on-screen prompts
+
+On a fresh checkout the launcher opens an interactive installer. Every question shows a sensible default in `[brackets]` — **press Enter to accept it**, or type a value to change it. Nothing needs an account, an API key, or anything cloud; it all runs locally.
 
 ```
-NIC topology: dual-NIC (cameras isolated from operator network)
-  operator uplink: 192.168.1.50  ← UI bound here
-  Web UI: https://192.168.1.50/
+   ___                   _   ___     ______
+  / _ \ _ __   ___ _ __ | \ | \ \   / /  _ \
+ | | | | '_ \ / _ \ '_ \|  \| |\ \ / /| |_) |
+ | |_| | |_) |  __/ | | | |\  | \ V / |  _ <
+  \___/| .__/ \___|_| |_|_| \_|  \_/  |_| \_\
 
-🔑 First-time setup token (one-time use — copy into the UI):
+  OpenNVR interactive installer
+  ✓ Detected Windows (Docker bridge mode)
+
+  -- Basic settings -------------------------------------
+  Administrator username [admin]:
+  Administrator email [admin@opennvr.local]:
+  Recordings folder on this machine [C:/opennvr/recordings]:
+
+  -- Example app ----------------------------------------
+  Set up an example app now? [y/N]: y
+   3. camera-agent   [installable: docker-compose.camera-agent.yml]
+   0. Core stack only
+  Select an example [0]: 3
+  Camera Agent mode: 1=voice, 2=chat [1]:
+  Local LLM model (Ollama) [qwen2.5:1.5b]:
+```
+
+Prefer to just accept everything? Press Enter through every prompt and you get a working local stack. The installer then generates all secrets, downloads the images (and, if you picked the Camera Agent, a ~1 GB local model), builds, and starts everything.
+
+> ⏳ **First run takes 8–15 minutes** depending on your network — it's downloading container images and the AI model. Later starts are much faster because everything is cached.
+
+### 4. Open the URL and paste the token
+
+When it finishes, the launcher prints the access URLs and a one-time setup token **as the very last thing** — copy the token into the browser:
+
+```
+  ✓ OpenNVR is running!
+  Web UI (local) → http://localhost:8000  (login: admin)
+  Web UI (LAN)   → https://<this-host-ip>/  (via the TLS proxy)
+  Camera Agent   → http://localhost:9100/demo   (only if you chose it)
+
+  🔑 First-time setup token (one-time use — copy into the UI):
   ================================================================
    OpenNVR first-time setup token (one-time use)
   ----------------------------------------------------------------
@@ -81,12 +127,22 @@ Then:
 
 Live streams (WebRTC, HLS) and recording playback work from any LAN device.
 
+### Running it again
+
+Run `.\start.ps1` (or `./start.sh`) any time. If it's already set up, it asks whether to **start with your current config** or **reconfigure** (change settings / swap the example), then starts. To skip the question: `up` starts now, `reconfigure` re-runs the wizard, `token` re-prints the setup token.
+
+> **Just want to try the AI?** Pick **camera-agent** in step 3, or see [Talk to your cameras](#talk-to-your-cameras).
+
 ### Common follow-ups
+
+Commands below use `./start.sh`; on Windows use `.\start.ps1` with the same word.
 
 | Situation | Command |
 |---|---|
-| Lost the setup token | `docker compose logs opennvr-core \| grep -A 6 'first-time setup token' \| tail -7` |
-| Your LAN IP changed (DHCP, moved boxes) | `./start.sh refresh-certs` |
+| Re-print the setup token | `./start.sh token` |
+| Change settings or swap the example | `./start.sh reconfigure` |
+| Start without the reconfigure prompt | `./start.sh up` |
+| Your LAN IP changed (DHCP, moved boxes) | `./start.sh refresh-certs` *(Linux/macOS)* |
 | Stop everything | `./start.sh down` |
 | Tail live logs | `./start.sh logs` |
 | Check container status | `./start.sh status` |

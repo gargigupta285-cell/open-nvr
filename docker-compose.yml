@@ -12,14 +12,20 @@
 # opennvr_yolov8_weights volume on first boot. Subsequent boots reuse
 # the cached volume.
 #
-# Quickstart:
+# Quickstart — one command:
+#     ./start.sh          # Linux / macOS   (start.ps1 on Windows)
+#
+# On first run it creates and configures .env for you (generating secrets),
+# offers to set up the Camera Agent example, then builds and starts the stack.
+# Open http://localhost:8000 and follow the one-time setup flow.
+#
+# Prefer to drive Compose directly? The launcher just wraps these:
 #     cp .env.example .env
 #     ./scripts/generate-secrets.sh --write
 #     docker compose -f docker-compose.yml up -d
 #
-# Open http://localhost:8000 and follow the one-time setup flow.
-#
-# To layer the camera-agent voice example on top:
+# To layer the camera-agent voice example on top (the launcher does this for
+# you when you pick it in the installer):
 #     docker compose \
 #         -f docker-compose.yml \
 #         -f docker-compose.camera-agent.yml \

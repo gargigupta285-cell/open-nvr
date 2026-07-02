@@ -15,13 +15,30 @@ Five minutes from `git clone` to YOLOv8 detection running on your camera feed, u
 
 ## standard stack — NVR + YOLOv8
 
+**One command:**
+
 ```bash
 git clone https://github.com/open-nvr/open-nvr.git
 cd open-nvr
+./start.sh            # Windows: start.ps1
+```
+
+On a fresh checkout `./start.sh` creates `.env`, generates all secrets, walks you
+through a few settings (Enter accepts the local defaults), optionally sets up an
+example (pick **Camera Agent** to bring up core + agent together), then builds and
+starts the stack and prints the first-time setup token. Run it again later to
+**start as-is** or **reconfigure**; `./start.sh up` starts without prompting.
+
+<details>
+<summary>Prefer to drive Compose by hand?</summary>
+
+```bash
 cp .env.example .env
 ./scripts/generate-secrets.sh --write          # Windows: .\scripts\generate-secrets.ps1 -Write
 docker compose -f docker-compose.yml up -d
 ```
+
+</details>
 
 The generate-secrets script writes cryptographically random values into
 `.env` for the four secrets the core validates at boot (`SECRET_KEY`,

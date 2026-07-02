@@ -55,7 +55,7 @@ wake_word_required: true
 # their intended names so they light up automatically once registered.)
 detection_adapter: default
 recognition_adapter: insightface
-caption_adapter: ${CAPTION_ADAPTER}   # blip — auto-registered by caption-adapter-register
+caption_adapter: ${CAPTION_ADAPTER}   # moondream (default) — auto-registered by caption-adapter-register
 
 # Tools advertised to the LLM. standard stack only registers the YOLOv8 object
 # detector, so the demo exposes just the two tools that actually work:

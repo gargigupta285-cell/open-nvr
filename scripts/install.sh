@@ -5,6 +5,11 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BASE_COMPOSE="docker-compose.yml"
+# MODE controls how already-set values behave:
+#   install     — fresh setup; fill missing values, keep existing ones.
+#   reconfigure — editing an existing install; re-prompt values with the
+#                 current value as the default (Enter keeps, typing changes).
+MODE="${1:-install}"
 cd "$PROJECT_ROOT"
 
 if [[ ! -t 0 ]]; then
@@ -34,6 +39,38 @@ ask_secret() {
     printf '\n'
     REPLY="$answer"
 }
+# Print a short "what this is" block before a prompt.
+#   explain <what-it-is> <required?> <default> [where-to-get-it]
+explain() {
+    printf '  %s\n' "$1"
+    printf '    required: %-4s  default: %s\n' "$2" "$3"
+    [[ -n "${4:-}" ]] && printf '    note: %s\n' "$4"
+}
+# Curated, ALWAYS-prompted value with an explanation. Enter keeps the current
+# .env value (or the given default on a fresh install); typing overrides it.
+configure_value() {
+    local key="$1" label="$2" default="$3" what="$4" required="$5" where="${6:-}" current
+    current=$(env_get "$key")
+    [[ -n "$current" ]] && default="$current"
+    printf '\n'
+    explain "$what" "$required" "$default" "$where"
+    ask_value "$label" "$default"
+    env_set "$key" "$REPLY"
+}
+
+banner() {
+    cat <<'LOGO'
+
+   ___                   _   ___     ______
+  / _ \ _ __   ___ _ __ | \ | \ \   / /  _ \
+ | | | | '_ \ / _ \ '_ \|  \| |\ \ / /| |_) |
+ | |_| | |_) |  __/ | | | |\  | \ V / |  _ <
+  \___/| .__/ \___|_| |_|_| \_|  \_/  |_| \_\
+       |_|
+  Self-hosted NVR — the cameras are yours.
+
+LOGO
+}
 
 detect_platform() {
     case "$(uname -s)" in
@@ -45,9 +82,9 @@ detect_platform() {
 }
 
 check_prerequisites() {
-    command -v docker >/dev/null 2>&1 || die "Docker is not installed"
-    docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required"
-    docker info >/dev/null 2>&1 || die "Docker is not running"
+    command -v docker >/dev/null 2>&1 || die "Docker is not installed. Install Docker, then re-run."
+    docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required. Update Docker and re-run."
+    docker info >/dev/null 2>&1 || die "Docker is not running. Start the Docker daemon, then re-run."
     command -v openssl >/dev/null 2>&1 || die "openssl is required to generate credentials"
     [[ -f "$BASE_COMPOSE" ]] || die "$BASE_COMPOSE was not found in $PROJECT_ROOT"
 }
@@ -84,7 +121,13 @@ random_fernet() { openssl rand -base64 32 | tr '/+' '_-' | tr -d '\n'; }
 ensure_plain_value() {
     local key="$1" label="$2" default="$3" current
     current=$(env_get "$key")
-    [[ -n "$current" ]] && return 0
+    if [[ -n "$current" ]]; then
+        # Fresh install: keep whatever's already there, don't nag.
+        [[ "$MODE" == "reconfigure" ]] || return 0
+        # Reconfigure: offer the current value as the default so the operator
+        # can change it, but Enter keeps it.
+        default="$current"
+    fi
     ask_value "$label" "$default"
     env_set "$key" "$REPLY"
 }
@@ -114,16 +157,33 @@ prepare_environment() {
         ok "Using existing .env; existing values will be preserved"
     fi
 
-    ensure_plain_value POSTGRES_USER "PostgreSQL user" "opennvr_user"
-    ensure_plain_value POSTGRES_DB "PostgreSQL database" "opennvr_db"
-    ensure_plain_value RECORDINGS_PATH "Recordings path" "$DEFAULT_RECORDINGS"
-    ensure_plain_value DEFAULT_ADMIN_USERNAME "Administrator username" "admin"
-    ensure_plain_value DEFAULT_ADMIN_EMAIL "Administrator email" "admin@opennvr.local"
+    # Secrets — generated automatically. Never prompted unless the value is
+    # still a placeholder from .env.example (or empty).
     ensure_secret_value POSTGRES_PASSWORD "PostgreSQL password" "$(random_password)"
     ensure_secret_value SECRET_KEY "JWT signing key" "$(random_hex 32)"
     ensure_secret_value CREDENTIAL_ENCRYPTION_KEY "credential encryption key" "$(random_fernet)"
     ensure_secret_value INTERNAL_API_KEY "internal API key" "$(random_password)"
     ensure_secret_value MEDIAMTX_SECRET "MediaMTX webhook secret" "$(random_hex 32)"
+
+    # Rarely-changed database identifiers — filled only if missing (no nagging
+    # on a fresh install, editable in reconfigure mode).
+    ensure_plain_value POSTGRES_USER "PostgreSQL user" "opennvr_user"
+    ensure_plain_value POSTGRES_DB "PostgreSQL database" "opennvr_db"
+
+    # Curated settings most people set. Press Enter to accept the default shown
+    # in [brackets]; type a value to change it. All are local — no accounts,
+    # no API keys.
+    printf '\n  ── Basic settings ─────────────────────────────────────\n'
+    configure_value DEFAULT_ADMIN_USERNAME "Administrator username" "admin" \
+        "Login name for the first OpenNVR admin account." "yes" \
+        "You pick this yourself — no external account involved."
+    configure_value DEFAULT_ADMIN_EMAIL "Administrator email" "admin@opennvr.local" \
+        "Contact email tied to the admin account." "yes" \
+        "Any address works; the placeholder is fine for an offline setup."
+    configure_value RECORDINGS_PATH "Recordings folder on this machine" "$DEFAULT_RECORDINGS" \
+        "Host directory where recorded video segments are written." "yes" \
+        "Created automatically if it does not exist yet."
+
     mkdir -p "$(env_get RECORDINGS_PATH)" 2>/dev/null || warn "Could not create the recordings directory; Docker will try"
 }
 
@@ -156,7 +216,10 @@ choose_example() {
     env_set OPENNVR_EXAMPLE_COMPOSE ""
     env_set OPENNVR_EXAMPLE_PROFILE ""
 
-    ask_yes_no "Install an example AI stack?" n || return 0
+    printf '\n  ── Example app ────────────────────────────────────────\n'
+    info "Examples add an AI app on top of the core NVR. The Camera Agent lets you"
+    info "ask your cameras questions out loud or by chat. Everything runs locally."
+    ask_yes_no "Set up an example app now?" n || return 0
     local names=() dir name manifest choice index
     while IFS= read -r dir; do names+=("$(basename "$dir")"); done < <(find examples -mindepth 1 -maxdepth 1 -type d | sort)
     [[ ${#names[@]} -gt 0 ]] || { warn "No examples were found"; return 0; }
@@ -182,17 +245,44 @@ choose_example() {
     manifest=$(find_example_compose "$name") || die "The '$name' example has no Docker Compose manifest"
     EXAMPLE_NAME="$name"; EXAMPLE_COMPOSE="$manifest"; EXAMPLE_PROFILE="$name"
     if [[ "$name" == "camera-agent" ]]; then
-        ask_value "Camera agent mode: 1=voice, 2=chat" "1"
+        printf '\n'
+        explain "Camera Agent runs in VOICE mode (speak, hear spoken answers) or CHAT mode (type, read answers). Voice adds Whisper speech-to-text and Piper text-to-speech; chat is lighter." \
+            "pick one" "1 (voice)"
+        ask_value "Camera Agent mode: 1=voice, 2=chat" "1"
         [[ "$REPLY" == "2" ]] && EXAMPLE_PROFILE="camera-agent-chat" || EXAMPLE_PROFILE="camera-agent"
+
+        printf '\n  ── Camera Agent models (all local, no API keys) ───────\n'
+        configure_value OLLAMA_MODEL "Local LLM model (Ollama)" "qwen2.5:1.5b" \
+            "The local chat model that answers your questions; must support tool calling." "yes" \
+            "Pulled automatically. qwen2.5:0.5b (low RAM) | 1.5b (default) | 3b (better, slower)."
+        if [[ "$EXAMPLE_PROFILE" == "camera-agent" ]]; then
+            configure_value WHISPER_MODEL_SIZE "Whisper speech-to-text model" "base.en" \
+                "Transcribes your spoken questions (voice mode only)." "yes" \
+                "tiny.en (fastest) | base.en (default) | small.en (most accurate)."
+        fi
+        configure_value CAPTION_ADAPTER "Scene-description model" "moondream" \
+            "Describes what a camera sees. moondream answers questions (VQA); blip writes plain captions." "yes" \
+            "moondream | blip — both run locally."
+    else
+        # Generic examples: prompt for any ${VAR:-default} the overlay exposes.
+        prompt_overlay_defaults "$manifest"
     fi
-    prompt_overlay_defaults "$manifest"
     env_set OPENNVR_EXAMPLE "$EXAMPLE_NAME"
     env_set OPENNVR_EXAMPLE_COMPOSE "$EXAMPLE_COMPOSE"
     env_set OPENNVR_EXAMPLE_PROFILE "$EXAMPLE_PROFILE"
     ok "Selected $EXAMPLE_NAME ($EXAMPLE_PROFILE)"
+    if [[ "$name" == "camera-agent" ]]; then
+        info "The local LLM model downloads on first start — usually the slowest step."
+    fi
 }
 
 pull_and_build() {
+    printf '\n'
+    info "First-time setup downloads several container images (and, for the"
+    info "Camera Agent, a local LLM model of ~1 GB). Depending on your network"
+    info "this can take 8-15 minutes. Later starts are much faster — everything"
+    info "is cached, so you only pay this cost once."
+    printf '\n'
     info "Pulling the OpenNVR core stack..."
     docker compose -f "$BASE_COMPOSE" pull --ignore-buildable
 
@@ -208,7 +298,8 @@ pull_and_build() {
 }
 
 main() {
-    printf '\nOpenNVR interactive installer\n\n'
+    banner
+    printf '  OpenNVR interactive installer\n\n'
     detect_platform
     check_prerequisites
     prepare_environment

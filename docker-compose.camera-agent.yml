@@ -95,10 +95,10 @@ services:
   # ──────────────────────────────────────────────────────────────
   caption-adapter:
     profiles: [camera-agent, camera-agent-chat]
-    image: ghcr.io/open-nvr/${CAPTION_ADAPTER:-blip}-adapter:${ADAPTER_TAG:-latest}
+    image: ghcr.io/open-nvr/${CAPTION_ADAPTER:-moondream}-adapter:${ADAPTER_TAG:-latest}
     container_name: opennvr_caption_adapter
     restart: unless-stopped
-    command: ["uvicorn", "adapters.${CAPTION_ADAPTER:-blip}.main:app", "--host", "0.0.0.0", "--port", "9006"]
+    command: ["uvicorn", "adapters.${CAPTION_ADAPTER:-moondream}.main:app", "--host", "0.0.0.0", "--port", "9006"]
     environment:
       - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
     volumes:
@@ -130,7 +130,7 @@ services:
         condition: service_healthy
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
-      - CAPTION_ADAPTER=${CAPTION_ADAPTER:-blip}
+      - CAPTION_ADAPTER=${CAPTION_ADAPTER:-moondream}
     command:
       - sh
       - -c
@@ -231,8 +231,8 @@ services:
       - -c
       - |
         set -e
-        # busybox sed substitutes only the named ${VARS}, leaving other ``$``
-        # sigils in YAML multiline strings untouched (no envsubst / apk fetch,
+        # busybox sed substitutes only the named variables below, leaving other
+        # ``$`` sigils in YAML multiline strings untouched (no envsubst / apk fetch,
         # which some operator ISPs filter).
         sed_esc() { printf '%s' "$$1" | sed -e 's/\\/\\\\/g; s/&/\\&/g; s/\//\\\//g'; }
         ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
@@ -249,7 +249,7 @@ services:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
-      - CAPTION_ADAPTER=${CAPTION_ADAPTER:-blip}
+      - CAPTION_ADAPTER=${CAPTION_ADAPTER:-moondream}
     volumes:
       - ./examples/camera-agent:/template:ro
       - opennvr_camera_agent_config:/generated
@@ -316,7 +316,7 @@ services:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
-      - CAPTION_ADAPTER=${CAPTION_ADAPTER:-blip}
+      - CAPTION_ADAPTER=${CAPTION_ADAPTER:-moondream}
     volumes:
       - ./examples/camera-agent:/template:ro
       - opennvr_camera_agent_config_chat:/generated
