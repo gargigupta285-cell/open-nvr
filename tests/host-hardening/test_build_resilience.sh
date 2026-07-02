@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# Tests for ISSUE-7 — Tier 0 build must not depend on any
+# Tests for ISSUE-7 — standard stack build must not depend on any
 # external package repository (Alpine apk, Debian apt, PyPI pip)
 # during image build. Some operator networks (reported from
 # IN/IR/CN) block dl-cdn.alpinelinux.org and its mirrors. The
@@ -78,55 +78,34 @@ for name, svc in (c.get("services") or {}).items():
 PY
 }
 
-# ── 1. tier0 compose: no forbidden RUN in any dockerfile_inline ──
-start_test "docker-compose.tier0.yml has no RUN apk/apt/pip in dockerfile_inline"
-violations=$(find_violations "${REPO_ROOT}/docker-compose.tier0.yml")
+# ── 1. standard compose: no forbidden RUN in any dockerfile_inline ──
+start_test "docker-compose.yml has no RUN apk/apt/pip in dockerfile_inline"
+violations=$(find_violations "${REPO_ROOT}/docker-compose.yml")
 if [ -z "$violations" ]; then
     pass
 else
     fail "found forbidden RUN in build:"$'\n'"${violations}"
 fi
 
-# ── 2. linux compose: same check ────────────────────────────
-start_test "docker-compose.linux.yml has no RUN apk/apt/pip in dockerfile_inline"
-violations=$(find_violations "${REPO_ROOT}/docker-compose.linux.yml")
-if [ -z "$violations" ]; then
-    pass
-else
-    fail "found forbidden RUN in build:"$'\n'"${violations}"
-fi
-
-# ── 3. canonical compose is an include shim pointing at tier0 ──
-# ISSUE-17: docker-compose.yml is now a thin ``include:`` pointer
-# to docker-compose.tier0.yml. The point of this contract is that
-# bare ``docker compose up -d`` (no -f flag) Just Works and gives
-# operators the canonical hardened stack — same as
-# ``docker compose -f docker-compose.tier0.yml up -d``. Any drift
-# from the include shape would mean the bare-invocation operators
-# get a different stack from the tier0-invocation operators.
-start_test "docker-compose.yml is an include shim pointing at docker-compose.tier0.yml"
-shim_shape=$(python3 - "${REPO_ROOT}" <<'PY'
+# ── 3. canonical compose is self-contained ──────────────────
+start_test "docker-compose.yml directly defines the standard stack"
+compose_shape=$(python3 - "${REPO_ROOT}" <<'PY'
 import sys, yaml
 from pathlib import Path
-c = yaml.safe_load((Path(sys.argv[1]) / "docker-compose.yml").read_text())
-has_include = "include" in c and "docker-compose.tier0.yml" in c["include"]
+root = Path(sys.argv[1])
+c = yaml.safe_load((root / "docker-compose.yml").read_text())
 has_services = bool(c.get("services"))
-print(f"has_include={has_include} has_services={has_services}")
+has_include = bool(c.get("include"))
+legacy_exists = (root / "docker-compose.tier0.yml").exists()
+print(f"has_services={has_services} has_include={has_include} legacy_exists={legacy_exists}")
 PY
 )
-# Want: include present pointing at tier0.yml, AND no services block
-# (services would shadow the include and cause silent drift).
-if echo "$shim_shape" | grep -q "has_include=True" \
-   && echo "$shim_shape" | grep -q "has_services=False"; then
+if echo "$compose_shape" | grep -q "has_services=True" \
+   && echo "$compose_shape" | grep -q "has_include=False" \
+   && echo "$compose_shape" | grep -q "legacy_exists=False"; then
     pass
 else
-    fail "docker-compose.yml must be a thin include shim:
-    include:
-      - docker-compose.tier0.yml
-Got: $shim_shape
-Adding a services: block to docker-compose.yml shadows the include
-and creates a second copy of the canonical stack that will drift
-out of sync with tier0.yml."
+    fail "docker-compose.yml must define services directly, without an include or legacy file. Got: $compose_shape"
 fi
 
 # ── 4. camera-agent compose: same check ─────────────────────
@@ -138,8 +117,8 @@ else
     fail "found forbidden RUN in build:"$'\n'"${violations}"
 fi
 
-# ── 4a. tier0.yml yolov8-weights-init: image+build pattern, cp command ──
-# After ISSUE-7 v3 the Tier 0 default uses the pre-baked weights
+# ── 4a. docker-compose.yml yolov8-weights-init: image+build pattern, cp command ──
+# After ISSUE-7 v3 the standard stack default uses the pre-baked weights
 # image directly. The service must:
 #   * declare BOTH `image:` (so Compose pulls when available) AND
 #     `build:` (so Compose falls back to building locally if the
@@ -149,10 +128,10 @@ fi
 #   * make the image tag operator-overridable via YOLOV8_WEIGHTS_IMAGE
 #     so operators on networks that block ghcr.io can point at a
 #     private registry.
-start_test "tier0 yolov8-weights-init has image+build pattern (Compose pull-or-build)"
+start_test "standard yolov8-weights-init has image+build pattern (Compose pull-or-build)"
 yolov_shape=$(python3 - "${REPO_ROOT}" <<'PY'
 import sys, yaml
-c = yaml.safe_load(open(sys.argv[1] + "/docker-compose.tier0.yml"))
+c = yaml.safe_load(open(sys.argv[1] + "/docker-compose.yml"))
 svc = c["services"]["yolov8-weights-init"]
 print("HAS_IMAGE:", "image" in svc)
 print("HAS_BUILD:", "build" in svc)
@@ -171,10 +150,10 @@ if echo "$yolov_shape" | grep -q "HAS_IMAGE: True" \
    && echo "$yolov_shape" | grep -q "CMD_HAS_YOLO_EXP: False"; then
     pass
 else
-    fail "tier0 yolov8-weights-init must use image+build with a cp command. Got: $yolov_shape"
+    fail "standard yolov8-weights-init must use image+build with a cp command. Got: $yolov_shape"
 fi
 
-start_test "tier0 yolov8-weights-init has explicit pull_policy: missing (pull-then-build)"
+start_test "standard yolov8-weights-init has explicit pull_policy: missing (pull-then-build)"
 # Self-review M-1: with image+build both defined, Compose's default
 # pull semantics aren't fully documented. We pin pull_policy: missing
 # so Compose tries to pull from GHCR first and falls back to building
@@ -183,7 +162,7 @@ start_test "tier0 yolov8-weights-init has explicit pull_policy: missing (pull-th
 # ~10-min local build. Either way the single command works.
 pp=$(python3 - "${REPO_ROOT}" <<'PY'
 import sys, yaml
-c = yaml.safe_load(open(sys.argv[1] + "/docker-compose.tier0.yml"))
+c = yaml.safe_load(open(sys.argv[1] + "/docker-compose.yml"))
 print(c["services"]["yolov8-weights-init"].get("pull_policy", "(unset)"))
 PY
 )
@@ -193,10 +172,10 @@ else
     fail "yolov8-weights-init must declare pull_policy: missing; got: '$pp'"
 fi
 
-start_test "tier0 yolov8-weights-init image is YOLOV8_WEIGHTS_IMAGE-overridable"
+start_test "standard yolov8-weights-init image is YOLOV8_WEIGHTS_IMAGE-overridable"
 img=$(python3 - "${REPO_ROOT}" <<'PY'
 import sys, yaml
-c = yaml.safe_load(open(sys.argv[1] + "/docker-compose.tier0.yml"))
+c = yaml.safe_load(open(sys.argv[1] + "/docker-compose.yml"))
 print(c["services"]["yolov8-weights-init"]["image"])
 PY
 )
@@ -214,7 +193,7 @@ fi
 # It's just an alpine base + COPY of the .onnx.
 start_test "GHA workflow publishes the tag docker-compose expects (v8.3.0)"
 # Regression for ISSUE-7 v3 fix: the first GHA build pushed
-# `:v8.3.40` (Python package version) while docker-compose.tier0.yml
+# `:v8.3.40` (Python package version) while docker-compose.yml
 # expected `:v8.3.0` (weights release version). Operators got
 # "manifest unknown" on every pull. Lock the alignment so the two
 # values can never drift again.
@@ -223,7 +202,7 @@ import re, sys, yaml
 root = sys.argv[1]
 
 # Extract `:vX.Y.Z` from the compose image default.
-compose_text = open(root + "/docker-compose.tier0.yml").read()
+compose_text = open(root + "/docker-compose.yml").read()
 m = re.search(r"ghcr\.io/open-nvr/yolov8-weights:v([0-9.]+)", compose_text)
 compose_tag = m.group(1) if m else None
 
@@ -299,15 +278,15 @@ fi
 # The contract being pinned: the LAST FROM in mediamtx's
 # dockerfile_inline must be `curlimages/curl:*`.
 start_test "mediamtx dockerfile_inline final base is curlimages/curl (libs wired)"
-tier0_inline=$(python3 - "${REPO_ROOT}" <<'PY'
+standard_inline=$(python3 - "${REPO_ROOT}" <<'PY'
 import sys, yaml
 root = sys.argv[1]
-c = yaml.safe_load(open(root + "/docker-compose.tier0.yml"))
+c = yaml.safe_load(open(root + "/docker-compose.yml"))
 print(c["services"]["mediamtx"]["build"]["dockerfile_inline"])
 PY
 )
 # Extract the LAST FROM line — that's the final stage's base image.
-final_base=$(echo "$tier0_inline" | grep -E "^[[:space:]]*FROM " | tail -1 | awk '{print $2}')
+final_base=$(echo "$standard_inline" | grep -E "^[[:space:]]*FROM " | tail -1 | awk '{print $2}')
 if echo "$final_base" | grep -qE "^curlimages/curl:"; then
     pass
 else
@@ -331,7 +310,7 @@ fi
 # defaults, hardened YAML config ignored (RTSPS doesn't bind,
 # RTMP/SRT come up enabled, etc.). ISSUE-7 v5.
 start_test "mediamtx dockerfile_inline resets WORKDIR / after base switch"
-if echo "$tier0_inline" | grep -qE "^[[:space:]]*WORKDIR[[:space:]]+/[[:space:]]*$"; then
+if echo "$standard_inline" | grep -qE "^[[:space:]]*WORKDIR[[:space:]]+/[[:space:]]*$"; then
     pass
 else
     fail "mediamtx Dockerfile must include 'WORKDIR /' so the hardened config at /mediamtx.yml is found"
@@ -339,7 +318,7 @@ fi
 
 # ── 5c. USER root reset (mediamtx needs to bind listener ports) ──
 start_test "mediamtx dockerfile_inline resets USER root after base switch"
-if echo "$tier0_inline" | grep -qE "^[[:space:]]*USER[[:space:]]+root[[:space:]]*$"; then
+if echo "$standard_inline" | grep -qE "^[[:space:]]*USER[[:space:]]+root[[:space:]]*$"; then
     pass
 else
     fail "mediamtx Dockerfile must include 'USER root' so it can bind listener ports"
@@ -351,7 +330,7 @@ fi
 # ENTRYPOINT ["/mediamtx"], breaking the boot silently. We clear
 # it explicitly.
 start_test "mediamtx dockerfile_inline clears inherited CMD with CMD []"
-if echo "$tier0_inline" | grep -qE "^[[:space:]]*CMD[[:space:]]+\[\][[:space:]]*$"; then
+if echo "$standard_inline" | grep -qE "^[[:space:]]*CMD[[:space:]]+\[\][[:space:]]*$"; then
     pass
 else
     fail "mediamtx Dockerfile must include 'CMD []' so inherited base-image CMD doesn't leak as args to mediamtx"
@@ -369,10 +348,7 @@ start_test "every FROM in build inline uses Docker Hub or ghcr.io/open-nvr"
 disallowed=$(python3 - <<PY
 import yaml, re
 bad = []
-for fn in ("docker-compose.tier0.yml", "docker-compose.linux.yml",
-           "docker-compose.camera-agent.yml"):
-    # ISSUE-17: docker-compose.yml is an include shim — no services
-    # to scan there; tier0.yml is the implementation.
+for fn in ("docker-compose.yml", "docker-compose.camera-agent.yml"):
     c = yaml.safe_load(open("${REPO_ROOT}/" + fn))
     for name, svc in (c.get("services") or {}).items():
         build = svc.get("build")
@@ -471,13 +447,12 @@ fi
 # ── 7. cert-init services use alpine/openssl, not plain alpine ──
 # Positive contract: lock the fix shape so a future contributor
 # can't revert to alpine:3.20 + apk add openssl.
-start_test "mediamtx-certs-init (tier0/linux/yml) uses alpine/openssl base"
+start_test "mediamtx-certs-init uses alpine/openssl base"
 cert_init_bases=$(python3 - "$REPO_ROOT" <<'PY'
 import sys, os, yaml
 root = sys.argv[1]
 out = []
-for fn in ("docker-compose.tier0.yml", "docker-compose.linux.yml"):
-    # ISSUE-17: docker-compose.yml is now an include shim → tier0.yml.
+for fn in ("docker-compose.yml",):
     c = yaml.safe_load(open(os.path.join(root, fn)))
     svc = c["services"]["mediamtx-certs-init"]
     out.append(f"{fn}:{svc.get('image','(unset)')}")
@@ -490,10 +465,10 @@ else
     pass
 fi
 
-start_test "nginx-certs-init (tier0) uses alpine/openssl base"
+start_test "nginx-certs-init (standard) uses alpine/openssl base"
 nginx_cert_base=$(python3 - "$REPO_ROOT" <<'PY'
 import sys, os, yaml
-c = yaml.safe_load(open(os.path.join(sys.argv[1], "docker-compose.tier0.yml")))
+c = yaml.safe_load(open(os.path.join(sys.argv[1], "docker-compose.yml")))
 print(c["services"]["nginx-certs-init"].get("image", "(unset)"))
 PY
 )
@@ -513,12 +488,9 @@ ep_check=$(python3 - "$REPO_ROOT" <<'PY'
 import sys, os, yaml
 root = sys.argv[1]
 bad = []
-# ISSUE-17: docker-compose.yml is now an include shim → tier0.yml,
-# so it doesn't have its own mediamtx-certs-init to inspect.
 specs = [
-    ("docker-compose.tier0.yml", "mediamtx-certs-init"),
-    ("docker-compose.tier0.yml", "nginx-certs-init"),
-    ("docker-compose.linux.yml", "mediamtx-certs-init"),
+    ("docker-compose.yml", "mediamtx-certs-init"),
+    ("docker-compose.yml", "nginx-certs-init"),
 ]
 for fn, name in specs:
     c = yaml.safe_load(open(os.path.join(root, fn)))
@@ -581,9 +553,7 @@ import sys, os, yaml, re
 from pathlib import Path
 
 REPO = Path(sys.argv[1])
-COMPOSES = ("docker-compose.tier0.yml", "docker-compose.linux.yml",
-            "docker-compose.camera-agent.yml")
-# ISSUE-17: docker-compose.yml is an include shim → tier0.yml.
+COMPOSES = ("docker-compose.yml", "docker-compose.camera-agent.yml")
 
 # Lines that pin the bug class.
 RUNTIME_INSTALL_RE = re.compile(
@@ -683,8 +653,7 @@ import sys, yaml
 from pathlib import Path
 REPO = Path(sys.argv[1])
 bad = []
-for fn in ("docker-compose.tier0.yml", "docker-compose.linux.yml"):
-    # ISSUE-17: docker-compose.yml is now an include shim → tier0.yml.
+for fn in ("docker-compose.yml",):
     c = yaml.safe_load((REPO / fn).read_text())
     svc = c["services"].get("opennvr-core")
     if not svc:
@@ -693,7 +662,7 @@ for fn in ("docker-compose.tier0.yml", "docker-compose.linux.yml"):
     has_build = bool(svc.get("build"))
     pp = svc.get("pull_policy")
     img = svc.get("image", "")
-    # tier0 ships image-only (no build at all). That's fine — it's the
+    # standard ships image-only (no build at all). That's fine — it's the
     # ultra-thin install-from-GHCR path. We only enforce the contract
     # when the service ALSO has a build block.
     if has_build:

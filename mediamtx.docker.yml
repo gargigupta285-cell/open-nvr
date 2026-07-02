@@ -200,8 +200,8 @@ hls: yes
 # HTTPS. Same server.crt / server.key as the RTSPS listener (see scripts/
 # generate-mediamtx-certs.sh). hlsAddress stays at :8888 inside the
 # container — the docker-compose port map enforces 127.0.0.1:8888 on
-# the host side. Operators using host-network mode must also lock down
-# the listener (see docker-compose.linux.yml header comment).
+# the host side. Keep these listeners behind the bridge and published
+# only through the canonical Compose port mappings.
 hlsAddress: :8888
 hlsEncryption: yes
 hlsServerKey: /etc/mediamtx-certs/server.key

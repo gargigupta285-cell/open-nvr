@@ -70,7 +70,7 @@ The current release. Everything below is in main and runnable today.
 - Conformance test suite (`python -m conformance ...`) that proves an
   adapter will register cleanly with KAI-C.
 - Pre-built container images on GHCR for the core + all seven shipped
-  adapters. Tier 0 install is `docker compose up`, no source build.
+  adapters. standard stack install is `docker compose up`, no source build.
 
 ### Documentation
 - [README](../README.md) — three-audience hero (homelab / procurement /

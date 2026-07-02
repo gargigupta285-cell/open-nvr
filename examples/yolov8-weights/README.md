@@ -1,10 +1,10 @@
 # OpenNVR — yolov8-weights image
 
-A ~20 MB Docker image that contains `yolov8n.onnx` pre-baked. Used by `docker-compose.tier0.yml`'s `yolov8-weights-init` container instead of the older runtime apt+pip+export path (which failed for operators behind ISP firewalls that filter `deb.debian.org` or `pypi.org`).
+A ~20 MB Docker image that contains `yolov8n.onnx` pre-baked. Used by `docker-compose.yml`'s `yolov8-weights-init` container instead of the older runtime apt+pip+export path (which failed for operators behind ISP firewalls that filter `deb.debian.org` or `pypi.org`).
 
 ## You usually don't need to touch this
 
-`docker compose -f docker-compose.tier0.yml up -d` Just Works:
+`docker compose -f docker-compose.yml up -d` Just Works:
 
 - If `ghcr.io/open-nvr/yolov8-weights:v8.3.0` is published (the OpenNVR release path), Docker pulls it in ~5 seconds and the init container copies the ONNX into the volume.
 - If the published image isn't reachable from your host (registry blocked, fresh repo before first release, etc.), Docker Compose's `build:` fallback kicks in and builds the image locally from the Dockerfile in this directory. First-time build takes ~10 min (dominated by the `ultralytics/ultralytics:8.3.40` base pull, ~3 GB). Subsequent `up -d` runs use the cached image instantly.
@@ -25,7 +25,7 @@ scp /tmp/yolov8-weights.tar.gz ubuntu@deploy-box:/tmp/
 # On the deploy box:
 docker load < /tmp/yolov8-weights.tar.gz
 echo 'YOLOV8_WEIGHTS_IMAGE=yolov8-weights:v8.3.0' >> .env
-docker compose -f docker-compose.tier0.yml up -d
+docker compose -f docker-compose.yml up -d
 ```
 
 **2. You have a fine-tuned YOLOv8 model you want to bake in.** Override the `YOLOV8_PT_URL` build arg to point at your `.pt`:
@@ -70,4 +70,4 @@ The OpenNVR YOLOv8 adapter is conformance-tested against this exact byte layout 
 
 ## CI publishes this automatically
 
-`.github/workflows/build-yolov8-weights.yml` builds + pushes `ghcr.io/open-nvr/yolov8-weights:v<ultralytics-tag>` on every OpenNVR release tag. Multi-arch (amd64 + arm64). On main-branch pushes it publishes `:main` and `:sha-<short>` for traceability. The standard `docker compose -f docker-compose.tier0.yml up -d` picks up whatever's published on GHCR.
+`.github/workflows/build-yolov8-weights.yml` builds + pushes `ghcr.io/open-nvr/yolov8-weights:v<ultralytics-tag>` on every OpenNVR release tag. Multi-arch (amd64 + arm64). On main-branch pushes it publishes `:main` and `:sha-<short>` for traceability. The standard `docker compose -f docker-compose.yml up -d` picks up whatever's published on GHCR.

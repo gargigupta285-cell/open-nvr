@@ -50,10 +50,10 @@ The architecture is published — a peer-citable paper this year, 34 references,
 ```bash
 git clone https://github.com/open-nvr/open-nvr.git
 cd open-nvr
-./start.sh up
+./start.sh install
 ```
 
-That's it. First run launches a brief interactive setup (deploy mode, recording path, secrets generated for you). Run `./start.sh up` again to start containers.
+The installer detects your platform, preserves existing `.env` values, generates missing credentials, pulls the core stack, and optionally installs a Compose-backed example. It then starts OpenNVR and prints the first-time setup token.
 
 > **Just want to try the AI?** `examples/camera-agent/quickstart.sh` brings up the voice agent in one command (`--chat` for a lighter text version) — no GPU, and you can point it at your laptop webcam. See [Talk to your cameras](#talk-to-your-cameras).
 
@@ -104,7 +104,7 @@ cp .env.example .env
 ./start.sh up                            # still gets pre-flight + posture + token
 ```
 
-Skipping `./start.sh up` and using bare `docker compose up -d` works too (Docker Compose v2.20+ — `docker-compose.yml` is an `include:` shim → `tier0.yml`), but you'll lose: NIC topology auto-detect, the security posture banner, the one-time setup token surfacing. Grep the logs manually if you go that route.
+Skipping `./start.sh up` and using bare `docker compose up -d` works too, but you'll lose: NIC topology auto-detect, the security posture banner, the one-time setup token surfacing. Grep the logs manually if you go that route.
 
 **Need more detail?** [`DOCKER_QUICKSTART.md`](DOCKER_QUICKSTART.md) covers retention, production hardening, profile options. [`docs/DOCKER_SETUP.md`](docs/DOCKER_SETUP.md#compose-file-reference) explains every compose file in the repo and when each one applies.
 

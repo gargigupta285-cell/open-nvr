@@ -10,7 +10,7 @@ The very first time the core starts it prints a one-time setup token to
 its log:
 
 ```bash
-docker compose -f docker-compose.tier0.yml logs opennvr-core | grep -i 'setup token'
+docker compose -f docker-compose.yml logs opennvr-core | grep -i 'setup token'
 ```
 
 Open <http://localhost:8000>, paste the token on the setup screen, then
@@ -62,7 +62,7 @@ from.
 - **Recording → Schedule** — 24/7 by default. Switch to motion-triggered
   via the "AI detection" checkbox if you've enabled inference on that
   camera.
-- **AI detection → Enabled** — toggles per-camera inference. Tier 0
+- **AI detection → Enabled** — toggles per-camera inference. standard stack
   defaults to YOLOv8 detection on every frame; disable here if you don't
   want detection on a particular camera.
 - **TLS → Allow plaintext RTSP** — off by default. Turning this on
@@ -103,9 +103,9 @@ you can see:
 - **Per-camera enable / disable** — toggle which cameras the adapter
   runs against.
 
-The Tier 0 install ships YOLOv8 only. Additional adapters (Whisper,
+The standard stack install ships YOLOv8 only. Additional adapters (Whisper,
 Piper, fast-plate-ocr, InsightFace, BLIP) are pulled in by the
-camera-agent overlay or by enabling them manually in `docker-compose.tier0.yml`
+camera-agent overlay or by enabling them manually in `docker-compose.yml`
 and adding KAI-C registry entries.
 
 ### Audit log
@@ -147,12 +147,12 @@ login.
 
 ```bash
 # Everything
-docker compose -f docker-compose.tier0.yml logs -f
+docker compose -f docker-compose.yml logs -f
 
 # A specific service
-docker compose -f docker-compose.tier0.yml logs -f opennvr-core
-docker compose -f docker-compose.tier0.yml logs -f yolov8-adapter
-docker compose -f docker-compose.tier0.yml logs -f mediamtx
+docker compose -f docker-compose.yml logs -f opennvr-core
+docker compose -f docker-compose.yml logs -f yolov8-adapter
+docker compose -f docker-compose.yml logs -f mediamtx
 ```
 
 The core service logs are also visible in the web UI under **Settings →
@@ -161,8 +161,8 @@ Server logs** if you don't want to drop to a shell.
 ### Update to the latest images
 
 ```bash
-docker compose -f docker-compose.tier0.yml pull
-docker compose -f docker-compose.tier0.yml up -d
+docker compose -f docker-compose.yml pull
+docker compose -f docker-compose.yml up -d
 ```
 
 The database schema migrates automatically on core startup. Manual
@@ -175,8 +175,8 @@ it through the UI, the only recovery is to reset the database volume and
 re-run the first-boot setup flow:
 
 ```bash
-docker compose -f docker-compose.tier0.yml down -v
-docker compose -f docker-compose.tier0.yml up -d
+docker compose -f docker-compose.yml down -v
+docker compose -f docker-compose.yml up -d
 ```
 
 **This deletes the camera list, user accounts, and audit log.**
@@ -204,9 +204,9 @@ After reset, add your cameras back via the UI.
 ### Database connection errors
 
 ```bash
-docker compose -f docker-compose.tier0.yml restart db
-docker compose -f docker-compose.tier0.yml ps          # wait for db to be Up (healthy)
-docker compose -f docker-compose.tier0.yml restart opennvr-core
+docker compose -f docker-compose.yml restart db
+docker compose -f docker-compose.yml ps          # wait for db to be Up (healthy)
+docker compose -f docker-compose.yml restart opennvr-core
 ```
 
 ### Disk filling up

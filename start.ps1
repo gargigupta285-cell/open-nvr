@@ -1,11 +1,11 @@
 ﻿# ============================================================
 # OpenNVR - Smart Launcher (Windows PowerShell)
 # ============================================================
-# First run → launches the interactive installer automatically.
+# Installation is explicit: run .\start.ps1 install or .\scripts\install.ps1.
 # Subsequent runs → validates and starts services.
 #
 # Usage:
-#   .\start.ps1              # start (or install on first run)
+#   .\start.ps1              # start an existing installation
 #   .\start.ps1 build        # rebuild images and start
 #   .\start.ps1 install      # re-run the interactive installer
 #   .\start.ps1 down         # stop all services
@@ -37,8 +37,13 @@ function Get-EnvVar {
 # ── Build Compose profile args ─────────────────────────────
 function Get-ComposeArgs {
     $args = @("-f", $ComposeFile)
-    $ai = Get-EnvVar "AI_ENABLED"
-    if ($ai -eq "true") { $args += @("--profile", "ai") }
+    $exampleCompose = Get-EnvVar "OPENNVR_EXAMPLE_COMPOSE"
+    $exampleProfile = Get-EnvVar "OPENNVR_EXAMPLE_PROFILE"
+    if ($exampleCompose) {
+        if (-not (Test-Path $exampleCompose)) { throw "Configured example Compose file not found: $exampleCompose" }
+        $args += @("-f", $exampleCompose)
+    }
+    if ($exampleProfile) { $args += @("--profile", $exampleProfile) }
     return $args
 }
 
@@ -141,7 +146,7 @@ function Show-FirstTimeSetupToken {
     # can copy it from the wizard's terminal instead of grepping logs.
     #
     # ISSUE-5 fix: the previous version polled docker logs for 30s
-    # after `compose up -d`. But `up -d` returns when containers are
+    # after `compose up -d --remove-orphans`. But `up -d` returns when containers are
     # *scheduled*, not when they're *healthy*. Post-ISSUE-3 the
     # yolov8-weights-init container takes ~3 min on x86 / ~10-15 min
     # on a Pi 5 to export the ONNX model before opennvr-core even
@@ -254,11 +259,13 @@ function Show-FirstTimeSetupToken {
         $raw = & docker compose @ComposeArgs logs `
             --no-color --no-log-prefix --tail 5000 opennvr-core 2>$null
         if ($raw) {
-            $lines = $raw -split "`n"
+            $lines = $raw -split "
+"
             for ($i = $lines.Length - 1; $i -ge 0; $i--) {
                 if ($lines[$i] -match "first-time setup token") {
                     $end = [Math]::Min($i + 6, $lines.Length - 1)
-                    $banner = ($lines[$i..$end] -join "`n")
+                    $banner = ($lines[$i..$end] -join "
+")
                     break
                 }
             }
@@ -271,7 +278,8 @@ function Show-FirstTimeSetupToken {
     if ($banner) {
         Write-Color "  🔑 First-time setup token (one-time use — copy into the UI):" Yellow
         Write-Color ""
-        foreach ($line in ($banner -split "`n")) { Write-Color ("  " + $line) White }
+        foreach ($line in ($banner -split "
+")) { Write-Color ("  " + $line) White }
         Write-Color ""
     } else {
         # Container healthy AND no banner = admin already activated on
@@ -307,18 +315,15 @@ switch ($Command) {
 
     "up" {
         if (-not (Test-Path ".env")) {
-            Write-Color "  No .env found — launching installer..." Yellow
-            Write-Color ""
-            $installScript = Join-Path $PSScriptRoot "scripts\install.ps1"
-            & $installScript
-            exit $LASTEXITCODE
+            Write-Color "  No .env found. Run: .\start.ps1 install" Red
+            exit 1
         }
         Show-Banner
         $ok = Invoke-Validate
         if (-not $ok) { exit 1 }
         $ca = Get-ComposeArgs
         Write-Color "  Starting all services ..." Green
-        docker compose @ca up -d
+        docker compose @ca up -d --remove-orphans
         Write-Color ""
         $u = Get-EnvVar "DEFAULT_ADMIN_USERNAME"
         Write-Color "  ✓ OpenNVR is running!" Green
@@ -330,11 +335,8 @@ switch ($Command) {
 
     "build" {
         if (-not (Test-Path ".env")) {
-            Write-Color "  No .env found — launching installer..." Yellow
-            Write-Color ""
-            $installScript = Join-Path $PSScriptRoot "scripts\install.ps1"
-            & $installScript
-            exit $LASTEXITCODE
+            Write-Color "  No .env found. Run: .\start.ps1 install" Red
+            exit 1
         }
         Show-Banner
         $ok = Invoke-Validate
@@ -342,7 +344,7 @@ switch ($Command) {
         $ca = Get-ComposeArgs
         Write-Color "  Building images and starting all services ..." Green
         docker compose @ca build
-        docker compose @ca up -d
+        docker compose @ca up -d --remove-orphans
         Write-Color ""
         $u = Get-EnvVar "DEFAULT_ADMIN_USERNAME"
         Write-Color "  ✓ OpenNVR is running!" Green

@@ -450,8 +450,8 @@ def test_v015_has_no_escape_hatch_flag() -> None:
 # ---------------------------------------------------------------------------
 
 
-_TIER0_BRIDGE_ENV = {
-    # Realistic Tier 0 docker-compose values: the backend talks to the
+_STANDARD_BRIDGE_ENV = {
+    # Realistic standard stack docker-compose values: the backend talks to the
     # mediamtx service over the Docker embedded DNS, which resolves to
     # the peer container's bridge IP (RFC1918).
     "MEDIAMTX_BASE_URL":     "http://mediamtx:8889",
@@ -475,7 +475,7 @@ _PUBLIC_EGRESS_ENV = {
 
 def _patch_bridge_dns(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make the bare hostname `mediamtx` resolve to a Docker bridge IP
-    so V-015 can evaluate the realistic Tier 0 configuration without an
+    so V-015 can evaluate the realistic standard stack configuration without an
     actual Docker daemon."""
     import socket as _socket
 
@@ -490,10 +490,10 @@ def _patch_bridge_dns(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_socket, "getaddrinfo", fake)
 
 
-def test_tier0_bridge_only_boots_cleanly(
+def test_standard_bridge_only_boots_cleanly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Threat model (A): the realistic Tier 0 setup — backend and
+    """Threat model (A): the realistic standard stack setup — backend and
     mediamtx in separate containers on the Docker bridge, no externals
     configured — must boot cleanly. The previous loopback-only check
     refused on every URL in this configuration; that's the regression
@@ -501,7 +501,7 @@ def test_tier0_bridge_only_boots_cleanly(
     """
     _patch_bridge_dns(monkeypatch)
     sys.path.insert(0, str(REPO_ROOT / "server"))
-    _apply_env(_TIER0_BRIDGE_ENV)
+    _apply_env(_STANDARD_BRIDGE_ENV)
     import importlib
 
     mod = importlib.import_module("core.config")
@@ -524,7 +524,7 @@ def test_egress_externals_can_be_public_with_internals_on_bridge(
     """
     _patch_bridge_dns(monkeypatch)
     sys.path.insert(0, str(REPO_ROOT / "server"))
-    _apply_env({**_TIER0_BRIDGE_ENV, **_PUBLIC_EGRESS_ENV})
+    _apply_env({**_STANDARD_BRIDGE_ENV, **_PUBLIC_EGRESS_ENV})
     import importlib
 
     mod = importlib.import_module("core.config")
@@ -584,7 +584,7 @@ def test_browser_urls_never_leak_bridge_hostname_when_externals_set(
     """
     _patch_bridge_dns(monkeypatch)
     sys.path.insert(0, str(REPO_ROOT / "server"))
-    _apply_env({**_TIER0_BRIDGE_ENV, **_PUBLIC_EGRESS_ENV})
+    _apply_env({**_STANDARD_BRIDGE_ENV, **_PUBLIC_EGRESS_ENV})
     import importlib
 
     mod = importlib.import_module("core.config")
@@ -619,7 +619,7 @@ def test_browser_urls_fall_through_to_internal_when_externals_unset(
     """
     _patch_bridge_dns(monkeypatch)
     sys.path.insert(0, str(REPO_ROOT / "server"))
-    _apply_env(_TIER0_BRIDGE_ENV)  # no externals
+    _apply_env(_STANDARD_BRIDGE_ENV)  # no externals
     import importlib
 
     mod = importlib.import_module("core.config")
@@ -673,7 +673,7 @@ def test_egress_webrtc_url_unaffected_by_internal_bridge_failure(
 
     monkeypatch.setattr(_socket, "getaddrinfo", fake)
     sys.path.insert(0, str(REPO_ROOT / "server"))
-    _apply_env({**_TIER0_BRIDGE_ENV, **_PUBLIC_EGRESS_ENV})
+    _apply_env({**_STANDARD_BRIDGE_ENV, **_PUBLIC_EGRESS_ENV})
     import importlib
 
     mod = importlib.import_module("core.config")
@@ -718,65 +718,23 @@ def test_yaml_cert_paths_are_absolute() -> None:
 
 
 def test_compose_has_mediamtx_certs_init_service() -> None:
-    """M1b-fixup-v2 F-9: the canonical compose file must declare a
-    one-shot mediamtx-certs-init service so a fresh `docker compose up`
-    doesn't fail on missing ./mediamtx-certs/server.{crt,key}.
-
-    ISSUE-17 changed where ``the canonical compose file`` is — it used
-    to be ``docker-compose.yml`` directly, now that file is a thin
-    ``include:`` shim → ``docker-compose.tier0.yml`` where the actual
-    services live. This test follows the implementation: it asserts
-    tier0.yml has the service, AND that docker-compose.yml is the
-    include shim (so bare ``docker compose up -d`` picks up the same
-    service via include resolution).
-    """
-    # Walk the actual implementation file where the services live.
-    compose = yaml.safe_load(
-        (REPO_ROOT / "docker-compose.tier0.yml").read_text()
-    )
+    """The canonical Compose file provisions MediaMTX certificates."""
+    compose = yaml.safe_load((REPO_ROOT / "docker-compose.yml").read_text())
     services = compose.get("services", {})
-    assert "mediamtx-certs-init" in services, (
-        "docker-compose.tier0.yml is missing the mediamtx-certs-init service"
-    )
-    # And the main mediamtx service must depend on it.
+    assert "mediamtx-certs-init" in services
     mediamtx_deps = services.get("mediamtx", {}).get("depends_on", {})
     if isinstance(mediamtx_deps, dict):
-        assert "mediamtx-certs-init" in mediamtx_deps, (
-            "mediamtx service must depend on mediamtx-certs-init"
-        )
+        assert "mediamtx-certs-init" in mediamtx_deps
         cond = mediamtx_deps["mediamtx-certs-init"].get("condition")
-        assert cond == "service_completed_successfully", (
-            f"mediamtx must wait for service_completed_successfully, "
-            f"got {cond!r}"
-        )
+        assert cond == "service_completed_successfully"
 
 
-def test_canonical_docker_compose_yml_is_include_shim() -> None:
-    """ISSUE-17 contract: bare ``docker compose up -d`` (no -f flag)
-    must give operators the same stack as
-    ``docker compose -f docker-compose.tier0.yml up -d``.
-
-    The way that contract is implemented is: docker-compose.yml is a
-    thin ``include:`` pointer at tier0.yml. If a future PR adds a
-    services: block here, that shadows the include silently and
-    operators get a different stack from the bare invocation than
-    they expect. Lock the shape.
-    """
+def test_canonical_docker_compose_yml_is_self_contained() -> None:
+    """The standard filename owns the stack; no shim or legacy file remains."""
     compose = yaml.safe_load((REPO_ROOT / "docker-compose.yml").read_text())
-    assert "include" in compose, (
-        "docker-compose.yml must declare ``include: [docker-compose.tier0.yml]`` "
-        "so bare ``docker compose up -d`` resolves to the canonical stack"
-    )
-    assert "docker-compose.tier0.yml" in compose["include"], (
-        f"docker-compose.yml's include list must contain "
-        f"docker-compose.tier0.yml; got {compose['include']!r}"
-    )
-    assert not compose.get("services"), (
-        "docker-compose.yml must NOT define its own services: block — that "
-        "shadows the include and creates a second copy of the canonical "
-        "stack that will drift out of sync with tier0.yml. Edit tier0.yml "
-        "instead."
-    )
+    assert compose.get("services"), "docker-compose.yml must define services directly"
+    assert not compose.get("include"), "docker-compose.yml must not include a legacy file"
+    assert not (REPO_ROOT / "docker-compose.tier0.yml").exists()
 
 
 # ---------------------------------------------------------------------------

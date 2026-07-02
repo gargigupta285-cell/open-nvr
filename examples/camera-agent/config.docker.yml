@@ -47,17 +47,17 @@ wake_word_required: true
 #   wake_fuzzy: 0.85            # 1.0 = exact only; < 0.85 = more forgiving
 
 # Vision tools — routed through KAI-C by the registered adapter NAME.
-# The Tier 0 stack registers ONLY the YOLOv8 object detector, under the
+# The standard stack stack registers ONLY the YOLOv8 object detector, under the
 # name ``default`` — so detect_objects must target ``default``.
 # BLIP (caption) and InsightFace (recognition) are NOT registered in the
-# Tier 0 KAI-C, so describe_camera / recognize_faces will report they're
+# standard stack KAI-C, so describe_camera / recognize_faces will report they're
 # unavailable until those adapters are registered. (They still point at
 # their intended names so they light up automatically once registered.)
 detection_adapter: default
 recognition_adapter: insightface
 caption_adapter: ${CAPTION_ADAPTER}   # blip — auto-registered by caption-adapter-register
 
-# Tools advertised to the LLM. Tier 0 only registers the YOLOv8 object
+# Tools advertised to the LLM. standard stack only registers the YOLOv8 object
 # detector, so the demo exposes just the two tools that actually work:
 # detect_objects (counts people/cars/…) and describe_camera (which falls
 # back to the detector when no caption adapter is present). This keeps the
@@ -92,7 +92,7 @@ event_ring_size: 256
 # NATS broadcast — picks up inference events fanned out by KAI-C so
 # the recent_events tool can answer "did anyone walk past in the
 # last 30 minutes?". The token matches the NATS --auth value in the
-# Tier 0 compose (which uses INTERNAL_API_KEY).
+# standard stack compose (which uses INTERNAL_API_KEY).
 nats_inference_url: nats://nats:4222
 nats_inference_token: ${INTERNAL_API_KEY}
 

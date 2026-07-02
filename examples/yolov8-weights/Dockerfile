@@ -3,14 +3,13 @@
 # ============================================================
 #
 # This image solves the "operator's ISP blocks deb.debian.org / PyPI"
-# problem reported in IN/CN/IR networks. The default Tier 0
+# problem reported in IN/CN/IR networks. The default standard stack
 # yolov8-weights-init container does an apt-get + pip install +
 # ultralytics export on first boot — three external repositories
 # that any of which can be filtered. Operators on those networks
 # pull THIS image instead via the offline overlay:
 #
-#     docker compose -f docker-compose.tier0.yml \
-#                    -f docker-compose.tier0.offline.yml up -d
+#     docker compose -f docker-compose.yml \
 #
 # The image is built and published by .github/workflows/
 # build-yolov8-weights.yml on every release tag. Operators with
@@ -32,7 +31,7 @@
 FROM ultralytics/ultralytics:8.3.40 AS exporter
 
 # Pin the .pt URL so the build is reproducible. v8.3.0 matches what
-# the default Tier 0 init container uses; if you change this, also
+# the default standard stack init container uses; if you change this, also
 # update the adapter conformance kit (docs/AI_ADAPTER_CONTRACT.md).
 ARG YOLOV8_PT_URL=https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt
 WORKDIR /build
@@ -52,20 +51,20 @@ RUN python -c "import urllib.request, sys; \
     python -c "import onnx; m = onnx.load('yolov8n.onnx'); print(f'ONNX op count: {len(m.graph.node)}, input: {m.graph.input[0].name}')"
 
 # ── Stage 2: tiny alpine image with the .onnx ──
-# Why alpine:3.20 instead of `FROM scratch`? Tier 0's
-# yolov8-weights-init service (in docker-compose.tier0.yml) runs
+# Why alpine:3.20 instead of `FROM scratch`? standard stack's
+# yolov8-weights-init service (in docker-compose.yml) runs
 # `sh -c "cp /yolov8n.onnx /weights/yolov8n.onnx"` inside this
 # image, which needs a shell. Alpine adds ~5 MB to the final
 # image (final size: ~20 MB). Worth it — operators on filtered
 # networks would otherwise need to add a shell themselves.
 FROM alpine:3.20
 COPY --from=exporter /build/yolov8n.onnx /yolov8n.onnx
-# ENTRYPOINT intentionally not set — Tier 0's service definition
+# ENTRYPOINT intentionally not set — standard stack's service definition
 # supplies its own `entrypoint: ["sh", "-c"]` + command.
 
 # Labels for ghcr.io UI and `docker image inspect`.
 LABEL org.opencontainers.image.title="OpenNVR YOLOv8n weights"
-LABEL org.opencontainers.image.description="Pre-built yolov8n.onnx (opset=12, imgsz=640, simplify=False) for OpenNVR Tier 0. Used by docker-compose.tier0.yml's yolov8-weights-init service instead of runtime apt+pip+export."
+LABEL org.opencontainers.image.description="Pre-built yolov8n.onnx (opset=12, imgsz=640, simplify=False) for OpenNVR standard stack. Used by docker-compose.yml's yolov8-weights-init service instead of runtime apt+pip+export."
 LABEL org.opencontainers.image.source="https://github.com/open-nvr/open-nvr"
 LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later"
 LABEL org.opencontainers.image.vendor="OpenNVR"

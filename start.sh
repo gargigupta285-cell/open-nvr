@@ -2,11 +2,11 @@
 # ============================================================
 # OpenNVR - Smart Launcher (Linux / macOS)
 # ============================================================
-# First run → launches the interactive installer automatically.
+# Installation is explicit: run ./start.sh install or ./scripts/install.sh.
 # Subsequent runs → validates and starts services.
 #
 # Usage:
-#   ./start.sh              # start (or install on first run)
+#   ./start.sh              # start an existing installation
 #   ./start.sh build        # rebuild images and start
 #   ./start.sh install      # re-run the interactive installer
 #   ./start.sh down         # stop all services
@@ -27,33 +27,14 @@ WHITE='\033[1;37m'
 NC='\033[0m'
 
 # ── Detect OS ──────────────────────────────────────────────
-# ISSUE-12 + ISSUE-13: Linux defaults to docker-compose.tier0.yml
-# (the canonical hardened path) instead of the historical
-# docker-compose.linux.yml. Reasons:
-#   * tier0.yml ships nginx + nginx-certs-init for the TLS edge
-#     this script's print_access_urls promises (``https://<lan-ip>/``).
-#     linux.yml had no TLS terminator, so operators following the
-#     printed URL hit "connection refused" on :443.
-#   * tier0.yml ships yolov8-weights-init + yolov8-adapter so the
-#     README's "YOLOv8 detection out of the box" actually works.
-#     linux.yml had detection only behind the opt-in --profile ai.
-#   * tier0.yml ships nats so the audit/events bus that downstream
-#     services subscribe to is actually present.
-#
-# Trade-off: tier0.yml uses Docker bridge networking (with the
-# subnet pinned to 172.28.0.0/16 — ISSUE-6 v7) instead of host
-# networking. ONVIF WS-Discovery (multicast 239.255.255.250:3702)
-# doesn't cross Docker bridges by default — operators relying on
-# multicast camera auto-discovery should add cameras by IP manually,
-# or set OPENNVR_COMPOSE_FILE=docker-compose.linux.yml to revert to
-# the host-networking variant for that specific use case. The vast
-# majority of installs use a known camera IP list (dual-NIC camera-
-# LAN topology) where multicast discovery isn't the path anyway.
+# All supported platforms use the canonical bridge-networked stack.
+# Camera discovery must use explicit IPs or unicast subnet scanning;
+# multicast WS-Discovery and host-network Compose are not supported.
 OS="$(uname -s)"
 case "$OS" in
   Linux*)
-    COMPOSE_FILE="docker-compose.tier0.yml"
-    OS_LABEL="Linux (Tier 0 — bridge networking + TLS edge)"
+    COMPOSE_FILE="docker-compose.yml"
+    OS_LABEL="Linux (standard stack — bridge networking + TLS edge)"
     ;;
   Darwin*)
     COMPOSE_FILE="docker-compose.yml"
@@ -67,8 +48,7 @@ case "$OS" in
 esac
 
 # Operator escape hatch — pin a specific compose file regardless of
-# OS detection. Useful for: testing the legacy linux.yml host-mode
-# path, dev workflows on docker-compose.yml, custom overlay files.
+# OS detection. Useful for testing custom Compose overlays.
 if [ -n "${OPENNVR_COMPOSE_FILE:-}" ]; then
     if [ -f "${OPENNVR_COMPOSE_FILE}" ]; then
         COMPOSE_FILE="${OPENNVR_COMPOSE_FILE}"
@@ -89,10 +69,18 @@ get_env_var() {
 
 # ── Build Docker Compose profile args ─────────────────────
 compose_args() {
-    local ai_enabled
-    ai_enabled=$(get_env_var "AI_ENABLED")
     local args="-f $COMPOSE_FILE"
-    [[ "$ai_enabled" == "true" ]] && args="$args --profile ai"
+    local example_compose example_profile
+    example_compose=$(get_env_var "OPENNVR_EXAMPLE_COMPOSE")
+    example_profile=$(get_env_var "OPENNVR_EXAMPLE_PROFILE")
+    if [[ -n "$example_compose" ]]; then
+        [[ -f "$example_compose" ]] || {
+            echo "Configured example Compose file not found: $example_compose" >&2
+            return 1
+        }
+        args="$args -f $example_compose"
+    fi
+    [[ -n "$example_profile" ]] && args="$args --profile $example_profile"
     echo "$args"
 }
 
@@ -280,8 +268,8 @@ nic_ip() {
 
 # Returns "single", "dual-declared", or "multi-undeclared" on stdout.
 # Side effects: exports NGINX_BIND_HOST so the subsequent
-# `docker compose up -d` picks it up via the compose interpolation
-# in docker-compose.tier0.yml.
+# `docker compose up -d --remove-orphans` picks it up via the compose interpolation
+# in docker-compose.yml.
 configure_nginx_bind_host() {
     local nics nic_count mode
     nics=$(detect_routable_nics)
@@ -733,11 +721,11 @@ print_access_urls() {
 #
 # V-001 / M0 C-1 UX: the OpenNVR server mints a one-time setup token
 # on first boot and prints it to its stdout (so /auth/first-time-setup
-# can refuse anonymous LAN access). With `docker compose up -d` the
+# can refuse anonymous LAN access). With `docker compose up -d --remove-orphans` the
 # operator never sees that stdout — they have to grep the logs.
 #
 # ISSUE-5 fix: the previous version polled for 30s after `compose up
-# -d`, but `compose up -d` returns the moment containers are
+# -d`, but `compose up -d --remove-orphans` returns the moment containers are
 # *scheduled*, not when they're *healthy*. Post-ISSUE-3 the
 # yolov8-weights-init container takes ~3 min on x86 / ~10-15 min on a
 # Pi 5 to export the ONNX model before opennvr-core even starts
@@ -883,19 +871,16 @@ case "$COMMAND" in
     ;;
 
   up)
-    # First run check
     if [ ! -f ".env" ]; then
-        echo -e "${YELLOW}  No .env found — launching installer...${NC}"
-        echo ""
-        bash "$(dirname "$0")/scripts/install.sh"
-        exit $?
+        echo -e "${RED}  No .env found. Run: ./start.sh install${NC}"
+        exit 1
     fi
     print_banner
     run_validate || exit 1
     ARGS=$(compose_args)
     configure_nginx_bind_host || exit 1
     echo -e "  ${GREEN}Starting all services ...${NC}"
-    docker compose $ARGS up -d
+    docker compose $ARGS up -d --remove-orphans
     echo ""
     ADMIN_USER=$(get_env_var "DEFAULT_ADMIN_USERNAME")
     print_access_urls "$ADMIN_USER"
@@ -904,12 +889,9 @@ case "$COMMAND" in
     ;;
 
   build)
-    # First run check
     if [ ! -f ".env" ]; then
-        echo -e "${YELLOW}  No .env found — launching installer...${NC}"
-        echo ""
-        bash "$(dirname "$0")/scripts/install.sh"
-        exit $?
+        echo -e "${RED}  No .env found. Run: ./start.sh install${NC}"
+        exit 1
     fi
     print_banner
     run_validate || exit 1
@@ -917,7 +899,7 @@ case "$COMMAND" in
     configure_nginx_bind_host || exit 1
     echo -e "  ${GREEN}Building images and starting all services ...${NC}"
     docker compose $ARGS build
-    docker compose $ARGS up -d
+    docker compose $ARGS up -d --remove-orphans
     echo ""
     ADMIN_USER=$(get_env_var "DEFAULT_ADMIN_USERNAME")
     print_access_urls "$ADMIN_USER"
@@ -984,7 +966,7 @@ case "$COMMAND" in
     echo -e "  ${GREEN}✓ Old certs removed.${NC}"
     echo -e "  ${YELLOW}Restarting stack to regenerate certs ...${NC}"
     configure_nginx_bind_host || exit 1
-    docker compose $ARGS up -d
+    docker compose $ARGS up -d --remove-orphans
     echo ""
     echo -e "  ${GREEN}✓ Fresh certs will be generated by the init containers.${NC}"
     echo -e "  ${GRAY}You'll need to accept the new cert in your browser on next visit.${NC}"

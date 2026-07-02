@@ -1,37 +1,7 @@
 #!/usr/bin/env bash
-# ============================================================
-# Regression test for start.sh's compose-file auto-selection
-# (ISSUE-12 + ISSUE-13).
-#
-# CONTEXT
-# -------
-# start.sh detects the OS and picks a default compose file. The
-# historical Linux default (docker-compose.linux.yml) was a strict
-# functional subset of docker-compose.tier0.yml — no nginx TLS
-# edge, no yolov8-weights-init, no yolov8-adapter, no nats — yet
-# start.sh's print_access_urls always printed `https://<lan-ip>/`
-# as if nginx were present. Operators following the printed URL
-# on a Linux deploy hit "connection refused" on :443 because
-# nothing was listening there.
-#
-# The fix: switch the Linux default to docker-compose.tier0.yml
-# (the canonical hardened path) so the printed URL is always
-# accurate and the README's "detection out of the box" promise
-# is actually delivered. linux.yml stays available via an opt-in
-# OPENNVR_COMPOSE_FILE env var for operators who specifically
-# need the host-networking variant (rare — usually for ONVIF
-# multicast camera discovery on a single-LAN topology).
-#
-# WHAT THIS TEST DOES
-# -------------------
-# (1) Asserts start.sh's Linux case-arm points at tier0.yml.
-# (2) Asserts the OPENNVR_COMPOSE_FILE env-var override hook
-#     exists (so testing tools can short-circuit detection).
-# (3) Asserts every service that print_access_urls advertises
-#     (nginx for TLS, yolov8-* for detection, nats for events)
-#     is present in whatever start.sh picks by default on Linux.
-# ============================================================
-
+# Regression tests for the canonical Compose-file selection.
+# Every supported OS must use docker-compose.yml in bridge mode. Camera
+# discovery uses explicit IPs or unicast subnet scanning, never host mode.
 set -u
 
 . "$(dirname "$0")/_lib.sh"
@@ -48,31 +18,27 @@ fail() { echo "FAIL"; echo "      $1"; TESTS_FAILED=$((TESTS_FAILED + 1)); }
 echo "Running compose-file-selection tests"
 echo ""
 
-# ── 1. start.sh's Linux default is tier0.yml (not linux.yml) ──
-start_test "start.sh Linux case-arm selects docker-compose.tier0.yml"
+# ── 1. start.sh's Linux default is docker-compose.yml ──
+start_test "start.sh Linux case-arm selects docker-compose.yml"
 # Parse the case statement; look for the Linux*) arm and check
 # what COMPOSE_FILE it assigns. Awk picks the block between
 # ``Linux*)`` and the first ``;;``.
 linux_arm=$(awk '/Linux\*\)/,/;;/' "${REPO_ROOT}/start.sh")
 linux_default=$(echo "$linux_arm" | grep -oE 'COMPOSE_FILE="[^"]+"' | head -1 | sed 's/.*="//; s/"$//')
-if [ "$linux_default" = "docker-compose.tier0.yml" ]; then
+if [ "$linux_default" = "docker-compose.yml" ]; then
     pass
 else
-    fail "start.sh's Linux default is '${linux_default}' (expected docker-compose.tier0.yml).
-The historical linux.yml was a strict subset of tier0.yml (no nginx,
-no detection, no events bus) yet start.sh's printed URL assumed
-nginx was present. Reverting to linux.yml regresses ISSUE-12+13."
+    fail "start.sh Linux default must be docker-compose.yml; got: ${linux_default}"
 fi
 
 # ── 2. OPENNVR_COMPOSE_FILE override hook exists ──
-# So operators who specifically need host networking can opt back
-# into linux.yml: OPENNVR_COMPOSE_FILE=docker-compose.linux.yml ./start.sh up
+# The override remains available for custom Compose overlays.
 start_test "OPENNVR_COMPOSE_FILE env-var override hook is present"
 if grep -q 'OPENNVR_COMPOSE_FILE' "${REPO_ROOT}/start.sh"; then
     pass
 else
     fail "start.sh must honor an OPENNVR_COMPOSE_FILE env var so operators
-can opt into the host-networking variant (linux.yml) when needed."
+can select a custom Compose overlay when needed."
 fi
 
 # ── 3. Default compose file has the services start.sh advertises ──
@@ -138,7 +104,7 @@ then
 else
     fail "${linux_default} must ship nats — downstream services and the
 audit log expect to subscribe to opennvr.inference.* / opennvr.alerts.*
-subjects. linux.yml omitted nats, which silently broke that pipeline."
+subjects."
 fi
 
 # ── 6. start.sh's printed scheme matches what the compose serves ──

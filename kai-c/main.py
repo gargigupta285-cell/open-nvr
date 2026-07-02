@@ -102,7 +102,7 @@ _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 # ISSUE-28: the V-022 sovereignty claim is "all AI inference happens on
 # this physical machine." In host-networking mode that's equivalent to
-# "loopback URLs only." In tier0's bridge-networking mode, adapters are
+# "loopback URLs only." In standard's bridge-networking mode, adapters are
 # reached via Docker service DNS (``http://yolov8-adapter:9002``) which
 # resolves to a Docker-bridge IP inside ``OPENNVR_DOCKER_SUBNET`` —
 # packets between bridge-network containers stay inside the host's
