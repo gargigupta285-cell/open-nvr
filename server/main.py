@@ -52,6 +52,7 @@ from routers import (
     ai_detection_results,
     ai_model_management,
     ai_models,
+    apps,
     audit_logs,
     auth,
     camera_config,
@@ -504,6 +505,7 @@ app.include_router(firmware_router.router, prefix=settings.api_prefix)
 app.include_router(ai_models.router, prefix=settings.api_prefix)
 app.include_router(ai_model_management.router, prefix=settings.api_prefix)
 app.include_router(ai_detection_results.router, prefix=settings.api_prefix)
+app.include_router(apps.router, prefix=settings.api_prefix)
 app.include_router(cloud_providers.router, prefix=settings.api_prefix)
 app.include_router(cloud_inference.router, prefix=settings.api_prefix)
 app.include_router(compliance.router, prefix=settings.api_prefix)

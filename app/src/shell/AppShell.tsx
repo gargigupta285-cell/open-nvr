@@ -60,6 +60,7 @@ const NAV_GROUPS: NavGroup[] = [
       { to: '/byom', label: 'AI Models (BYOM)', icon: <Boxes size={16} />, perm: '/byom' },
       { to: '/ai-detection-results', label: 'Detection Results', icon: <Database size={16} />, perm: '/byom' },
       { to: '/ai-adapters', label: 'AI Adapters', icon: <Layers size={16} />, perm: '/ai-engine' },
+      { to: '/app-catalog', label: 'App Catalog', icon: <Boxes size={16} />, perm: '/ai-engine' },
     ],
   },
   {
