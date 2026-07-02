@@ -23,6 +23,7 @@ import { useFullscreen } from '../hooks/useFullscreen'
 import { useAuth } from '../auth/AuthContext'
 import { useTheme } from '../hooks/useTheme'
 import { usePermissions, NAV_PERMISSIONS } from '../hooks/usePermissions'
+import { ErrorBoundary } from '../components/ErrorBoundary'
 
 type NavItem = {
   to: string
@@ -252,9 +253,11 @@ export function AppShell() {
           </nav>
         </aside>
 
-        {/* Main content */}
+        {/* Main content — boundary keyed by route so navigating away resets a crash */}
         <main className="flex-1 p-4 bg-[var(--panel)] min-h-[calc(100vh-4rem)]">
-          <Outlet />
+          <ErrorBoundary key={location.pathname}>
+            <Outlet />
+          </ErrorBoundary>
         </main>
       </div>
     </div>

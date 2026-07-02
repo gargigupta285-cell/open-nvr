@@ -26,6 +26,7 @@ import { AppShell } from './shell/AppShell'
 import { AuthProvider, useAuth } from './auth/AuthContext'
 import { PermissionsProvider } from './hooks/usePermissions'
 import { SnackbarProvider } from './components/Snackbar'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import { Login } from './views/Login'
 import { MFASetup } from './views/MFASetup'
 import { MFAVerify } from './views/MFAVerify'
@@ -125,15 +126,17 @@ const router = createBrowserRouter([
 ])
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
-  <QueryClientProvider client={queryClient}>
-    <AuthProvider>
-      <PermissionsProvider>
-        <SnackbarProvider>
-          <RouterProvider router={router} />
-        </SnackbarProvider>
-      </PermissionsProvider>
-    </AuthProvider>
-  </QueryClientProvider>
+  <ErrorBoundary title="OpenNVR hit an unexpected error">
+    <QueryClientProvider client={queryClient}>
+      <AuthProvider>
+        <PermissionsProvider>
+          <SnackbarProvider>
+            <RouterProvider router={router} />
+          </SnackbarProvider>
+        </PermissionsProvider>
+      </AuthProvider>
+    </QueryClientProvider>
+  </ErrorBoundary>
 )
 
   // Service worker registration is handled by vite-plugin-pwa (injectRegister: 'auto')
