@@ -1,0 +1,109 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: Apache-2.0
+
+"""
+App manifests — the declarative block every app ships (App SDK spec §03/§05).
+
+The manifest is load-bearing three ways:
+
+* the future ``GET /manifest`` contract endpoint returns
+  ``manifest.to_dict()`` so the catalog can render a card + config
+  form without app-specific code;
+* ``PUT /apps/{id}/config`` validates operator config against
+  ``params`` without app-specific code;
+* ``requires_tasks`` is checked against ``GET /api/v1/adapters`` so
+  the catalog can grey out apps whose model prerequisites aren't met.
+
+Param ``type`` accepts either a Python type (``float``, ``list``, …)
+or a string for UI-schema types the catalog renders specially
+(``"geometry.polygon"`` becomes a zone editor on a camera still).
+"""
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+from typing import Any
+
+
+def _type_name(t: Any) -> str:
+    """Render a Param type for the wire: Python types by name
+    (``float`` → ``"float"``), strings pass through
+    (``"geometry.polygon"``)."""
+    if isinstance(t, type):
+        return t.__name__
+    return str(t)
+
+
+@dataclass
+class Param:
+    """One typed, declarative config knob.
+
+    ``per_camera=True`` marks params the catalog collects per camera
+    (zones, tripwires) rather than once per app."""
+
+    name: str
+    type: Any
+    default: Any = None
+    per_camera: bool = False
+    description: str = ""
+    # Required params have no usable default; the future PUT /config
+    # validator and the catalog form both need the distinction.
+    required: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "required": self.required,
+            "type": _type_name(self.type),
+            "default": self.default,
+            "per_camera": self.per_camera,
+            "description": self.description,
+        }
+
+
+@dataclass
+class AlertType:
+    """One alert kind the app can emit — drives catalog documentation
+    and downstream routing defaults."""
+
+    name: str
+    severity: str = "medium"  # low / medium / high / critical
+    description: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class AppManifest:
+    """The static identity + schema of one app.
+
+    ``subscribes`` is the NATS subject pattern for InferenceSubscriber
+    apps (``None`` for FrameApps that drive inference themselves).
+    ``requires_tasks`` names adapter task types the app depends on,
+    e.g. ``["object_detection"]``.
+    """
+
+    id: str
+    name: str
+    version: str
+    category: str
+    summary: str = ""
+    requires_tasks: list[str] = field(default_factory=list)
+    subscribes: str | None = None
+    params: list[Param] = field(default_factory=list)
+    emits: list[AlertType] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """The ``GET /manifest`` payload (and the ``manifest_json``
+        snapshot the app registry stores)."""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "version": self.version,
+            "category": self.category,
+            "summary": self.summary,
+            "requires_tasks": list(self.requires_tasks),
+            "subscribes": self.subscribes,
+            "params": [p.to_dict() for p in self.params],
+            "emits": [a.to_dict() for a in self.emits],
+        }
