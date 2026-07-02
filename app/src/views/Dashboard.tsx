@@ -16,58 +16,18 @@
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Camera, ChartArea, ChartBar, CircleCheck, CircleDashed, CircleAlert, RefreshCw, AlertTriangle, Activity, HardDrive, Play, Info } from 'lucide-react'
+import { Camera, ChartArea, ChartBar, CircleCheck, CircleDashed, RefreshCw, AlertTriangle, HardDrive, Play, Info } from 'lucide-react'
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip as RTooltip, CartesianGrid, BarChart, Bar, Cell } from 'recharts'
 import { apiService } from '../lib/apiService'
 import SystemNetworkMonitoring from './SystemNetworkMonitoring'
 import { isMediaMtxHealthy } from '../lib/mtxHealth'
+import { Card, CardHeader, CardTitle, CardContent, Badge, Button, Skeleton, ErrorCard, StatusDot } from '../components/ui'
+import { extractApiError } from '../lib/apiError'
+import { useCameras, useRecordingsByDate, useSuricataStats, type CameraItem } from '../lib/queries'
 
-// Lightweight UI primitives aligned with existing app patterns
-export function Card({ children, className = '' }: { children: React.ReactNode; className?: string }) {
-  return <div className={`rounded border border-neutral-700 bg-[var(--panel-2)] ${className}`}>{children}</div>
-}
-export function CardHeader({ children, className = '' }: { children: React.ReactNode; className?: string }) {
-  return <div className={`px-4 py-3 border-b border-neutral-700 flex items-center gap-2 ${className}`}>{children}</div>
-}
-export function CardTitle({ children, className = '' }: { children: React.ReactNode; className?: string }) {
-  return <h3 className={`text-sm font-semibold text-[var(--text)] tracking-wide ${className}`}>{children}</h3>
-}
-export function CardContent({ children, className = '' }: { children: React.ReactNode; className?: string }) {
-  return <div className={`p-4 ${className}`}>{children}</div>
-}
-function Badge({ children, variant = 'neutral', className = '' }: { children: React.ReactNode; variant?: 'success' | 'warning' | 'destructive' | 'neutral' | 'info'; className?: string }) {
-  const styles = {
-    success: 'bg-green-900/50 text-green-400',
-    warning: 'bg-yellow-900/50 text-yellow-400',
-    destructive: 'bg-red-900/50 text-red-400',
-    neutral: 'bg-gray-900/50 text-gray-400',
-    info: 'bg-blue-900/50 text-blue-400',
-  } as const
-  return <span className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] ${styles[variant]} ${className}`}>{children}</span>
-}
-function Button({ children, onClick, className = '', disabled }: { children: React.ReactNode; onClick?: () => void; className?: string; disabled?: boolean }) {
-  return (
-    <button onClick={onClick} disabled={disabled} className={`inline-flex items-center gap-2 rounded border border-neutral-700 bg-[var(--panel-2)] px-3 py-1.5 text-sm hover:bg-[var(--panel)] disabled:opacity-50 ${className}`}>
-      {children}
-    </button>
-  )
-}
-export function Skeleton({ className = '' }: { className?: string }) {
-  return <div className={`animate-pulse rounded-md bg-[var(--bg-2)] ${className}`} />
-}
-
-type CameraItem = {
-  id: number
-  name: string
-  ip_address: string
-  is_active: boolean
-  status?: string | null
-}
-type CameraListResp = { cameras: CameraItem[]; total: number }
 type RecordingItem = { start_time?: string | null; id: number; camera?: string; relpath?: string; url?: string; size?: number }
-type RecordingsResp = { items: RecordingItem[]; total: number }
 
 type MediaMtxStatus = {
   camera_id: number
@@ -80,12 +40,16 @@ type MediaMtxStatus = {
 }
 
 function usePolling(enabled: boolean, intervalMs: number, fn: () => void) {
+  // The callback lives in a ref so an unstable fn identity can't restart the
+  // interval (and re-fire fn) on every render.
+  const fnRef = useRef(fn)
+  fnRef.current = fn
   useEffect(() => {
     if (!enabled) return
-    fn()
-    const id = setInterval(fn, intervalMs)
+    fnRef.current()
+    const id = setInterval(() => fnRef.current(), intervalMs)
     return () => clearInterval(id)
-  }, [enabled, intervalMs, fn])
+  }, [enabled, intervalMs])
 }
 
 function KpiCard({ icon, label, value, help, tone = 'neutral', onClick }: { icon: React.ReactNode; label: string; value: string | number; help?: string; tone?: 'neutral' | 'success' | 'warning' | 'destructive'; onClick?: () => void }) {
@@ -121,11 +85,6 @@ function KpiCard({ icon, label, value, help, tone = 'neutral', onClick }: { icon
   )
 }
 
-function StatusDot({ status }: { status: 'online' | 'offline' | 'degraded' | 'error' }) {
-  const map = { online: 'bg-emerald-500', offline: 'bg-slate-500', degraded: 'bg-amber-500', error: 'bg-red-500' } as const
-  return <span className={`inline-block w-2 h-2 rounded-full ${map[status]}`} />
-}
-
 function CameraTile({ cam, status, recording }: { cam: CameraItem; status: 'online' | 'offline' | 'degraded' | 'error'; recording?: boolean }) {
   return (
     <div className="aspect-video rounded-lg border border-[var(--border)] bg-[var(--bg-2)] relative overflow-hidden">
@@ -147,117 +106,42 @@ function CameraTile({ cam, status, recording }: { cam: CameraItem; status: 'onli
   )
 }
 
-export function ErrorCard({ title = 'Error', message, onRetry }: { title?: string; message: string; onRetry?: () => void }) {
-  return (
-    <Card className="border-red-700/40">
-      <CardHeader>
-        <CircleAlert size={16} className="text-red-300" />
-        <CardTitle>{title}</CardTitle>
-        {onRetry && <div className="ml-auto"><Button onClick={onRetry}><RefreshCw size={14} /> Retry</Button></div>}
-      </CardHeader>
-      <CardContent>
-        <div className="text-sm text-red-300/90">{message}</div>
-      </CardContent>
-    </Card>
-  )
-}
-
-function toStringSafe(v: any): string {
-  if (v == null) return ''
-  if (typeof v === 'string') return v
-  if (Array.isArray(v)) return v.map(toStringSafe).filter(Boolean).join(', ')
-  if (typeof v === 'object' && typeof (v as any).msg === 'string') return (v as any).msg
-  try {
-    return JSON.stringify(v)
-  } catch {
-    return String(v)
-  }
-}
-
-function extractApiError(e: any, fallback: string): string {
-  const detail = e?.data?.detail ?? e?.response?.data?.detail
-  const msg = toStringSafe(detail) || (typeof e?.message === 'string' ? e.message : '')
-  return msg || fallback
-}
-
 export function Dashboard() {
   const navigate = useNavigate()
-  const [cams, setCams] = useState<CameraItem[] | null>(null)
-  const [camsTotal, setCamsTotal] = useState<number>(0)
-  const [camsErr, setCamsErr] = useState<string | null>(null)
-  const [loadingCams, setLoadingCams] = useState<boolean>(true)
 
-  const [recs, setRecs] = useState<RecordingItem[] | null>(null)
-  const [recsTotal, setRecsTotal] = useState<number>(0)
-  const [recsErr, setRecsErr] = useState<string | null>(null)
-  const [loadingRecs, setLoadingRecs] = useState<boolean>(true)
+  const camsQuery = useCameras()
+  const recsQuery = useRecordingsByDate()
+  const alertsQuery = useSuricataStats()
 
-  // Alerts (High severity)
-  const [alertsHigh, setAlertsHigh] = useState<number>(0)
-  const [alertsErr, setAlertsErr] = useState<string | null>(null)
-  const [loadingAlerts, setLoadingAlerts] = useState<boolean>(true)
+  const cams = camsQuery.data?.cameras ?? null
+  const camsTotal = camsQuery.data?.total ?? cams?.length ?? 0
+  const camsErr = camsQuery.isError ? extractApiError(camsQuery.error, 'Failed to load cameras') : null
+  const loadingCams = camsQuery.isPending
+
+  // Flatten per-camera daily recordings for the chart
+  const recs = useMemo(() => {
+    if (!recsQuery.data) return null
+    const dailyRecs: RecordingItem[] = []
+    for (const cam of recsQuery.data.cameras || []) {
+      for (const rec of cam.recordings || []) {
+        dailyRecs.push({ id: 0, start_time: rec.date, camera: cam.camera_name })
+      }
+    }
+    return dailyRecs
+  }, [recsQuery.data])
+  const recsTotal = recsQuery.data?.total_recordings ?? 0
+  const recsErr = recsQuery.isError ? extractApiError(recsQuery.error, 'Failed to load recordings') : null
+  const loadingRecs = recsQuery.isPending
+
+  const alertsHigh = alertsQuery.data?.by_severity?.['1'] ?? 0
+  const alertsErr = alertsQuery.isError ? extractApiError(alertsQuery.error, 'No alert endpoint configured') : null
+  const loadingAlerts = alertsQuery.isPending
 
   const [polling, setPolling] = useState<boolean>(false)
-  const [refreshing, setRefreshing] = useState<boolean>(false)
+  const refreshing = camsQuery.isFetching || recsQuery.isFetching || alertsQuery.isFetching
 
   // Per-camera live status (from media-server)
   const [liveStatuses, setLiveStatuses] = useState<Record<number, MediaMtxStatus>>({})
-
-  const fetchCameras = useCallback(async () => {
-    setLoadingCams(true)
-    setCamsErr(null)
-    try {
-      const { data } = await apiService.getCameras({ limit: 100, active_only: true })
-      const resp = data as CameraListResp
-      setCams(resp.cameras || [])
-      setCamsTotal(resp.total || (resp.cameras?.length || 0))
-    } catch (e: any) {
-      setCamsErr(extractApiError(e, 'Failed to load cameras'))
-      setCams([])
-      setCamsTotal(0)
-    } finally {
-      setLoadingCams(false)
-    }
-  }, [])
-
-  const fetchRecordings = useCallback(async () => {
-    setLoadingRecs(true)
-    setRecsErr(null)
-    try {
-      const { data } = await apiService.getRecordingsByDate()
-      // New format: { cameras: [{ recordings: [{ date, total_duration }] }], total_recordings }
-      // Flatten all daily recordings from all cameras for chart
-      const dailyRecs: RecordingItem[] = []
-      for (const cam of data?.cameras || []) {
-        for (const rec of cam.recordings || []) {
-          dailyRecs.push({ id: 0, start_time: rec.date, camera: cam.camera_name })
-        }
-      }
-      setRecs(dailyRecs)
-      setRecsTotal(data?.total_recordings || 0)
-    } catch (e: any) {
-      setRecsErr(extractApiError(e, 'Failed to load recordings'))
-      setRecs([])
-      setRecsTotal(0)
-    } finally {
-      setLoadingRecs(false)
-    }
-  }, [])
-
-  const fetchAlerts = useCallback(async () => {
-    setLoadingAlerts(true)
-    setAlertsErr(null)
-    try {
-      const { data } = await apiService.getSuricataStats({ limit: 5000 })
-      const high = (data?.by_severity?.['1'] as number) || 0
-      setAlertsHigh(high)
-    } catch (e: any) {
-      setAlertsErr(extractApiError(e, 'No alert endpoint configured'))
-      setAlertsHigh(0)
-    } finally {
-      setLoadingAlerts(false)
-    }
-  }, [])
 
   const fetchLiveStatuses = useCallback(async (cameras: CameraItem[]) => {
     // Query all cameras for accurate counts
@@ -276,19 +160,8 @@ export function Dashboard() {
   }, [])
 
   const refreshAll = useCallback(async () => {
-    setRefreshing(true)
-    await Promise.all([fetchCameras(), fetchRecordings(), fetchAlerts()])
-    setRefreshing(false)
-  }, [fetchCameras, fetchRecordings, fetchAlerts])
-
-  useEffect(() => {
-    // Speed up first paint: fetch cameras first (cheap) then recordings
-    fetchCameras();
-    // Slightly defer recordings so UI renders fast
-    const id = setTimeout(() => { fetchRecordings() }, 250)
-    const id2 = setTimeout(() => { fetchAlerts() }, 350)
-    return () => { clearTimeout(id); clearTimeout(id2) }
-  }, [fetchCameras, fetchRecordings, fetchAlerts])
+    await Promise.all([camsQuery.refetch(), recsQuery.refetch(), alertsQuery.refetch()])
+  }, [camsQuery.refetch, recsQuery.refetch, alertsQuery.refetch])
 
   useEffect(() => {
     if (cams && cams.length) {
@@ -301,7 +174,7 @@ export function Dashboard() {
     }
   }, [cams, fetchLiveStatuses])
 
-  usePolling(polling, 30000, () => { refreshAll() })
+  usePolling(polling, 30000, refreshAll)
 
   const onlineCount = useMemo(() => {
     if (!cams) return 0
@@ -376,7 +249,7 @@ export function Dashboard() {
         {loadingCams ? (
           <Skeleton className="h-24" />
         ) : camsErr ? (
-          <ErrorCard title="Cameras" message={camsErr} onRetry={fetchCameras} />
+          <ErrorCard title="Cameras" message={camsErr} onRetry={() => camsQuery.refetch()} />
         ) : (
           <KpiCard
             icon={<Camera size={18} />}
@@ -392,7 +265,7 @@ export function Dashboard() {
         {loadingRecs ? (
           <Skeleton className="h-24" />
         ) : recsErr ? (
-          <ErrorCard title="Recordings" message={recsErr} onRetry={fetchRecordings} />
+          <ErrorCard title="Recordings" message={recsErr} onRetry={() => recsQuery.refetch()} />
         ) : (
           <KpiCard
             icon={<HardDrive size={18} />}

@@ -42,18 +42,65 @@ import { PosSettings } from './settings/general/PosSettings'
 import { MoreUplink } from './settings/more/Uplink'
 import { WindowSettings } from './settings/more/WindowSettings'
 
-const toSlug = (s: string) => s.toLowerCase().replace(/\s+|\//g, '-');
+// Single settings registry: each tab owns its label and its subviews, and
+// each subview owns its slug, label, and panel. Tabs without subviews render
+// their own panel. The URL scheme is /settings/:tab[/:sub].
+type SubEntry = { slug: string; label: string; panel: () => React.ReactElement }
+type TabEntry = { key: string; label: string; panel?: () => React.ReactElement; submenu: SubEntry[] }
 
-const TABS: { key: string; label: string; submenu: string[] }[] = [
-  { key: 'general', label: 'General', submenu: ['General', 'Alarm', 'RS-232', 'Live View', 'Exceptions', 'User', 'POS'] },
+const SETTINGS_REGISTRY: TabEntry[] = [
+  {
+    key: 'general',
+    label: 'General',
+    submenu: [
+      { slug: 'general', label: 'General', panel: () => <SystemSettings /> },
+      { slug: 'alarm', label: 'Alarm', panel: () => <AlarmSettings /> },
+      { slug: 'rs-232', label: 'RS-232', panel: () => <Rs232Settings /> },
+      { slug: 'live-view', label: 'Live View', panel: () => <LiveViewSettings /> },
+      { slug: 'exceptions', label: 'Exceptions', panel: () => <ExceptionsSettings /> },
+      { slug: 'user', label: 'User', panel: () => <UserSettings /> },
+      { slug: 'pos', label: 'POS', panel: () => <PosSettings /> },
+    ],
+  },
   // Manage-Users moved to sidebar (Access Control)
-  { key: 'security', label: 'Security', submenu: ['Firewall', 'Port Settings', 'Platform Access', 'NAT'] },
-  { key: 'webrtc', label: 'Webrtc', submenu: [] },
-  { key: 'camera-config', label: 'Camera-Config', submenu: [] },
-  { key: 'recording', label: 'Recording', submenu: [] },
-  { key: 'media-source', label: 'Media-Source', submenu: [] },
-  { key: 'more-settings', label: 'More Settings', submenu: ['Window Settings', 'Uplink'] },
+  {
+    key: 'security',
+    label: 'Security',
+    submenu: [
+      { slug: 'firewall', label: 'Firewall', panel: () => <SecurityFirewall /> },
+      { slug: 'port-settings', label: 'Port Settings', panel: () => <SecurityPorts /> },
+      { slug: 'platform-access', label: 'Platform Access', panel: () => <SecurityPlatformAccess /> },
+      { slug: 'nat', label: 'NAT', panel: () => <SecurityNAT /> },
+    ],
+  },
+  { key: 'webrtc', label: 'Webrtc', panel: () => <WebRTCSettings />, submenu: [] },
+  { key: 'camera-config', label: 'Camera-Config', panel: () => <CameraConfigManager />, submenu: [] },
+  { key: 'recording', label: 'Recording', panel: () => <RecordingSettings />, submenu: [] },
+  {
+    key: 'media-source',
+    label: 'Media-Source',
+    // No-sub URL keeps rendering the first subview (legacy behavior).
+    panel: () => <MediaSourceSettings />,
+    submenu: [
+      { slug: 'settings', label: 'Settings', panel: () => <MediaSourceSettings /> },
+      { slug: 'media-server-manager', label: 'Media Server Manager', panel: () => <MediaServerManager /> },
+    ],
+  },
+  {
+    key: 'more-settings',
+    label: 'More Settings',
+    submenu: [
+      { slug: 'window-settings', label: 'Window Settings', panel: () => <WindowSettings /> },
+      { slug: 'uplink', label: 'Uplink', panel: () => <MoreUplink /> },
+    ],
+  },
 ]
+
+// Legacy paths that moved to their own top-level views.
+const SETTINGS_REDIRECTS: Record<string, string> = {
+  'manage-cameras': '/cameras',
+  'more-settings/certificates': '/byok',
+}
 
 export function Settings() {
   const location = useLocation()
@@ -75,18 +122,22 @@ export function Settings() {
     }
   }, [location.pathname, navigate])
 
-  const tabDef = TABS.find(t => t.key === activeTabKey) ?? TABS[0]
+  const tabDef = SETTINGS_REGISTRY.find(t => t.key === activeTabKey) ?? SETTINGS_REGISTRY[0]
   const submenu = tabDef.submenu
+
+  const redirect = SETTINGS_REDIRECTS[activeSubKey ? `${activeTabKey}/${activeSubKey}` : activeTabKey]
+  const activeSub = activeSubKey ? submenu.find((s) => s.slug === activeSubKey) : undefined
+  const panel = activeSub?.panel ?? (activeSubKey ? undefined : tabDef.panel)
 
   return (
     <section className="space-y-4">
       {/* Top Tabs */}
       <div className="bg-[var(--accent)] text-white px-3 py-2 text-sm flex items-center gap-4 overflow-x-auto">
-        {TABS.map((t) => (
+        {SETTINGS_REGISTRY.map((t) => (
           <NavLink
             key={t.key}
-            to={t.submenu.length === 0 ? `/settings/${t.key}` : `/settings/${t.key}/${toSlug(t.submenu[0])}`}
-            className={({ isActive }) => `px-2 py-1 rounded whitespace-nowrap ${location.pathname.startsWith(`/settings/${t.key}`) ? 'bg-white/15' : 'opacity-90 hover:opacity-100'}`}
+            to={t.submenu.length === 0 ? `/settings/${t.key}` : `/settings/${t.key}/${t.submenu[0].slug}`}
+            className={() => `px-2 py-1 rounded whitespace-nowrap ${location.pathname.startsWith(`/settings/${t.key}`) ? 'bg-white/15' : 'opacity-90 hover:opacity-100'}`}
           >
             {t.label}
           </NavLink>
@@ -98,15 +149,14 @@ export function Settings() {
         {submenu.length > 0 && (
           <aside className="w-64 bg-[var(--bg-2)] p-3 text-sm">
             {submenu.map((s) => {
-              const slug = toSlug(s)
-              const active = location.pathname === `/settings/${tabDef.key}/${slug}`
+              const active = location.pathname === `/settings/${tabDef.key}/${s.slug}`
               return (
                 <NavLink
-                  key={s}
-                  to={`/settings/${tabDef.key}/${slug}`}
+                  key={s.slug}
+                  to={`/settings/${tabDef.key}/${s.slug}`}
                   className={`block px-2 py-2 rounded ${active ? 'bg-[var(--panel-2)] text-[var(--text)]' : 'text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel-2)]'}`}
                 >
-                  {s}
+                  {s.label}
                 </NavLink>
               )
             })}
@@ -115,46 +165,19 @@ export function Settings() {
 
         {/* Content Area */}
         <div className={`p-4 bg-[var(--panel)] flex-1`}>
-          {tabDef.key === 'general' && activeSubKey === 'general' ? (
-            <SystemSettings />
-          ) : tabDef.key === 'general' && activeSubKey === 'alarm' ? (
-            <AlarmSettings />
-          ) : tabDef.key === 'general' && activeSubKey === 'rs-232' ? (
-            <Rs232Settings />
-          ) : tabDef.key === 'general' && activeSubKey === 'live-view' ? (
-            <LiveViewSettings />
-          ) : tabDef.key === 'general' && activeSubKey === 'exceptions' ? (
-            <ExceptionsSettings />
-          ) : tabDef.key === 'general' && activeSubKey === 'user' ? (
-            <UserSettings />
-          ) : tabDef.key === 'general' && activeSubKey === 'pos' ? (
-            <PosSettings />
-          ) : tabDef.key === 'manage-cameras' ? (
-            <Navigate to="/cameras" replace />
-          ) : tabDef.key === 'recording' ? (
-            <RecordingSettings />
-          ) : tabDef.key === 'security' && activeSubKey === 'firewall' ? (
-            <SecurityFirewall />
-          ) : tabDef.key === 'security' && activeSubKey === 'port-settings' ? (
-            <SecurityPorts />
-          ) : tabDef.key === 'security' && activeSubKey === 'platform-access' ? (
-            <SecurityPlatformAccess />
-          ) : tabDef.key === 'security' && activeSubKey === 'nat' ? (
-            <SecurityNAT />
-          ) : tabDef.key === 'webrtc' ? (
-            <WebRTCSettings />
-          ) : tabDef.key === 'media-source' && (activeSubKey === 'settings' || !activeSubKey) ? (
-            <MediaSourceSettings />
-          ) : tabDef.key === 'media-source' && activeSubKey === 'media-server-manager' ? (
-            <MediaServerManager />
-          ) : tabDef.key === 'camera-config' ? (
-            <CameraConfigManager />
-          ) : tabDef.key === 'more-settings' && activeSubKey === 'window-settings' ? (
-            <WindowSettings />
-          ) : tabDef.key === 'more-settings' && activeSubKey === 'uplink' ? (
-            <MoreUplink />
-          ) : tabDef.key === 'more-settings' && activeSubKey === 'certificates' ? (
-            <Navigate to="/byok" replace />
+          <nav aria-label="Breadcrumb" className="text-xs text-[var(--text-dim)] mb-3">
+            Configuration <span className="mx-1">/</span> {tabDef.label}
+            {activeSubKey && (
+              <>
+                <span className="mx-1">/</span>
+                {activeSub?.label ?? activeSubKey}
+              </>
+            )}
+          </nav>
+          {redirect ? (
+            <Navigate to={redirect} replace />
+          ) : panel ? (
+            panel()
           ) : (
             <Placeholder title={`${tabDef.label}${activeSubKey ? ` · ${activeSubKey}` : ''}`} />
           )}

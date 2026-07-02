@@ -1,45 +1,151 @@
 /**
  * Copyright (c) 2026 OpenNVR
  * This file is part of OpenNVR.
- * 
+ *
  * OpenNVR is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
- * 
+ *
  * OpenNVR is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU Affero General Public License
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { Outlet, NavLink, Link } from 'react-router-dom'
-import { Menu, Monitor, Camera, Settings as SettingsIcon, Bell, Maximize, Minimize, LogOut, User as UserIcon, Sun, Moon, Play, RefreshCcw, FileSearch, Brain, FileCheck, AlertTriangle, Plug, LifeBuoy, Satellite, KeyRound, Shield, Network, Cpu, Boxes, Cloud, Database } from 'lucide-react'
-import { useRef, useState } from 'react'
+import { Outlet, NavLink, Link, useLocation } from 'react-router-dom'
+import { Menu, Monitor, Camera, Settings as SettingsIcon, Bell, Maximize, Minimize, LogOut, User as UserIcon, Sun, Moon, Play, RefreshCcw, FileSearch, Brain, FileCheck, AlertTriangle, Plug, LifeBuoy, KeyRound, Shield, Network, Cpu, Boxes, Cloud, Database, ChevronDown, Layers } from 'lucide-react'
+import { useMemo, useRef, useState } from 'react'
 import { useFullscreen } from '../hooks/useFullscreen'
 import { useAuth } from '../auth/AuthContext'
 import { useTheme } from '../hooks/useTheme'
 import { usePermissions, NAV_PERMISSIONS } from '../hooks/usePermissions'
+
+type NavItem = {
+  to: string
+  label: string
+  icon: React.ReactNode
+  /** key into NAV_PERMISSIONS; null-valued entries are always visible */
+  perm: keyof typeof NAV_PERMISSIONS
+}
+
+type NavGroup = {
+  key: string
+  label: string
+  items: NavItem[]
+}
+
+// Navigation grouped by product surface (see docs/design/platform-blueprint.html):
+// the NVR operator surface first, then AI, security, governance, administration.
+const NAV_GROUPS: NavGroup[] = [
+  {
+    key: 'nvr',
+    label: 'NVR',
+    items: [
+      { to: '/', label: 'Dashboard', icon: <Monitor size={16} />, perm: '/' },
+      { to: '/live', label: 'Live View', icon: <Camera size={16} />, perm: '/live' },
+      { to: '/playback', label: 'Recordings', icon: <Play size={16} />, perm: '/playback' },
+      { to: '/cameras', label: 'Cameras', icon: <Camera size={16} />, perm: '/cameras' },
+    ],
+  },
+  {
+    key: 'ai',
+    label: 'AI & Detections',
+    items: [
+      { to: '/ai-engine', label: 'AI Engine', icon: <Brain size={16} />, perm: '/ai-engine' },
+      { to: '/byom', label: 'AI Models (BYOM)', icon: <Boxes size={16} />, perm: '/byom' },
+      { to: '/ai-detection-results', label: 'Detection Results', icon: <Database size={16} />, perm: '/byom' },
+      { to: '/ai-adapters', label: 'AI Adapters', icon: <Layers size={16} />, perm: '/ai-engine' },
+    ],
+  },
+  {
+    key: 'security',
+    label: 'Security & Network',
+    items: [
+      { to: '/network', label: 'Network', icon: <Network size={16} />, perm: '/network' },
+      { to: '/logs', label: 'Logs & Forensics', icon: <FileSearch size={16} />, perm: '/logs' },
+    ],
+  },
+  {
+    key: 'governance',
+    label: 'Governance',
+    items: [
+      { to: '/audit-logs', label: 'Audit Logs', icon: <Bell size={16} />, perm: '/audit-logs' },
+      { to: '/compliance', label: 'Compliance & Reports', icon: <FileCheck size={16} />, perm: '/compliance' },
+      { to: '/alerts-incidents', label: 'Alerts & Incidents', icon: <AlertTriangle size={16} />, perm: '/alerts-incidents' },
+      { to: '/rbac', label: 'Access Control (RBAC)', icon: <Shield size={16} />, perm: '/rbac' },
+      { to: '/byok', label: 'Customer Keys (BYOK)', icon: <KeyRound size={16} />, perm: '/byok' },
+    ],
+  },
+  {
+    key: 'admin',
+    label: 'Administration',
+    items: [
+      { to: '/settings', label: 'Configuration', icon: <SettingsIcon size={16} />, perm: '/settings' },
+      { to: '/updates', label: 'Media Server Config', icon: <RefreshCcw size={16} />, perm: '/updates' },
+      { to: '/integrations', label: 'Integrations', icon: <Plug size={16} />, perm: '/integrations' },
+      { to: '/cloud', label: 'Cloud', icon: <Cloud size={16} />, perm: '/cloud' },
+      { to: '/firmware', label: 'Firmware', icon: <Cpu size={16} />, perm: '/firmware' },
+      { to: '/support', label: 'Support', icon: <LifeBuoy size={16} />, perm: '/support' },
+    ],
+  },
+]
+
+const COLLAPSED_GROUPS_KEY = 'opennvr.sidebar.collapsedGroups'
+
+function loadCollapsedGroups(): Record<string, boolean> {
+  try {
+    return JSON.parse(localStorage.getItem(COLLAPSED_GROUPS_KEY) || '{}')
+  } catch {
+    return {}
+  }
+}
 
 export function AppShell() {
   const rootRef = useRef<HTMLDivElement>(null)
   const { isFullscreen, toggle } = useFullscreen(rootRef as React.RefObject<HTMLDivElement>)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const { user, logout } = useAuth()
-  const { hasPermission, loading: permissionsLoading } = usePermissions()
+  const { hasPermission } = usePermissions()
   const [menuOpen, setMenuOpen] = useState(false)
   const { theme, toggleTheme } = useTheme()
   const sidebarRef = useRef<HTMLDivElement>(null)
   const [sidebarScrolling, setSidebarScrolling] = useState(false)
+  const location = useLocation()
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>(loadCollapsedGroups)
 
-  // Check if a nav item should be visible based on permissions
   const canView = (path: keyof typeof NAV_PERMISSIONS) => {
     const requiredPerm = NAV_PERMISSIONS[path]
-    if (requiredPerm === null) return true // Always visible
+    if (requiredPerm === null) return true
     return hasPermission(requiredPerm)
+  }
+
+  const visibleGroups = useMemo(
+    () =>
+      NAV_GROUPS.map((g) => ({ ...g, items: g.items.filter((i) => canView(i.perm)) })).filter((g) => g.items.length > 0),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [hasPermission]
+  )
+
+  // The group owning the current route stays expanded regardless of stored state.
+  const activeGroupKey = useMemo(() => {
+    for (const g of NAV_GROUPS) {
+      if (g.items.some((i) => (i.to === '/' ? location.pathname === '/' : location.pathname.startsWith(i.to)))) return g.key
+    }
+    return null
+  }, [location.pathname])
+
+  function toggleGroup(key: string) {
+    setCollapsedGroups((prev) => {
+      const next = { ...prev, [key]: !prev[key] }
+      try {
+        localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify(next))
+      } catch { /* storage unavailable: keep in-memory state */ }
+      return next
+    })
   }
 
   function onSidebarScroll() {
@@ -47,6 +153,7 @@ export function AppShell() {
     window.clearTimeout((onSidebarScroll as any)._t)
     ;(onSidebarScroll as any)._t = window.setTimeout(() => setSidebarScrolling(false), 700)
   }
+
   return (
     <div ref={rootRef} className="min-h-screen bg-[var(--bg)] text-[var(--text)]">
   {/* Top white header (sticky) */}
@@ -84,7 +191,7 @@ export function AppShell() {
               <span className="hidden md:inline">{user?.username ?? 'Account'}</span>
             </button>
             {menuOpen && (
-              <div className="absolute right-0 mt-1 bg-[var(--panel)] border border-neutral-700 text-sm min-w-40 z-50">
+              <div className="absolute right-0 mt-1 bg-[var(--panel)] border border-[var(--border)] text-sm min-w-40 z-50">
                 <div className="px-3 py-2 text-[var(--text-dim)]">Signed in as <span className="text-[var(--text)]">{user?.username}</span></div>
                 <button className="w-full text-left px-3 py-2 hover:bg-[var(--panel-2)] inline-flex items-center gap-2" onClick={logout}>
                   <LogOut size={14} /> Logout
@@ -118,27 +225,30 @@ export function AppShell() {
             <span className={`${sidebarOpen ? 'inline' : 'hidden'}`}>Menu</span>
           </button>
           <nav className="mt-2 space-y-1">
-            <SideLink to="/" label="Dashboard" icon={<Monitor size={16} />} collapsed={!sidebarOpen} />
-            {canView('/live') && <SideLink to="/live" label="Live View" icon={<Camera size={16} />} collapsed={!sidebarOpen} />}
-            {canView('/playback') && <SideLink to="/playback" label="Recordings" icon={<Play size={16} />} collapsed={!sidebarOpen} />}
-            {canView('/cameras') && <SideLink to="/cameras" label="Cameras" icon={<Camera size={16} />} collapsed={!sidebarOpen} />}
-            {canView('/rbac') && <SideLink to="/rbac" label="Access Control (RBAC)" icon={<Shield size={16} />} collapsed={!sidebarOpen} />}
-            {canView('/byok') && <SideLink to="/byok" label="Customer Keys (BYOK)" icon={<KeyRound size={16} />} collapsed={!sidebarOpen} />}
-            {canView('/network') && <SideLink to="/network" label="Network" icon={<Network size={16} />} collapsed={!sidebarOpen} />}
-            {canView('/audit-logs') && <SideLink to="/audit-logs" label="Audit Logs" icon={<Bell size={16} />} collapsed={!sidebarOpen} />}
-            {canView('/updates') && <SideLink to="/updates" label="Media Server Config" icon={<RefreshCcw size={16} />} collapsed={!sidebarOpen} />}
-            {canView('/logs') && <SideLink to="/logs" label="Logs & Forensics" icon={<FileSearch size={16} />} collapsed={!sidebarOpen} />}
-            {canView('/ai-engine') && <SideLink to="/ai-engine" label="Anomaly AI Engine" icon={<Brain size={16} />} collapsed={!sidebarOpen} />}
-            {canView('/byom') && <SideLink to="/byom" label="AI Models (BYOM)" icon={<Boxes size={16} />} collapsed={!sidebarOpen} />}
-            {canView('/byom') && <SideLink to="/ai-detection-results" label="AI Detection Results" icon={<Database size={16} />} collapsed={!sidebarOpen} />}
-            {canView('/compliance') && <SideLink to="/compliance" label="Compliance & Reports" icon={<FileCheck size={16} />} collapsed={!sidebarOpen} />}
-            {canView('/alerts-incidents') && <SideLink to="/alerts-incidents" label="Alerts & Incidents" icon={<AlertTriangle size={16} />} collapsed={!sidebarOpen} />}
-            {canView('/integrations') && <SideLink to="/integrations" label="Integrations" icon={<Plug size={16} />} collapsed={!sidebarOpen} />}
-            {/* {canView('/onvif-tools') && <SideLink to="/onvif-tools" label="ONVIF Tools" icon={<Satellite size={16} />} collapsed={!sidebarOpen} />} */}
-            {canView('/cloud') && <SideLink to="/cloud" label="Cloud" icon={<Cloud size={16} />} collapsed={!sidebarOpen} />}
-            <SideLink to="/support" label="Support" icon={<LifeBuoy size={16} />} collapsed={!sidebarOpen} />
-            {canView('/settings') && <SideLink to="/settings" label="Configuration" icon={<SettingsIcon size={16} />} collapsed={!sidebarOpen} />}
-            {canView('/firmware') && <SideLink to="/firmware" label="Firmware" icon={<Cpu size={16} />} collapsed={!sidebarOpen} />}
+            {visibleGroups.map((group) => {
+              const collapsed = collapsedGroups[group.key] && group.key !== activeGroupKey
+              return (
+                <div key={group.key} className={sidebarOpen ? 'mb-1' : 'mb-2 pb-2 border-b border-[var(--border)] last:border-b-0'}>
+                  {sidebarOpen && (
+                    <button
+                      className="w-full flex items-center justify-between px-3 py-1.5 text-[11px] uppercase tracking-wider text-[var(--text-dim)] hover:text-[var(--text)]"
+                      onClick={() => toggleGroup(group.key)}
+                      aria-expanded={!collapsed}
+                    >
+                      <span>{group.label}</span>
+                      <ChevronDown size={12} className={`transition-transform ${collapsed ? '-rotate-90' : ''}`} />
+                    </button>
+                  )}
+                  {(!sidebarOpen || !collapsed) && (
+                    <div className="space-y-0.5">
+                      {group.items.map((item) => (
+                        <SideLink key={item.to} to={item.to} label={item.label} icon={item.icon} collapsed={!sidebarOpen} />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
           </nav>
         </aside>
 
@@ -155,7 +265,8 @@ function SideLink({ to, label, icon, collapsed }: { to: string; label: string; i
   return (
     <NavLink
       to={to}
-      end
+      end={to === '/'}
+      title={collapsed ? label : undefined}
       className={({ isActive }) => `flex items-center ${collapsed ? 'justify-center' : ''} gap-2 px-3 py-2 rounded text-sm ${isActive ? 'bg-[var(--panel-2)] text-[var(--text)]' : 'text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel-2)]'}`}
     >
       <span className="flex-shrink-0 w-4 h-4 flex items-center justify-center">{icon}</span>

@@ -19,7 +19,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { Download, RefreshCw, FileText, Activity, Camera, Database, HardDrive, AlertTriangle } from 'lucide-react'
 import { apiService } from '../lib/apiService'
-import { Card, CardHeader, CardTitle, CardContent, Skeleton } from './Dashboard'
+import { Card, CardHeader, CardTitle, CardContent, Skeleton } from '../components/ui'
 
 interface ComplianceSummary {
   total_cameras: number
@@ -150,7 +150,7 @@ export function Compliance() {
   const handleExport = async () => {
     try {
       setExportLoading(true)
-      const response = await apiService.exportComplianceCSV({ days: coverageDays })
+      const response = await apiService.exportComplianceReport(coverageDays)
       
       // Create a blob from the response
       const blob = new Blob([response.data], { type: 'text/csv' })
