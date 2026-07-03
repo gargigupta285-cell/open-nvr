@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 """
-Alerts-subscriber example app.
+Alerts-subscriber example app — now on the ``opennvr-app-sdk``.
 
 The canonical subscriber-side template for OpenNVR's alert fan-out
 (NATS alert fan-out). Connects to NATS, subscribes to a configurable
@@ -11,8 +11,14 @@ to stdout, and optionally forwards via webhook.
 
 This is the alert-side companion to ``inference-listener``: that one
 subscribes to ``opennvr.inference.*``; this one subscribes to
-``opennvr.alerts.*``. Same library, same template shape, different
-subject family.
+``opennvr.alerts.*``. Same bus, different subject family — and a
+different SDK archetype: this app is the reference
+:class:`~opennvr_app_sdk.AlertSubscriber` (App SDK spec §02, the
+"pass-through" shape). The SDK base owns the NATS connect / subscribe
+/ drain loop, per-message JSON decoding + handler exception isolation,
+the §03 contract endpoints, and the CLI / signal lifecycle behind
+``alert_app(AlertConsumer).run()``. What's left here is the sink —
+``handle_alert`` — plus this app's config parsing and its MANIFEST.
 
 What this is for
 ----------------
@@ -44,20 +50,42 @@ Run:
 """
 from __future__ import annotations
 
-import argparse
-import asyncio
-import json
 import logging
-import signal
-import sys
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import httpx
-import yaml
+
+from opennvr_app_sdk import (
+    AlertSubscriber,
+    AppManifest,
+    Param,
+    alert_app,
+)
+from opennvr_app_sdk.config import load_yaml
 
 logger = logging.getLogger("alerts-subscriber")
+
+
+MANIFEST = AppManifest(
+    id="alerts-subscriber",
+    name="Alerts Subscriber",
+    version="1.0.0",
+    category="integration",
+    summary=(
+        "Subscribes to the opennvr.alerts.* fan-out; prints every §11.5 "
+        "envelope and optionally forwards it to a webhook."
+    ),
+    requires_tasks=[],  # rides the alert bus; no adapter prerequisites
+    subscribes="opennvr.alerts.>",
+    params=[
+        Param("subject_pattern", str, default="opennvr.alerts.>"),
+        Param("webhook_url", str, default=None,
+              description="Optional URL each alert's raw JSON is POSTed to."),
+        Param("webhook_timeout_seconds", float, default=5.0),
+    ],
+    emits=[],  # pass-through: consumes alerts, emits none
+)
 
 
 # ── Config ─────────────────────────────────────────────────────────
@@ -79,9 +107,7 @@ def load_config(path: str) -> AppConfig:
     Raises ``ValueError`` on malformed input — caller's job to surface
     a useful operator message and exit non-zero.
     """
-    raw = yaml.safe_load(Path(path).read_text())
-    if not isinstance(raw, dict):
-        raise ValueError(f"config {path!r}: root must be a mapping")
+    raw = load_yaml(path)
     nats_url = str(raw.get("nats_url") or "").strip()
     if not nats_url:
         raise ValueError("config: 'nats_url' is required")
@@ -106,10 +132,11 @@ def load_config(path: str) -> AppConfig:
 # ── Subscriber ─────────────────────────────────────────────────────
 
 
-class AlertConsumer:
-    """Holds the NATS connection + the subscription. The main loop
-    runs in an asyncio event loop; ``stop()`` (or SIGINT / SIGTERM)
-    cleanly drains and exits.
+class AlertConsumer(AlertSubscriber):
+    """The reference AlertSubscriber. The SDK base owns the NATS loop
+    (connect / subscribe / decode / drain) and calls
+    :meth:`on_alert` per decoded envelope; ``stop()`` (or SIGINT /
+    SIGTERM via the runner) cleanly drains and exits.
 
     Override ``handle_alert(subject, alert_dict)`` in a subclass to
     plug your own logic in — that's the extension point for
@@ -119,74 +146,30 @@ class AlertConsumer:
     raw JSON via HTTP POST.
     """
 
-    def __init__(self, config: AppConfig) -> None:
-        self._config = config
-        self._stop_event = asyncio.Event()
-        self._nc: Any = None
+    manifest = MANIFEST
+
+    def setup(self) -> None:
         self._received_count: int = 0
         self._forwarded_count: int = 0
         self._forward_failed_count: int = 0
 
-    def stop(self) -> None:
-        self._stop_event.set()
+    def on_alert(self, alert: dict[str, Any], subject: str) -> None:
+        """SDK hook — count the envelope, delegate to this app's
+        historical extension point (which spells the arguments
+        ``(subject, alert)``)."""
+        self._received_count += 1
+        self.handle_alert(subject, alert)
 
-    async def run(self) -> None:
-        """Connect, subscribe, loop until stop_event. Always cleans
-        up the NATS connection on exit."""
-        # Lazy import — operators on the disabled path don't pay it.
-        import nats
-
-        connect_kwargs: dict[str, Any] = {
-            "servers": [self._config.nats_url],
-            "connect_timeout": 5.0,
-            "reconnect_time_wait": 1.0,
-            # Subscribers keep retrying forever — a transient broker
-            # restart shouldn't kill the consumer. Operators stop it
-            # explicitly via SIGINT/SIGTERM.
-            "max_reconnect_attempts": -1,
-        }
-        if self._config.nats_token:
-            connect_kwargs["token"] = self._config.nats_token
-        self._nc = await nats.connect(**connect_kwargs)
+    async def run(self, *, once: bool = False) -> None:
         logger.info(
-            "connected to %s, subscribing to %r (webhook=%s)",
-            self._config.nats_url,
-            self._config.subject_pattern,
-            self._config.webhook_url or "none",
+            "subscribing to %r on %s (webhook=%s)",
+            self.cfg.subject_pattern,
+            self.cfg.nats_url,
+            self.cfg.webhook_url or "none",
         )
         try:
-            sub = await self._nc.subscribe(self._config.subject_pattern)
-            async for msg in sub.messages:
-                try:
-                    payload = json.loads(msg.data)
-                except json.JSONDecodeError as exc:
-                    logger.warning(
-                        "skipping non-JSON message on %r: %s",
-                        msg.subject, exc,
-                    )
-                    continue
-                self._received_count += 1
-                try:
-                    self.handle_alert(msg.subject, payload)
-                except Exception:
-                    # No single alert-handler failure should kill the
-                    # subscriber. The operator sees the traceback and
-                    # the next alert is still processed.
-                    logger.exception(
-                        "handler failed for subject=%s", msg.subject,
-                    )
-                if self._config.once:
-                    self.stop()
-                if self._stop_event.is_set():
-                    break
+            await super().run(once=once)
         finally:
-            try:
-                await self._nc.drain()
-            except Exception:
-                try:
-                    await self._nc.close()
-                except Exception:
-                    pass
             logger.info(
                 "alerts-subscriber shutting down — received=%d "
                 "webhook_forwarded=%d webhook_failed=%d",
@@ -194,6 +177,14 @@ class AlertConsumer:
                 self._forwarded_count,
                 self._forward_failed_count,
             )
+
+    def state_snapshot(self) -> dict[str, Any]:
+        """``GET /state`` — running consume / forward counters."""
+        return {
+            "received": self._received_count,
+            "webhook_forwarded": self._forwarded_count,
+            "webhook_failed": self._forward_failed_count,
+        }
 
     # ── Extension point ───────────────────────────────────────────
 
@@ -231,7 +222,7 @@ class AlertConsumer:
 
     def _forward_to_webhook(self, alert: dict[str, Any]) -> bool:
         """POST the raw §11.5 JSON to ``webhook_url``. Failures are
-        LOGGED but never raise — same shape as intrusion-detection's
+        LOGGED but never raise — same shape as the SDK's
         WebhookChannel.
 
         We use a fresh ``httpx.post`` per alert (no shared session)
@@ -270,50 +261,9 @@ class AlertConsumer:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="alerts-subscriber",
-        description="Subscribe to OpenNVR's alert fan-out NATS surface.",
-    )
-    parser.add_argument("--config", required=True, help="Path to config.yml")
-    parser.add_argument(
-        "--once",
-        action="store_true",
-        help="Process one alert and exit (smoke testing).",
-    )
-    parser.add_argument(
-        "--log-level",
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-    )
-    args = parser.parse_args(argv)
-
-    logging.basicConfig(
-        level=args.log_level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    try:
-        config = load_config(args.config)
-    except (ValueError, OSError) as exc:
-        print(f"config error: {exc}", file=sys.stderr)
-        return 2
-    config.once = args.once
-
-    consumer = AlertConsumer(config)
-
-    # SIGINT / SIGTERM → graceful drain.
-    loop = asyncio.new_event_loop()
-
-    def _handle_signal(_signum, _frame):
-        logger.info("signal received, stopping…")
-        loop.call_soon_threadsafe(consumer.stop)
-
-    signal.signal(signal.SIGINT, _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
-    try:
-        loop.run_until_complete(consumer.run())
-    finally:
-        loop.close()
-    return 0
+    """Console-script entry point (``[project.scripts]``). The SDK
+    runner owns argparse, logging, signals, and the loop lifecycle."""
+    return alert_app(AlertConsumer, load_config=load_config).run(argv)
 
 
 if __name__ == "__main__":  # pragma: no cover

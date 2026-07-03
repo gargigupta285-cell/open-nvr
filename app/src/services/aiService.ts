@@ -45,6 +45,8 @@ export const aiService = {
   getTaskSchema: (task?: string) =>
     api.get('/api/v1/ai-models/schema', { params: { task } }),
   runInference: (data: any) => api.post('/api/v1/ai-models/inference', data),
+  getAdapterMetrics: (name: string) =>
+    api.get(`/api/v1/ai-models/adapters/${encodeURIComponent(name)}/metrics`),
   runRecordingInference: (data: any) =>
     api.post('/api/v1/ai-models/inference/recording', data),
 

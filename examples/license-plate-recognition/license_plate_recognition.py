@@ -6,12 +6,28 @@ license-plate-recognition — drive YOLOv8 (vehicle detection) → crop →
 fast-plate-ocr (OCR) on a polled set of cameras, fire alerts per
 recognised plate.
 
-Pipeline shape mirrors intrusion-detection: HTTP-poll each configured
-camera at ``poll_interval_seconds``, run inference via KAI-C, dispatch
-alerts. The interesting bit specific to LPR is the **two-stage
-inference chain** — one frame becomes one POST to YOLOv8 *and* N POSTs
-to fast-plate-ocr (one per detected vehicle), under a single
-correlation_id so the audit trail joins cleanly.
+Now built on the ``opennvr-app-sdk``. The SDK's
+:class:`~opennvr_app_sdk.FrameApp` base owns the poll loop, per-camera
+fetch/rule failure isolation, and the §03 contract endpoints. The
+frame sources and the §11.5 alert stack moved into the SDK (thin shims
+remain at ``frame_sources.py`` / ``alerts.py`` for import
+compatibility).
+
+What stays here — deliberately — is the domain pipeline: the
+**two-stage inference chain** (``plate_pipeline.py``: one frame becomes
+one POST to YOLOv8 *and* N POSTs to fast-plate-ocr, one per detected
+vehicle, under a single correlation_id so the audit trail joins
+cleanly), the watchlist severity routing, and the per-(camera, plate)
+dedup ledger. Two SDK primitives were evaluated and NOT forced onto it:
+
+* the SDK ``KaiCClient`` — this app's detector/OCR calls predate the
+  contract-v1 ``task``/``camera_id`` body fields; ``KaicDetectorClient``
+  / ``KaicOcrClient`` keep the historical wire shape (a bare
+  ``{"frame_b64", ...}``) so deployed adapters see no change.
+* ``keyed_state`` — the dedup ledger must stay a plain
+  ``{(camera, plate): monotonic_ts}`` dict: it reads "last
+  actually-fired", never refreshes on suppression, and its exact shape
+  is part of this app's pinned test surface.
 
 Run:
     python license_plate_recognition.py --config config.yml
@@ -24,7 +40,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
-import json
 import logging
 import signal
 import sys
@@ -32,7 +47,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import httpx
 import yaml
@@ -45,6 +60,8 @@ from alerts import (
     build_dispatcher,
 )
 from frame_sources import FrameSource, FrameSourceError, build_frame_source
+from opennvr_app_sdk import AlertType, AppManifest, FrameApp, Param
+from opennvr_app_sdk.frame_sources import DictFrameSource
 from plate_pipeline import (
     PlatePipeline,
     PlatePipelineConfig,
@@ -55,6 +72,46 @@ logger = logging.getLogger("license-plate-recognition")
 
 
 CORRELATION_ID_HEADER = "X-Correlation-Id"
+
+# The SDK FrameApp rejects a non-positive poll interval (its sleep is
+# the shutdown-interruptible kind). This app historically accepted 0
+# ("poll as fast as the cameras answer"); map that to a near-zero
+# interval so old configs — and the test fixtures — keep working.
+_MIN_POLL_INTERVAL_SECONDS = 0.001
+
+
+MANIFEST = AppManifest(
+    id="license-plate-recognition",
+    name="License Plate Recognition",
+    version="1.0.0",
+    category="vehicle",
+    summary=(
+        "Reads license plates via a YOLOv8 → crop → fast-plate-ocr chain "
+        "and routes severity through allow/deny watchlists."
+    ),
+    requires_tasks=["object_detection", "ocr"],  # checked vs GET /api/v1/adapters
+    subscribes=None,  # FrameApp: drives inference itself via KAI-C
+    params=[
+        Param("vehicle_labels", list, default=["car", "truck", "bus", "motorcycle"]),
+        Param("poll_interval_seconds", float, default=2.0),
+        Param("detection_confidence", float, default=0.40),
+        Param("ocr_confidence", float, default=0.50),
+        Param("crop_strategy", str, default="lower_third",
+              description="Which part of the vehicle bbox goes to OCR."),
+        Param("dedup_window_seconds", float, default=60.0,
+              description="Per-(camera, plate) re-fire suppression; 0 fires every read."),
+        Param("allowlist", list, default=[],
+              description="Plates that fire a low-severity 'expected vehicle' alert."),
+        Param("denylist", list, default=[],
+              description="Plates that fire a high-severity 'watchlist plate' alert."),
+    ],
+    emits=[
+        AlertType("plate_read", severity="low",
+                  description="Info-severity read for unlisted plates."),
+        AlertType("plate_expected", severity="low"),
+        AlertType("plate_watchlist", severity="high"),
+    ],
+)
 
 
 # ── Config ──────────────────────────────────────────────────────────
@@ -101,6 +158,15 @@ class AppConfig:
     nats_alerts_url: str | None = None
     nats_alerts_token: str | None = None
     nats_alerts_subject_prefix: str = DEFAULT_ALERT_SUBJECT_PREFIX
+
+    # App contract (spec §03) — all optional; see the SDK's contract
+    # module. ``contract_port`` serves /health /manifest /state;
+    # ``opennvr_url`` triggers registry self-registration on boot.
+    contract_port: int | None = None
+    contract_bind_host: str | None = None
+    contract_host: str | None = None
+    opennvr_url: str | None = None
+    opennvr_token: str | None = None
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -151,6 +217,13 @@ def load_config(path: str | Path) -> AppConfig:
         nats_alerts_url=raw.get("nats_alerts_url"),
         nats_alerts_token=raw.get("nats_alerts_token"),
         nats_alerts_subject_prefix=subject_prefix,
+        contract_port=(
+            int(raw["contract_port"]) if raw.get("contract_port") is not None else None
+        ),
+        contract_bind_host=raw.get("contract_bind_host"),
+        contract_host=raw.get("contract_host"),
+        opennvr_url=raw.get("opennvr_url"),
+        opennvr_token=raw.get("opennvr_token"),
     )
 
 
@@ -165,6 +238,11 @@ class KaicDetectorClient:
     the frame ships base64-encoded inside the JSON body. The SDK's
     body parser unwraps ``frame_b64`` into the binary payload before
     the adapter's service sees it.
+
+    Kept app-side (rather than swapping to the SDK ``KaiCClient``) to
+    preserve this app's historical wire body — a bare
+    ``{"frame_b64": ...}`` without the contract-v1 ``task`` /
+    ``camera_id`` fields.
     """
 
     def __init__(
@@ -201,7 +279,8 @@ class KaicDetectorClient:
 class KaicOcrClient:
     """JSON+base64 HTTP client for the OCR adapter (fast-plate-ocr) via KAI-C.
 
-    See ``KaicDetectorClient`` for the reasoning — KAI-C is JSON-only.
+    See ``KaicDetectorClient`` for the reasoning — KAI-C is JSON-only,
+    and the historical wire body is preserved.
     """
 
     def __init__(
@@ -247,9 +326,18 @@ class KaicOcrClient:
 # ── Application loop ───────────────────────────────────────────────
 
 
-class LicensePlateRecognizer:
-    """The polling driver. One instance per process; loops over all
-    configured cameras at ``poll_interval_seconds``."""
+class LicensePlateRecognizer(FrameApp):
+    """The polling driver (via the SDK FrameApp loop). One instance per
+    process; the base loop polls all configured cameras at
+    ``poll_interval_seconds`` and :meth:`on_frame` runs the two-stage
+    pipeline per fetched frame.
+
+    Alerts are dispatched *inside* the rule rather than returned to the
+    base, because the dedup ledger gates them — a suppressed repeat
+    read must not reach the dispatcher at all.
+    """
+
+    manifest = MANIFEST
 
     def __init__(
         self,
@@ -260,11 +348,6 @@ class LicensePlateRecognizer:
         self.config = config
         self.pipeline = pipeline
         self.dispatcher = dispatcher
-        # Per-(camera_id, plate) timestamp for dedup.
-        self._last_fired: dict[tuple[str, str], float] = {}
-        self._allowlist = {p for p in config.allowlist if p}
-        self._denylist = {p for p in config.denylist if p}
-        self._stop = False
         # One FrameSource per camera, built once at startup. Mirrors
         # intrusion-detection's pattern.
         self._frame_sources: dict[str, FrameSource] = {}
@@ -273,68 +356,58 @@ class LicensePlateRecognizer:
                 camera_id=cam.camera_id, url=cam.frame_url,
             )
 
-    def request_stop(self) -> None:
-        self._stop = True
-
-    def run(self) -> None:
-        """Block forever (or until ``request_stop()``) polling cameras."""
-        logger.info(
-            "license-plate-recognition started: %d cameras, poll=%ss, "
-            "labels=%s, detector=%s, ocr=%s",
-            len(self.config.cameras),
-            self.config.poll_interval_seconds,
-            list(self.config.vehicle_labels),
-            self.config.detector_adapter,
-            self.config.ocr_adapter,
+        super().__init__(
+            config,
+            dispatcher,
+            # By-reference bridge: swapping an entry in
+            # ``self._frame_sources`` (test stubs, camera reconfig) is
+            # picked up on the next tick.
+            frame_source=DictFrameSource(self._frame_sources),
+            cameras=[cam.camera_id for cam in config.cameras],
+            poll_interval_seconds=(
+                config.poll_interval_seconds
+                if config.poll_interval_seconds > 0
+                else _MIN_POLL_INTERVAL_SECONDS
+            ),
         )
-        try:
-            while not self._stop:
-                cycle_started = time.monotonic()
-                for cam in self.config.cameras:
-                    if self._stop:
-                        break
-                    try:
-                        self._process_camera(cam)
-                    except Exception:
-                        logger.exception(
-                            "camera=%s: unexpected error in cycle",
-                            cam.camera_id,
-                        )
 
-                if self._stop:
-                    break
-                elapsed = time.monotonic() - cycle_started
-                sleep = max(0.0, self.config.poll_interval_seconds - elapsed)
-                time.sleep(sleep)
-        finally:
-            try:
-                self.dispatcher.close()
-            except Exception:
-                logger.exception("dispatcher.close() failed")
+    def setup(self) -> None:
+        config = self.config
+        self._cameras_by_id: dict[str, CameraConfig] = {
+            cam.camera_id: cam for cam in config.cameras
+        }
+        # Per-(camera_id, plate) timestamp for dedup. A plain dict on
+        # purpose (not the SDK keyed_state): dedup reads "last
+        # actually-fired", never refreshes on suppression, and its
+        # shape is pinned by this app's test suite.
+        self._last_fired: dict[tuple[str, str], float] = {}
+        self._allowlist = {p for p in config.allowlist if p}
+        self._denylist = {p for p in config.denylist if p}
+
+    def request_stop(self) -> None:
+        """Historical name — the SDK base spells it ``stop()``."""
+        self.stop()
 
     def step(self) -> None:
         """Single pass over every camera. Useful for ``--once`` and tests."""
-        for cam in self.config.cameras:
-            self._process_camera(cam)
+        self.handle_tick()
 
-    def _process_camera(self, cam: CameraConfig) -> None:
+    # ── The rule (one camera × one fetched frame) ──────────────────
+
+    def on_frame(
+        self, camera_id: str, frame_bytes: bytes
+    ) -> Iterable[Alert] | None:
+        cam = self._cameras_by_id[camera_id]
         correlation_id = uuid.uuid4().hex
-        try:
-            frame = self._frame_sources[cam.camera_id].fetch()
-        except FrameSourceError as exc:
-            logger.warning(
-                "camera=%s: frame fetch failed: %s correlation_id=%s",
-                cam.camera_id, exc, correlation_id,
-            )
-            return
 
         reads = list(
-            self.pipeline.process_frame(frame, correlation_id=correlation_id)
+            self.pipeline.process_frame(frame_bytes, correlation_id=correlation_id)
         )
         if not reads:
-            return
+            return None
 
         now = time.monotonic()
+        fired = 0
         for read in reads:
             plate_key = (cam.camera_id, read.plate_text.upper())
             if self.config.dedup_window_seconds > 0:
@@ -345,6 +418,21 @@ class LicensePlateRecognizer:
 
             alert = self._build_alert(cam, read)
             self.dispatcher.dispatch(alert)
+            fired += 1
+        # Wire the app-dispatched alerts into the SDK contract counters
+        # (/health's alerts_fired) — the base loop can't see them
+        # because on_frame returns None.
+        self._contract_note_alerts(fired)
+        return None
+
+    def state_snapshot(self) -> dict[str, Any]:
+        """``GET /state`` — the dedup ledger size + watchlist counts."""
+        return {
+            "cameras": [cam.camera_id for cam in self.config.cameras],
+            "deduped_plates_tracked": len(self._last_fired),
+            "allowlist_size": len(self._allowlist),
+            "denylist_size": len(self._denylist),
+        }
 
     def _build_alert(self, cam: CameraConfig, read: PlateRead) -> Alert:
         plate_upper = read.plate_text.upper()
@@ -440,14 +528,24 @@ def main(argv: list[str] | None = None) -> int:
             dispatcher.close()
         return 0
 
+    # The SDK FrameApp loop is async; drive it the same way the SDK
+    # AppRunner drives a Detector. SIGINT / SIGTERM trigger a clean exit.
+    loop = asyncio.new_event_loop()
+
     def _handle_signal(signum, _frame):
         logger.info("received signal %s; stopping", signum)
-        recognizer.request_stop()
+        loop.call_soon_threadsafe(recognizer.stop)
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
-
-    recognizer.run()
+    try:
+        loop.run_until_complete(recognizer.run())
+    finally:
+        try:
+            dispatcher.close()
+        except Exception:
+            logger.exception("dispatcher.close() failed")
+        loop.close()
     return 0
 
 

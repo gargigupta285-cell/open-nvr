@@ -154,12 +154,30 @@ class Cost(BaseModel):
     is_metered: bool = False
 
 
+class CapabilityDescriptor(BaseModel):
+    """Contract v1.1 (optional): rich self-description of one advertised task.
+
+    ``task`` must match an entry in ``tasks_advertised``, which remains the
+    canonical free-text key. Adapters that don't send descriptors keep
+    working — consumers fall back to the bare task string.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+    task: str = Field(min_length=1)
+    label: str | None = None
+    summary: str | None = None
+    categories: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    example_result: dict | None = None
+
+
 class CapabilitiesResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
     adapter: AdapterInfo
     model: ModelInfo
     endpoints: EndpointsInfo
     tasks_advertised: list[str] = Field(default_factory=list)
+    capabilities: list[CapabilityDescriptor] = Field(default_factory=list)
     permissions: Permissions = Field(default_factory=Permissions)
     scheduling: Scheduling
     cost: Cost = Field(default_factory=Cost)

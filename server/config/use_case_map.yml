@@ -1,0 +1,63 @@
+# OpenNVR-curated intent map: use case -> capability -> suggested apps/adapters.
+# Product-owned and editorial by design — adapters must never declare use
+# cases themselves (see docs/design/capabilities-observability.html §03).
+# Keys reference the free-text task strings from tasks_advertised, app ids
+# from examples/, and adapter names from the v0.1 reference set.
+
+- use_case: "After-hours intrusion"
+  intent: "Alert when a person or vehicle enters a zone outside allowed hours."
+  needs_capability: object_detection
+  suggested_apps: [intrusion-detection, loitering-detection]
+  suggested_adapters: [yolov8]
+
+- use_case: "Who's at the door?"
+  intent: "Recognize family and known visitors; flag strangers at an entrance."
+  needs_capability: face_recognition
+  suggested_apps: [smart-doorbell]
+  suggested_adapters: [insightface]
+
+- use_case: "Package watch"
+  intent: "Know when a package arrives, lingers, or disappears from the porch."
+  needs_capability: object_detection
+  also_needs: [multi_object_tracking]
+  suggested_apps: [package-delivery]
+  suggested_adapters: [yolov8, bytetrack]
+
+- use_case: "How many people are in this space?"
+  intent: "Track zone occupancy and alert when a threshold is crossed."
+  needs_capability: object_detection
+  suggested_apps: [occupancy-counting]
+  suggested_adapters: [yolov8]
+
+- use_case: "Count entries and exits"
+  intent: "Directional tripwire counting across a doorway or gate."
+  needs_capability: multi_object_tracking
+  also_needs: [object_detection]
+  suggested_apps: [line-crossing]
+  suggested_adapters: [yolov8, bytetrack]
+
+- use_case: "Unattended object"
+  intent: "Flag bags or boxes left behind, suppressing while the owner is nearby."
+  needs_capability: object_detection
+  also_needs: [multi_object_tracking]
+  suggested_apps: [abandoned-object]
+  suggested_adapters: [yolov8, bytetrack]
+
+- use_case: "Find footage by description"
+  intent: "Search recordings in natural language — 'red truck yesterday afternoon'."
+  needs_capability: image_captioning
+  suggested_apps: [footage-search]
+  suggested_adapters: [blip]
+
+- use_case: "Vehicle allowlist"
+  intent: "Read license plates and alert on unknown or watchlisted vehicles."
+  needs_capability: license_plate_recognition
+  suggested_apps: [license-plate-recognition]
+  suggested_adapters: [fast-plate-ocr]
+
+- use_case: "Talk to your cameras"
+  intent: "Ask what a camera sees, set standing alarms and monitors by voice or chat."
+  needs_capability: image_captioning
+  also_needs: [speech_to_text, text_to_speech, object_detection]
+  suggested_apps: [camera-agent]
+  suggested_adapters: [blip, whisper, piper, yolov8]

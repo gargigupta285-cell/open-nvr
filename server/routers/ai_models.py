@@ -26,8 +26,12 @@ This router provides endpoints for:
 
 import json
 from datetime import datetime
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
+import httpx
+import yaml
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -51,6 +55,24 @@ class KaiCHealthResponse(BaseModel):
 class CapabilitiesResponse(BaseModel):
     kai_c: dict[str, Any]
     adapters: dict[str, Any]
+
+
+class UseCaseEntry(BaseModel):
+    use_case: str
+    intent: str | None = None
+    needs_capability: str
+    also_needs: list[str] = []
+    suggested_apps: list[str] = []
+    suggested_adapters: list[str] = []
+
+
+USE_CASE_MAP_PATH = Path(__file__).resolve().parent.parent / "config" / "use_case_map.yml"
+
+
+@lru_cache(maxsize=1)
+def _load_use_case_map() -> list[UseCaseEntry]:
+    raw = yaml.safe_load(USE_CASE_MAP_PATH.read_text()) or []
+    return [UseCaseEntry(**entry) for entry in raw]
 
 
 class InferenceRequest(BaseModel):
@@ -145,6 +167,62 @@ async def get_capabilities(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch capabilities: {e!s}",
+        )
+
+
+@router.get("/adapters/{adapter_name}/metrics")
+async def get_adapter_metrics(
+    adapter_name: str,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Fetch the windowed per-adapter metrics rollup from KAI-C
+    (observability spec §05): p50/p95/p99 latency, outcome counts,
+    saturation gauges, and the fingerprint-change timeline.
+
+    KAI-C collects these from each adapter's /metrics on its existing
+    60s registry poll; users never talk to adapters directly.
+
+    Requires authenticated user.
+    """
+    try:
+        kai_c_service = get_kai_c_service()
+        return await kai_c_service.get_adapter_metrics(adapter_name)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == status.HTTP_404_NOT_FOUND:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Unknown adapter: {adapter_name}",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"KAI-C returned {e.response.status_code} for adapter metrics",
+        )
+    except Exception as e:
+        # KAI-C down / unreachable — a gateway problem, not a server bug.
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to fetch adapter metrics from KAI-C: {e!s}",
+        )
+
+
+@router.get("/use-cases", response_model=list[UseCaseEntry])
+async def get_use_cases(
+    current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)
+):
+    """
+    The curated intent map: use case -> required capability -> suggested
+    apps and adapters. Product-owned editorial content (adapters never
+    declare use cases themselves); powers the capability catalog's
+    use-case door.
+    """
+    try:
+        return _load_use_case_map()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load use-case map: {e!s}",
         )
 
 

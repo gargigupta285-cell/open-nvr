@@ -31,6 +31,7 @@ import { cloudStreamingService } from '../services/cloudStreamingService'
 import { integrationService } from '../services/integrationService'
 import { mediaSourceService } from '../services/mediaSourceService'
 import { complianceService } from '../services/complianceService'
+import { appsService } from '../services/appsService'
 
 export const apiService = {
   ...authService,
@@ -45,5 +46,6 @@ export const apiService = {
   ...integrationService,
   ...mediaSourceService,
   ...complianceService,
+  ...appsService,
 }
 

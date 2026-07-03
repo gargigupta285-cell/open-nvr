@@ -317,6 +317,7 @@ def test_v2_endpoints_require_internal_api_key_when_set(kaic_test_env, monkeypat
             ("GET",    "/api/v1/adapters",          None),
             ("GET",    "/api/v1/ai/capabilities",   None),
             ("POST",   "/api/v1/adapters/refresh",  None),
+            ("GET",    "/api/v1/adapters/x/metrics", None),
             ("POST",   "/api/v1/infer/x",           {}),
             ("GET",    "/api/v1/audit",             None),
         ]:

@@ -401,6 +401,9 @@ services:
       - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY}
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - MEDIAMTX_SECRET=${MEDIAMTX_SECRET}
+      # Server inference path through KAI-C: governed (default, audited
+      # /api/v1/infer + NATS fan-out) | v1 | legacy — see .env.example.
+      - OPENNVR_ADAPTER_CONTRACT=${OPENNVR_ADAPTER_CONTRACT:-governed}
       # KAI-C points at the yolov8 adapter as "default" — the
       # camera-agent overlay extends this with explicit per-model
       # routes (whisper, piper, ollama). Operators enabling more
@@ -409,8 +412,8 @@ services:
       - ADAPTER_URL=http://yolov8-adapter:9002
       # KAI-C sovereignty mode. Default local_only refuses any adapter that
       # DECLARES external network egress. All bundled adapters — yolov8,
-      # whisper, piper, the ollama wrapper, and BLIP — ship their weights
-      # baked into their images (issue #79) and declare no egress, so they
+      # whisper, piper, the ollama wrapper, BLIP, and Moondream — ship their
+      # weights baked into their images (issue #79) and declare no egress, so they
       # all register cleanly under the secure local_only default. Only set
       # federated/cloud_allowed for genuinely off-box or vendor-managed
       # inference. See kai-c/sovereignty.py.

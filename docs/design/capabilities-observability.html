@@ -1,0 +1,384 @@
+<title>OpenNVR Capabilities &amp; Adapter Observability — Design Spec</title>
+<style>
+  :root {
+    --ground: #0b111c; --panel: #121a28; --panel-2: #182233; --panel-3: #1e2a3d;
+    --border: #26344a; --border-soft: #1d293b;
+    --text: #e7edf6; --text-dim: #93a1b8; --text-faint: #667891;
+    --accent: #3fd0c4; --accent-deep: #1f8f87; --accent-glow: rgba(63,208,196,0.14);
+    --agent: #a98bfb; --ai: #45c98a; --sec: #f0a848; --gov: #f2748c;
+    --good: #45c98a; --warn: #f0a848; --crit: #f2748c;
+    --c-kw: #6fb7ff; --c-str: #7ee0a6; --c-com: #5c6b81; --c-fn: #d9a8ff; --c-num: #f0a848;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+    --sans: "SF Pro Display", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  .doc {
+    background: radial-gradient(1100px 560px at 82% -8%, rgba(63,208,196,0.06), transparent 60%), var(--ground);
+    color: var(--text); font-family: var(--sans); line-height: 1.6; font-size: 16px;
+    -webkit-font-smoothing: antialiased; padding: 0 24px 120px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  .prose { max-width: 70ch; }
+  h1, h2, h3, h4 { text-wrap: balance; line-height: 1.15; margin: 0; letter-spacing: -0.02em; }
+  h1 { font-size: clamp(2rem, 4.5vw, 3rem); font-weight: 800; }
+  h2 { font-size: clamp(1.4rem, 3vw, 1.85rem); font-weight: 700; }
+  h3 { font-size: 1.02rem; font-weight: 700; }
+  p { margin: 0; color: var(--text-dim); }
+  strong { color: var(--text); font-weight: 600; }
+  em { color: var(--text-dim); }
+  code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); background: var(--panel-2); padding: 1px 5px; border-radius: 2px; }
+
+  .eyebrow { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.24em; text-transform: uppercase; color: var(--accent); font-weight: 500; }
+
+  .hero { padding: 88px 0 48px; border-bottom: 1px solid var(--border-soft); }
+  .hero .tagrow { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .hero h1 { margin-top: 22px; }
+  .hero h1 .hl { color: var(--accent); }
+  .hero .lede { margin-top: 22px; font-size: 1.16rem; color: var(--text-dim); max-width: 64ch; }
+  .hero .lede strong { color: var(--text); }
+  .pill { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); border: 1px solid var(--border); background: var(--panel-2); padding: 5px 10px; border-radius: 2px; }
+
+  section { padding: 68px 0 0; }
+  .sec-head { display: flex; align-items: baseline; gap: 16px; margin-bottom: 8px; }
+  .sec-num { font-family: var(--mono); font-size: 0.8rem; color: var(--accent); letter-spacing: 0.1em; padding-top: 4px; }
+  .sec-intro { margin: 16px 0 32px; font-size: 1.04rem; }
+
+  .code-wrap { border: 1px solid var(--border); border-radius: 6px; background: #0a0f18; overflow: hidden; }
+  .code-head { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-bottom: 1px solid var(--border-soft); background: var(--panel); }
+  .code-head .fn { font-family: var(--mono); font-size: 0.74rem; color: var(--text-dim); }
+  pre { margin: 0; padding: 16px 18px; overflow-x: auto; font-family: var(--mono); font-size: 0.8rem; line-height: 1.65; color: #cdd8e8; }
+  pre .kw { color: var(--c-kw); } pre .str { color: var(--c-str); } pre .com { color: var(--c-com); font-style: italic; }
+  pre .fn { color: var(--c-fn); } pre .num { color: var(--c-num); } pre .em { color: #fff; }
+
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+
+  .tbl-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; min-width: 620px; font-size: 0.86rem; }
+  thead th { text-align: left; font-family: var(--mono); font-size: 0.65rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-faint); font-weight: 500; padding: 13px 16px; background: var(--panel-2); border-bottom: 1px solid var(--border); }
+  tbody td { padding: 13px 16px; border-bottom: 1px solid var(--border-soft); color: var(--text-dim); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody td.k { color: var(--text); font-family: var(--mono); font-size: 0.79rem; white-space: nowrap; }
+  tbody td.k .em { color: var(--accent); }
+  .badge { font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.04em; padding: 2px 7px; border-radius: 2px; border: 1px solid; white-space: nowrap; }
+  .badge.have { color: var(--good); border-color: rgba(69,201,138,0.4); }
+  .badge.build { color: var(--warn); border-color: rgba(240,168,72,0.4); }
+
+  /* three doors */
+  .doors { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .door { border: 1px solid var(--border); border-radius: 6px; background: var(--panel); overflow: hidden; border-top: 3px solid var(--hue, var(--accent)); }
+  .door .dh { padding: 13px 16px 12px; border-bottom: 1px solid var(--border-soft); }
+  .door .dh .who { font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--hue, var(--accent)); }
+  .door .dh .q { font-weight: 700; font-size: 0.94rem; margin-top: 5px; }
+  .door .db { padding: 14px 16px; font-size: 0.82rem; color: var(--text-dim); display: flex; flex-direction: column; gap: 9px; }
+  .door .db .step { font-family: var(--mono); font-size: 0.74rem; color: var(--text-faint); }
+  .door .db .cap { color: var(--accent); font-family: var(--mono); font-size: 0.78rem; }
+  .door .db .lst { display: flex; flex-wrap: wrap; gap: 5px; }
+  .door .db .lst span { font-family: var(--mono); font-size: 0.68rem; color: var(--text-dim); background: var(--panel-2); border: 1px solid var(--border); padding: 3px 7px; border-radius: 2px; }
+  .atom { text-align: center; font-family: var(--mono); font-size: 0.76rem; color: var(--text-faint); margin-top: 14px; }
+  .atom b { color: var(--accent); }
+
+  .callout { border: 1px solid var(--border); border-left: 3px solid var(--accent); background: linear-gradient(180deg, rgba(63,208,196,0.06), transparent); border-radius: 5px; padding: 18px 20px; margin-top: 18px; }
+  .callout .cl { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); margin-bottom: 8px; }
+  .callout p { font-size: 0.9rem; }
+
+  /* flow */
+  .flow { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap: 10px; align-items: stretch; }
+  .flow .node { border: 1px solid var(--border); border-radius: 6px; background: var(--panel); padding: 15px 16px; }
+  .flow .node.seam { border-color: var(--accent-deep); background: linear-gradient(180deg, var(--accent-glow), transparent); }
+  .flow .node .nl { font-family: var(--mono); font-size: 0.63rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-faint); margin-bottom: 7px; }
+  .flow .node .nt { font-weight: 700; font-size: 0.9rem; }
+  .flow .node .nd { font-size: 0.76rem; color: var(--text-dim); margin-top: 5px; }
+  .flow .mid { display: flex; align-items: center; justify-content: center; color: var(--accent); font-family: var(--mono); font-size: 0.9rem; }
+
+  /* metrics dashboard mock */
+  .mock { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); overflow: hidden; }
+  .mock-bar { display: flex; align-items: center; gap: 8px; padding: 11px 16px; border-bottom: 1px solid var(--border-soft); background: var(--panel-2); }
+  .mock-bar .dots { display: flex; gap: 6px; }
+  .mock-bar .dots i { width: 9px; height: 9px; border-radius: 50%; display: block; }
+  .mock-bar .t { font-family: var(--mono); font-size: 0.74rem; color: var(--text-dim); letter-spacing: 0.05em; }
+  .mock-bar .sel { margin-left: auto; font-family: var(--mono); font-size: 0.7rem; color: var(--accent); border: 1px solid var(--accent-deep); padding: 3px 9px; border-radius: 3px; }
+  .panel-grid { padding: 16px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .mpanel { border: 1px solid var(--border); border-radius: 6px; background: var(--panel-2); padding: 15px; }
+  .mpanel .ph { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
+  .mpanel .ph .pt { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-faint); }
+  .mpanel .ph .pd { font-family: var(--mono); font-size: 0.66rem; color: var(--text-faint); }
+  /* percentile bars */
+  .bars { display: flex; flex-direction: column; gap: 8px; }
+  .bar { display: grid; grid-template-columns: 34px 1fr 48px; gap: 10px; align-items: center; }
+  .bar .bl { font-family: var(--mono); font-size: 0.72rem; color: var(--text-dim); }
+  .bar .track { height: 8px; background: var(--panel-3); border-radius: 4px; overflow: hidden; }
+  .bar .track i { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+  .bar .bv { font-family: var(--mono); font-size: 0.74rem; color: var(--text); text-align: right; font-variant-numeric: tabular-nums; }
+  /* outcome split */
+  .split { display: flex; height: 10px; border-radius: 5px; overflow: hidden; margin-bottom: 10px; }
+  .split i { display: block; height: 100%; }
+  .legend { display: flex; flex-wrap: wrap; gap: 10px 16px; }
+  .legend span { font-family: var(--mono); font-size: 0.7rem; color: var(--text-dim); display: flex; align-items: center; gap: 6px; }
+  .legend span i { width: 8px; height: 8px; border-radius: 2px; }
+  /* saturation gauge */
+  .gauge { display: flex; align-items: baseline; gap: 8px; }
+  .gauge .gv { font-family: var(--mono); font-size: 1.5rem; font-weight: 700; color: var(--warn); font-variant-numeric: tabular-nums; }
+  .gauge .gt { font-family: var(--mono); font-size: 0.74rem; color: var(--text-faint); }
+  .gtrack { height: 8px; background: var(--panel-3); border-radius: 4px; margin-top: 10px; overflow: hidden; }
+  .gtrack i { display: block; height: 100%; background: var(--warn); }
+  /* drift ticks */
+  .drift { display: flex; align-items: flex-end; gap: 4px; height: 40px; }
+  .drift i { flex: 1; background: var(--panel-3); border-radius: 1px; }
+  .drift i.a { background: var(--accent); } .drift i.d { background: var(--crit); }
+  .drift-note { font-family: var(--mono); font-size: 0.66rem; color: var(--text-faint); margin-top: 8px; }
+
+  /* rollout */
+  .seq { display: flex; flex-direction: column; }
+  .seq-step { display: grid; grid-template-columns: 40px 1fr; gap: 18px; padding: 16px 0; border-bottom: 1px solid var(--border-soft); }
+  .seq-step:last-child { border-bottom: none; }
+  .seq-step .m { font-family: var(--mono); font-weight: 700; color: var(--accent); font-size: 1rem; border: 1px solid var(--accent-deep); border-radius: 3px; height: 36px; display: flex; align-items: center; justify-content: center; background: var(--accent-glow); }
+  .seq-step h3 { font-size: 0.98rem; margin-bottom: 4px; }
+  .seq-step p { font-size: 0.86rem; }
+
+  footer { margin-top: 84px; padding-top: 26px; border-top: 1px solid var(--border-soft); color: var(--text-faint); font-family: var(--mono); font-size: 0.74rem; letter-spacing: 0.04em; }
+
+  @media (max-width: 820px) {
+    .doors { grid-template-columns: 1fr; }
+    .two { grid-template-columns: 1fr; }
+    .panel-grid { grid-template-columns: 1fr; }
+    .flow { grid-template-columns: 1fr; }
+    .flow .mid { transform: rotate(90deg); padding: 4px 0; }
+    .hero { padding: 60px 0 40px; }
+    section { padding: 52px 0 0; }
+  }
+</style>
+
+<div class="doc">
+<div class="wrap">
+
+  <header class="hero">
+    <div class="tagrow">
+      <span class="eyebrow">Engineering Design Spec</span>
+      <span class="pill">third companion · capabilities &amp; metrics</span>
+    </div>
+    <h1>A capability is the atom.<br>Give it <span class="hl">three doors and a gauge</span>.</h1>
+    <p class="lede">An adapter capability — <code>object_detection</code>, <code>scene_caption</code>, <code>asr</code> — is the shared unit under everything: a <strong>developer's</strong> API task, an <strong>operator's</strong> use case, and an <strong>agent's</strong> skill are all views onto the same atom. Today it's a bare string with no metadata, and the rich telemetry each adapter emits is scraped by no one. This spec adds the <strong>capability catalog</strong> (choose by intent) and the <strong>decision-grade metrics view</strong> (choose by evidence).</p>
+  </header>
+
+  <!-- 01 THE TWO GAPS -->
+  <section>
+    <div class="sec-head"><span class="sec-num">01</span><h2>Two gaps, one already half-closed</h2></div>
+    <p class="sec-intro prose">The contract exploration turned up good news and a clear job. The metrics you need mostly already leave the adapters — nobody collects them. The capability metadata you need does <em>not</em> exist — it has to be added as a layer.</p>
+    <div class="two">
+      <div class="callout" style="margin-top:0; border-left-color: var(--warn); background: linear-gradient(180deg, rgba(240,168,72,0.06), transparent);">
+        <div class="cl" style="color:var(--warn)">Gap A — capabilities are bare strings</div>
+        <p><code>tasks_advertised: list[str]</code>. No label, description, category, tags, or use-case mapping. The examples README links task&rarr;use-case in <em>prose only</em>. So "choose by use case / task / dev" needs a taxonomy layer that doesn't exist yet.</p>
+      </div>
+      <div class="callout" style="margin-top:0; border-left-color: var(--good); background: linear-gradient(180deg, rgba(69,201,138,0.06), transparent);">
+        <div class="cl" style="color:var(--good)">Gap B — metrics are emitted, not surfaced</div>
+        <p>Every adapter's <code>/metrics</code> already exposes latency histograms, outcomes, inflight, and queue depth; every NATS event carries <code>inference_ms</code> + <code>fingerprint</code>. KAI-C polls only health. No scraper, no view. This is aggregation, not instrumentation.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 02 THREE DOORS -->
+  <section>
+    <div class="sec-head"><span class="sec-num">02</span><h2>Three doors to the same capability</h2></div>
+    <p class="sec-intro prose">The same <code>object_detection</code> capability should be discoverable by whoever's looking — an operator who thinks in outcomes, an integrator who thinks in tasks, a developer who thinks in endpoints. Different entry, same atom.</p>
+
+    <div class="doors">
+      <div class="door" style="--hue:var(--sec)">
+        <div class="dh"><div class="who">operator · by use case</div><div class="q">"Catch intruders after hours"</div></div>
+        <div class="db">
+          <span class="step">intent &rarr; capability</span>
+          <span>needs <span class="cap">object_detection</span></span>
+          <span class="step">provided by</span>
+          <div class="lst"><span>yolov8 ✓</span><span>yolov11</span></div>
+          <span class="step">ready-made apps</span>
+          <div class="lst"><span>intrusion</span><span>loitering</span></div>
+        </div>
+      </div>
+      <div class="door" style="--hue:var(--ai)">
+        <div class="dh"><div class="who">integrator · by task</div><div class="q">"I want object_detection"</div></div>
+        <div class="db">
+          <span class="step">capability taxonomy</span>
+          <span>Detection &rsaquo; <span class="cap">object_detection</span></span>
+          <span class="step">modalities</span>
+          <div class="lst"><span>in: image</span><span>out: bbox+class</span></div>
+          <span class="step">adapters &amp; fingerprints</span>
+          <div class="lst"><span>yolov8n · sha256…</span></div>
+        </div>
+      </div>
+      <div class="door" style="--hue:var(--agent)">
+        <div class="dh"><div class="who">developer · by contract</div><div class="q">"How do I call it?"</div></div>
+        <div class="db">
+          <span class="step">endpoint</span>
+          <span class="cap">POST /api/v1/infer/yolov8</span>
+          <span class="step">body shape</span>
+          <div class="lst"><span>IMAGE · frame_b64</span></div>
+          <span class="step">params · cost · perms</span>
+          <div class="lst"><span>conf_threshold</span><span>gpu:false</span></div>
+        </div>
+      </div>
+    </div>
+    <p class="atom">all three resolve to one <b>capability atom</b> — and the camera agent's <b>skill</b> is a fourth door onto the very same thing</p>
+  </section>
+
+  <!-- 03 INTENT MAP -->
+  <section>
+    <div class="sec-head"><span class="sec-num">03</span><h2>The taxonomy layer, in two halves</h2></div>
+    <p class="sec-intro prose">Keep <code>tasks_advertised</code> as the free-text key it is. Add metadata in two places: a <strong>contract v1.1 descriptor</strong> so adapters can self-describe a task (dev + integrator doors), and a <strong>curated intent map</strong> that OpenNVR owns (the use-case door). Don't make adapters know use cases — that's a product-editorial concern, not the model's job.</p>
+
+    <div class="two">
+      <div class="code-wrap">
+        <div class="code-head"><span class="fn">contract v1.1 — optional, backward-compatible</span></div>
+<pre><span class="com"># adapters MAY describe a task richly; tasks_advertised stays the fallback</span>
+<span class="kw">class</span> <span class="em">CapabilityDescriptor</span>(BaseModel):
+    task: <span class="kw">str</span>                        <span class="com"># "object_detection" — unchanged key</span>
+    label: <span class="kw">str</span> | <span class="kw">None</span> = <span class="kw">None</span>         <span class="com"># "Object Detection"</span>
+    summary: <span class="kw">str</span> | <span class="kw">None</span> = <span class="kw">None</span>
+    categories: <span class="kw">list</span>[<span class="kw">str</span>] = []       <span class="com"># ["security","analytics"]</span>
+    tags: <span class="kw">list</span>[<span class="kw">str</span>] = []             <span class="com"># ["person","vehicle","perimeter"]</span>
+    example_result: <span class="kw">dict</span> | <span class="kw">None</span> = <span class="kw">None</span>
+
+<span class="com"># CapabilitiesResponse gains one optional field:</span>
+    capabilities: <span class="kw">list</span>[CapabilityDescriptor] = []</pre>
+      </div>
+      <div class="code-wrap">
+        <div class="code-head"><span class="fn">use_case_map.yml — OpenNVR-curated</span></div>
+<pre><span class="com"># product-owned, keyed on the task string</span>
+- use_case: <span class="str">"After-hours intrusion"</span>
+  intent: <span class="str">"Alert when a person or vehicle</span>
+           <span class="str">enters a zone outside hours."</span>
+  needs_capability: <span class="str">object_detection</span>
+  suggested_apps: [intrusion, loitering]
+  suggested_adapters: [yolov8, yolov11]
+
+- use_case: <span class="str">"Who's at the door?"</span>
+  needs_capability: <span class="str">face_recognition</span>
+  suggested_apps: [smart-doorbell]
+  suggested_adapters: [insightface]</pre>
+      </div>
+    </div>
+    <div class="callout">
+      <div class="cl">One schema, four consumers</div>
+      <p>The descriptor + intent map feed the <strong>catalog's use-case door</strong>, the <strong>task door</strong>, the <strong>dev door</strong>, and the <strong>agent's skill picker</strong> — the same four front doors the blueprint and App-SDK spec keep circling. Define the capability once; every surface reads it.</p>
+    </div>
+  </section>
+
+  <!-- 04 WHAT'S ALREADY EMITTED -->
+  <section>
+    <div class="sec-head"><span class="sec-num">04</span><h2>The signals already leave the adapters</h2></div>
+    <p class="sec-intro prose">Before designing dashboards, here's what's on the wire today. The observability work is to <em>collect</em> these — not to add instrumentation. Only two rows need new plumbing.</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Signal</th><th>Where it already is</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td class="k"><span class="em">adapter_infer_latency_seconds</span></td><td>histogram on each adapter <code>/metrics</code> (tunable buckets)</td><td><span class="badge have">emitted</span></td></tr>
+          <tr><td class="k"><span class="em">adapter_infer_total{outcome}</span></td><td><code>/metrics</code> — ok / model_error / provider_error / transport_error / refused</td><td><span class="badge have">emitted</span></td></tr>
+          <tr><td class="k"><span class="em">adapter_inflight_requests</span> · <span class="em">queue_depth</span></td><td><code>/metrics</code> gauges — live saturation &amp; backpressure</td><td><span class="badge have">emitted</span></td></tr>
+          <tr><td class="k"><span class="em">inference_ms</span></td><td>on every NATS <code>InferenceCompletedEvent</code>, per camera</td><td><span class="badge have">emitted</span></td></tr>
+          <tr><td class="k"><span class="em">model_fingerprint</span></td><td>every event + registry poll; drift already audited</td><td><span class="badge have">emitted</span></td></tr>
+          <tr><td class="k"><span class="em">/hardware/evaluation</span></td><td>verdict OK/WARN/BLOCKED + <code>gpu_in_use</code>, providers, cpu_count</td><td><span class="badge have">emitted</span></td></tr>
+          <tr><td class="k">confidence distribution</td><td>inside <code>result.detections[].confidence</code> on NATS — derivable</td><td><span class="badge build">aggregate</span></td></tr>
+          <tr><td class="k">CPU / GPU / mem utilization</td><td>not in contract; scrape host or add to hardware details</td><td><span class="badge build">add</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 05 COLLECTOR -->
+  <section>
+    <div class="sec-head"><span class="sec-num">05</span><h2>A thin collector on the poll you already run</h2></div>
+    <p class="sec-intro prose">KAI-C already polls every adapter every 60s for <code>/health</code> + <code>/capabilities</code>. Add <code>/metrics</code> to that same poll, and tap the NATS inference stream for per-event latency. Roll into a lightweight time-series — no full Prometheus required, though the <code>/metrics</code> format means you can bolt Prometheus + Grafana on later for free. Keep the rollup store <strong>deliberately dumb</strong>: bounded ring buffers and fixed windows, not a mini-TSDB growing inside KAI-C — long retention stays Prometheus's job.</p>
+    <div class="flow">
+      <div class="node"><div class="nl">source</div><div class="nt">adapter /metrics</div><div class="nd">histograms + gauges, scraped on the 60s poll</div></div>
+      <div class="mid">+</div>
+      <div class="node"><div class="nl">source</div><div class="nt">NATS inference.&gt;</div><div class="nd">per-event inference_ms · fingerprint · confidence</div></div>
+      <div class="mid">&rarr;</div>
+      <div class="node seam"><div class="nl">KAI-C / backend</div><div class="nt">rollup store</div><div class="nd">windowed p50/p95/p99, rates, drift log</div></div>
+    </div>
+    <p class="atom" style="margin-top:14px"><code>GET /api/v1/adapters/{name}/metrics</code> serves the rollups to the UI — the registry view the blueprint asked for, now with teeth</p>
+
+    <div class="callout" style="border-left-color: var(--warn); background: linear-gradient(180deg, rgba(240,168,72,0.06), transparent);">
+      <div class="cl" style="color:var(--warn)">Prerequisite — the governed path must be the default</div>
+      <p>The NATS tap only sees inference that flows through <code>POST /api/v1/infer/{adapter}</code>. The OpenNVR backend still defaults to the legacy <code>/infer</code> route (<code>OPENNVR_ADAPTER_CONTRACT</code> in <code>kai_c_service.py</code>), which bypasses NATS, correlation IDs, and the audit trail. Flip that default to <code>governed</code> before or with step 2 of the rollout — otherwise the per-event half of the metrics (latency per camera, confidence, fingerprint) stays empty and the dashboard ships hollow.</p>
+    </div>
+  </section>
+
+  <!-- 06 DECISION VIEW -->
+  <section>
+    <div class="sec-head"><span class="sec-num">06</span><h2>Metrics grouped by the decision they drive</h2></div>
+    <p class="sec-intro prose">The point of the numbers isn't the numbers — it's the call each one lets an operator make. The per-adapter view is organized around decisions, not raw gauges.</p>
+
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>What you see</th><th>What it tells you</th><th>The decision it drives</th></tr></thead>
+        <tbody>
+          <tr><td class="k">latency p95 / p99 trend</td><td>how slow this model gets under real load</td><td>which model per camera; is the SLA breached</td></tr>
+          <tr><td class="k">outcome error rate</td><td>model vs provider vs transport failures</td><td>rollback / retire / investigate the adapter</td></tr>
+          <tr><td class="k">inflight ÷ max_inflight</td><td>saturation against the declared ceiling</td><td>scale out a replica / rebalance cameras</td></tr>
+          <tr><td class="k">queue_depth</td><td>backpressure — frames waiting on the model</td><td>throttle fan-in / drop to keyframes</td></tr>
+          <tr><td class="k">fingerprint timeline</td><td>the weights changed under you</td><td>re-validate accuracy; freeze for compliance</td></tr>
+          <tr><td class="k">confidence distribution shift</td><td>quality drifting even if latency is fine</td><td>tune threshold / swap model</td></tr>
+          <tr><td class="k">hardware verdict + gpu_in_use</td><td>does this adapter fit this box</td><td>CPU&harr;GPU; move to a better host</td></tr>
+          <tr><td class="k">cost · local vs cloud</td><td>spend per 1k inferences, egress posture</td><td>route local vs cloud; sovereignty gate</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="sec-intro prose" style="margin:26px 0 12px">The per-adapter panel, built entirely from signals in §04:</p>
+    <div class="mock">
+      <div class="mock-bar">
+        <div class="dots"><i style="background:var(--crit)"></i><i style="background:var(--warn)"></i><i style="background:var(--good)"></i></div>
+        <span class="t">AI / Detections &rsaquo; Adapters &rsaquo; yolov8</span>
+        <span class="sel">last 24h ▾</span>
+      </div>
+      <div class="panel-grid">
+        <div class="mpanel">
+          <div class="ph"><span class="pt">inference latency</span><span class="pd">adapter_infer_latency_seconds</span></div>
+          <div class="bars">
+            <div class="bar"><span class="bl">p50</span><div class="track"><i style="width:24%"></i></div><span class="bv">18 ms</span></div>
+            <div class="bar"><span class="bl">p95</span><div class="track"><i style="width:60%"></i></div><span class="bv">47 ms</span></div>
+            <div class="bar"><span class="bl">p99</span><div class="track"><i style="width:88%; background:var(--warn)"></i></div><span class="bv">71 ms</span></div>
+          </div>
+        </div>
+        <div class="mpanel">
+          <div class="ph"><span class="pt">outcomes · 1h</span><span class="pd">adapter_infer_total</span></div>
+          <div class="split"><i style="width:96%; background:var(--good)"></i><i style="width:3%; background:var(--warn)"></i><i style="width:1%; background:var(--crit)"></i></div>
+          <div class="legend">
+            <span><i style="background:var(--good)"></i>ok 96%</span>
+            <span><i style="background:var(--warn)"></i>model_error 3%</span>
+            <span><i style="background:var(--crit)"></i>transport 1%</span>
+          </div>
+        </div>
+        <div class="mpanel">
+          <div class="ph"><span class="pt">saturation</span><span class="pd">inflight ÷ max_inflight</span></div>
+          <div class="gauge"><span class="gv">7 / 8</span><span class="gt">88% — near ceiling</span></div>
+          <div class="gtrack"><i style="width:88%"></i></div>
+        </div>
+        <div class="mpanel">
+          <div class="ph"><span class="pt">fingerprint / drift</span><span class="pd">model_fingerprint</span></div>
+          <div class="drift">
+            <i class="a" style="height:60%"></i><i class="a" style="height:60%"></i><i class="a" style="height:60%"></i><i class="a" style="height:60%"></i>
+            <i class="d" style="height:100%"></i><i class="a" style="height:70%"></i><i class="a" style="height:70%"></i><i class="a" style="height:70%"></i>
+          </div>
+          <div class="drift-note">1 change 3d ago &mdash; weights re-fingerprinted, audited</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 07 ROLLOUT -->
+  <section>
+    <div class="sec-head"><span class="sec-num">07</span><h2>Rollout</h2></div>
+    <div class="seq">
+      <div class="seq-step"><div class="m">1</div><div><h3>Ship the intent map + descriptor</h3><p>Add the curated <code>use_case_map.yml</code> and the optional v1.1 <code>CapabilityDescriptor</code>. Backfill labels/tags for the ~9 tasks in use today — a half-day of editorial, no adapter changes required.</p></div></div>
+      <div class="seq-step"><div class="m">2</div><div><h3>Add /metrics to the KAI-C poll</h3><p>Scrape each adapter's Prometheus text on the existing 60s cycle; parse into rollups. Tap NATS for per-event <code>inference_ms</code> + confidence. Store windowed p50/p95/p99, rates, drift.</p></div></div>
+      <div class="seq-step"><div class="m">3</div><div><h3>Expose the capability catalog</h3><p>The three-door view in the AI / Detections app — use case, task, developer — reading the descriptor + intent map, cross-checked against live <code>/api/v1/adapters</code>.</p></div></div>
+      <div class="seq-step"><div class="m">4</div><div><h3>Expose the decision dashboard</h3><p>The per-adapter panel above, plus a fleet overview. Every metric captioned with the decision it drives — not a raw Grafana dump.</p></div></div>
+      <div class="seq-step"><div class="m">5</div><div><h3>Wire the feedback loop</h3><p>Let the catalog <em>use</em> the metrics: when two adapters offer the same capability, rank them by live latency / error / cost so "choose a model" is evidence-based, not a guess.</p></div></div>
+    </div>
+  </section>
+
+  <footer>
+    OpenNVR capabilities &amp; observability spec · grounded in opennvr_adapter_sdk/contract.py, metrics.py, kai-c/events.py &amp; registry.py · third companion to the platform blueprint and the App-SDK spec.
+  </footer>
+
+</div>
+</div>

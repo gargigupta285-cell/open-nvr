@@ -1,0 +1,655 @@
+<title>OpenNVR Platform Blueprint</title>
+<style>
+  :root {
+    --ground: #0b111c;
+    --panel: #121a28;
+    --panel-2: #182233;
+    --panel-3: #1e2a3d;
+    --border: #26344a;
+    --border-soft: #1d293b;
+    --text: #e7edf6;
+    --text-dim: #93a1b8;
+    --text-faint: #667891;
+    --accent: #3fd0c4;
+    --accent-deep: #1f8f87;
+    --accent-glow: rgba(63, 208, 196, 0.14);
+    /* app hues */
+    --nvr: #3fd0c4;
+    --agent: #a98bfb;
+    --ai: #45c98a;
+    --sec: #f0a848;
+    --gov: #f2748c;
+    /* semantic */
+    --good: #45c98a;
+    --warn: #f0a848;
+    --crit: #f2748c;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+    --sans: "SF Pro Display", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  .doc {
+    background:
+      radial-gradient(1200px 600px at 80% -10%, rgba(63,208,196,0.06), transparent 60%),
+      var(--ground);
+    color: var(--text);
+    font-family: var(--sans);
+    line-height: 1.6;
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+    padding: 0 24px 120px;
+  }
+
+  .wrap { max-width: 1120px; margin: 0 auto; }
+  .prose { max-width: 68ch; }
+
+  /* ---- typography ---- */
+  h1, h2, h3 { text-wrap: balance; line-height: 1.15; margin: 0; letter-spacing: -0.02em; }
+  h1 { font-size: clamp(2.2rem, 5vw, 3.4rem); font-weight: 800; }
+  h2 { font-size: clamp(1.5rem, 3vw, 2rem); font-weight: 700; }
+  h3 { font-size: 1.06rem; font-weight: 700; letter-spacing: -0.01em; }
+  p { margin: 0; color: var(--text-dim); }
+  strong { color: var(--text); font-weight: 600; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.24em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 500;
+  }
+  .kicker {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+  }
+
+  /* ---- hero ---- */
+  .hero {
+    padding: 96px 0 56px;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .hero .live {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--text-dim);
+  }
+  .rec-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--crit); box-shadow: 0 0 0 0 rgba(242,116,140,0.6);
+    animation: pulse 2.4s infinite;
+  }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(242,116,140,0.5); }
+    70% { box-shadow: 0 0 0 7px rgba(242,116,140,0); }
+    100% { box-shadow: 0 0 0 0 rgba(242,116,140,0); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .rec-dot { animation: none; }
+  }
+  .hero h1 { margin-top: 22px; }
+  .hero h1 .hl { color: var(--accent); }
+  .hero .lede { margin-top: 24px; font-size: 1.18rem; color: var(--text-dim); max-width: 60ch; }
+  .hero .lede strong { color: var(--text); }
+
+  .meta-row {
+    display: flex; flex-wrap: wrap; gap: 10px; margin-top: 34px;
+  }
+  .chip {
+    font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.04em;
+    color: var(--text-dim); background: var(--panel-2);
+    border: 1px solid var(--border); padding: 7px 12px; border-radius: 2px;
+    display: inline-flex; align-items: center; gap: 7px;
+  }
+  .chip .dot { width: 7px; height: 7px; border-radius: 50%; }
+
+  /* ---- section rhythm ---- */
+  section { padding: 72px 0 0; }
+  .sec-head { display: flex; align-items: baseline; gap: 16px; margin-bottom: 8px; }
+  .sec-num {
+    font-family: var(--mono); font-size: 0.8rem; color: var(--accent);
+    letter-spacing: 0.1em; padding-top: 4px;
+  }
+  .sec-intro { margin: 18px 0 36px; font-size: 1.06rem; }
+
+  /* ---- stack diagram ---- */
+  .stack { display: flex; flex-direction: column; gap: 10px; }
+  .layer {
+    border: 1px solid var(--border); background: var(--panel);
+    border-radius: 4px; padding: 18px 20px; position: relative;
+  }
+  .layer .llabel {
+    font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.16em;
+    text-transform: uppercase; color: var(--text-faint); margin-bottom: 12px;
+  }
+  .layer.shell { border-color: var(--border); }
+  .apps-strip { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+  .apps-strip .a {
+    border: 1px solid var(--border); border-top-width: 3px; border-radius: 3px;
+    padding: 12px 12px 14px; background: var(--panel-2);
+    display: flex; flex-direction: column; gap: 3px;
+  }
+  .apps-strip .a .an { font-weight: 700; font-size: 0.92rem; }
+  .apps-strip .a .ad { font-size: 0.74rem; color: var(--text-faint); font-family: var(--mono); letter-spacing: 0.02em; }
+  .seam {
+    border-color: var(--accent-deep);
+    background: linear-gradient(180deg, var(--accent-glow), transparent);
+  }
+  .seam .llabel { color: var(--accent); }
+  .seam .seam-body { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+  .seam .seam-body .sn { font-weight: 700; font-size: 1.05rem; }
+  .seam .seam-body .sd { font-size: 0.85rem; color: var(--text-dim); }
+  .adapters { display: flex; flex-wrap: wrap; gap: 8px; }
+  .adapters .ad {
+    font-family: var(--mono); font-size: 0.74rem; color: var(--text-dim);
+    background: var(--panel-2); border: 1px solid var(--border);
+    padding: 6px 10px; border-radius: 2px;
+  }
+  .flow-arrow { text-align: center; color: var(--text-faint); font-family: var(--mono); font-size: 0.8rem; }
+
+  /* ---- app cards ---- */
+  .app-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+  .app-card {
+    border: 1px solid var(--border); border-radius: 5px; background: var(--panel);
+    padding: 22px; display: flex; flex-direction: column; gap: 14px;
+    border-left: 3px solid var(--hue, var(--accent));
+  }
+  .app-card .ac-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .app-card h3 { font-size: 1.15rem; }
+  .app-card .tag {
+    font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--hue, var(--accent)); border: 1px solid; border-radius: 2px; padding: 3px 7px; opacity: 0.9;
+  }
+  .app-card .owns { font-size: 0.9rem; color: var(--text-dim); }
+  .app-card .why {
+    font-size: 0.85rem; color: var(--text-faint); border-top: 1px solid var(--border-soft);
+    padding-top: 12px; margin-top: auto;
+  }
+  .app-card .why b { color: var(--text-dim); font-weight: 600; }
+
+  /* ---- before / after ---- */
+  .ba { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .ba-col { border: 1px solid var(--border); border-radius: 5px; background: var(--panel); overflow: hidden; }
+  .ba-col .bh { padding: 14px 18px; border-bottom: 1px solid var(--border-soft); display: flex; align-items: center; gap: 10px; }
+  .ba-col .bh .bt { font-weight: 700; font-size: 0.95rem; }
+  .ba-col .bh .bl { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.1em; text-transform: uppercase; margin-left: auto; }
+  .before .bl { color: var(--crit); }
+  .after .bl { color: var(--good); }
+  .navlist { list-style: none; margin: 0; padding: 12px; display: flex; flex-direction: column; gap: 2px; }
+  .navlist li {
+    font-size: 0.85rem; padding: 7px 12px; border-radius: 3px; color: var(--text-dim);
+    display: flex; align-items: center; gap: 9px; font-family: var(--mono); letter-spacing: 0.01em;
+  }
+  .navlist li .g { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  .before .navlist li { background: var(--panel-2); color: var(--text-faint); }
+  .after .navlist li.keep { background: rgba(63,208,196,0.08); color: var(--text); }
+  .after .sub { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-faint); padding: 14px 12px 4px; }
+  .rehome { padding: 10px 14px 16px; }
+  .rehome .rl { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-faint); margin-bottom: 8px; }
+  .rehome .pills { display: flex; flex-wrap: wrap; gap: 6px; }
+  .rehome .pills span { font-size: 0.74rem; font-family: var(--mono); color: var(--text-dim); border: 1px dashed var(--border); padding: 4px 8px; border-radius: 2px; }
+
+  /* ---- spec list (agent, registry) ---- */
+  .spec { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+  .spec-item { border: 1px solid var(--border); border-radius: 5px; background: var(--panel); padding: 18px; }
+  .spec-item h3 { font-size: 0.98rem; margin-bottom: 8px; display: flex; align-items: center; gap: 9px; }
+  .spec-item h3 .n { font-family: var(--mono); font-size: 0.72rem; color: var(--hue, var(--accent)); }
+  .spec-item p { font-size: 0.86rem; }
+
+  .callout {
+    border: 1px solid var(--border); border-left: 3px solid var(--warn);
+    background: linear-gradient(180deg, rgba(240,168,72,0.06), transparent);
+    border-radius: 4px; padding: 18px 20px; margin-top: 18px;
+  }
+  .callout .cl { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--warn); margin-bottom: 8px; }
+  .callout p { font-size: 0.9rem; }
+
+  /* ---- backlog table ---- */
+  .tbl-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 5px; }
+  table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: 0.88rem; }
+  thead th {
+    text-align: left; font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--text-faint); font-weight: 500;
+    padding: 14px 16px; background: var(--panel-2); border-bottom: 1px solid var(--border);
+  }
+  tbody td { padding: 14px 16px; border-bottom: 1px solid var(--border-soft); color: var(--text-dim); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody td.item { color: var(--text); font-weight: 600; }
+  tbody td .sub { display: block; color: var(--text-faint); font-weight: 400; font-size: 0.8rem; margin-top: 3px; }
+  .sev { display: inline-flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.04em; white-space: nowrap; }
+  .sev .stripe { width: 3px; height: 15px; border-radius: 2px; }
+  .sev.p0 { color: var(--crit); } .sev.p0 .stripe { background: var(--crit); }
+  .sev.p1 { color: var(--warn); } .sev.p1 .stripe { background: var(--warn); }
+  .sev.p2 { color: var(--accent); } .sev.p2 .stripe { background: var(--accent); }
+  td.effort { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--text-dim); white-space: nowrap; }
+
+  /* ---- risks ---- */
+  .risks { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px,1fr)); gap: 12px; }
+  .risk { border: 1px solid var(--border); border-radius: 5px; background: var(--panel); padding: 18px; }
+  .risk h3 { font-size: 0.95rem; margin-bottom: 8px; color: var(--crit); }
+  .risk p { font-size: 0.85rem; }
+
+  /* ---- sequence ---- */
+  .seq { display: flex; flex-direction: column; gap: 0; counter-reset: step; }
+  .seq-step { display: grid; grid-template-columns: 44px 1fr; gap: 18px; padding: 18px 0; border-bottom: 1px solid var(--border-soft); }
+  .seq-step:last-child { border-bottom: none; }
+  .seq-step .marker {
+    font-family: var(--mono); font-weight: 700; color: var(--accent); font-size: 1.05rem;
+    border: 1px solid var(--accent-deep); border-radius: 3px; height: 40px; display: flex;
+    align-items: center; justify-content: center; background: var(--accent-glow);
+  }
+  .seq-step h3 { font-size: 1rem; margin-bottom: 5px; }
+  .seq-step p { font-size: 0.88rem; }
+
+  footer { margin-top: 90px; padding-top: 28px; border-top: 1px solid var(--border-soft); color: var(--text-faint); font-family: var(--mono); font-size: 0.74rem; letter-spacing: 0.04em; }
+
+  code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); background: var(--panel-2); padding: 1px 5px; border-radius: 2px; }
+
+  /* ---- ecosystem catalog ---- */
+  .cat-group { margin-bottom: 22px; }
+  .cat-group .cgl { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-faint); margin-bottom: 10px; display: flex; align-items: center; gap: 12px; }
+  .cat-group .cgl .ln { flex: 1; height: 1px; background: var(--border-soft); }
+  .cat-group .cgl .st { color: var(--good); }
+  .cat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 8px; }
+  .cat { border: 1px solid var(--border); border-left: 2px solid var(--hue, var(--accent)); border-radius: 3px; background: var(--panel); padding: 11px 13px; display: flex; flex-direction: column; gap: 3px; }
+  .cat .cn { font-size: 0.85rem; font-weight: 600; color: var(--text); font-family: var(--mono); letter-spacing: -0.01em; }
+  .cat .cd { font-size: 0.74rem; color: var(--text-faint); line-height: 1.4; }
+
+  /* ---- roadmap band ---- */
+  .road { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .road-col { border: 1px solid var(--border); border-radius: 5px; background: var(--panel); overflow: hidden; }
+  .road-col .rch { padding: 12px 16px; border-bottom: 1px solid var(--border-soft); display: flex; align-items: baseline; gap: 10px; }
+  .road-col .rch .v { font-family: var(--mono); font-weight: 700; color: var(--accent); font-size: 0.9rem; letter-spacing: 0.04em; }
+  .road-col .rch .vt { font-size: 0.76rem; color: var(--text-faint); }
+  .road-col ul { list-style: none; margin: 0; padding: 12px 16px 16px; display: flex; flex-direction: column; gap: 8px; }
+  .road-col li { font-size: 0.82rem; color: var(--text-dim); padding-left: 15px; position: relative; }
+  .road-col li::before { content: "\203A"; position: absolute; left: 0; color: var(--accent); }
+
+  @media (max-width: 760px) {
+    .apps-strip { grid-template-columns: repeat(2, 1fr); }
+    .ba { grid-template-columns: 1fr; }
+    .road { grid-template-columns: 1fr; }
+    .hero { padding: 64px 0 44px; }
+    section { padding: 56px 0 0; }
+  }
+</style>
+
+<div class="doc">
+<div class="wrap">
+
+  <!-- HERO -->
+  <header class="hero">
+    <span class="live"><span class="rec-dot"></span> Platform Blueprint &middot; v1 &middot; Jul 2026</span>
+    <h1>OpenNVR is an inference platform.<br>The NVR is just its <span class="hl">first app</span>.</h1>
+    <p class="lede">The codebase has already drifted into a platform-and-apps shape — <strong>KAI-C</strong> is a real seam, the <strong>adapter contract</strong> is an ecosystem, and the <strong>camera agent</strong> is a standalone app. And <code>examples/</code> is already 13 vertical apps with ~50 more on the roadmap. This blueprint makes those seams intentional, subtracts the NVR UI down to a world-class operator surface, and puts the governance story on screen.</p>
+    <div class="meta-row">
+      <span class="chip"><span class="dot" style="background:var(--nvr)"></span> NVR</span>
+      <span class="chip"><span class="dot" style="background:var(--agent)"></span> Camera Agent</span>
+      <span class="chip"><span class="dot" style="background:var(--ai)"></span> AI / Detections</span>
+      <span class="chip"><span class="dot" style="background:var(--sec)"></span> Security / Network</span>
+      <span class="chip"><span class="dot" style="background:var(--gov)"></span> Governance</span>
+    </div>
+  </header>
+
+  <!-- 1. THE STACK -->
+  <section>
+    <div class="sec-head"><span class="sec-num">01</span><h2>One shell, many apps, one seam</h2></div>
+    <p class="sec-intro prose">Commit to the shape the code already leans toward. Apps are modules in a shared shell — one identity, one design system — not separate deployments with separate looks. Everything, including third parties, codes against <strong>KAI-C</strong>.</p>
+
+    <div class="stack">
+      <div class="layer shell">
+        <div class="llabel">Platform Shell &mdash; auth &middot; RBAC &middot; navigation &middot; theming &middot; design system</div>
+        <div class="apps-strip">
+          <div class="a" style="border-top-color:var(--nvr)"><span class="an">NVR</span><span class="ad">surveillance</span></div>
+          <div class="a" style="border-top-color:var(--agent)"><span class="an">Camera Agent</span><span class="ad">conversational</span></div>
+          <div class="a" style="border-top-color:var(--ai)"><span class="an">AI / Detections</span><span class="ad">ml-ops</span></div>
+          <div class="a" style="border-top-color:var(--sec)"><span class="an">Security</span><span class="ad">network / IDS</span></div>
+          <div class="a" style="border-top-color:var(--gov)"><span class="an">Governance</span><span class="ad">audit / compliance</span></div>
+        </div>
+      </div>
+      <div class="flow-arrow">&darr;&nbsp; every app calls the same gateway &nbsp;&darr;</div>
+      <div class="layer seam">
+        <div class="llabel">The Seam</div>
+        <div class="seam-body">
+          <span class="sn">KAI-C &mdash; adapter gateway</span>
+          <span class="sd">discovery &middot; health &middot; correlation IDs &middot; sovereignty enforcement &middot; audit trail</span>
+        </div>
+      </div>
+      <div class="flow-arrow">&darr;&nbsp; contract v1 (6 HTTP + WS endpoints) &nbsp;&darr;</div>
+      <div class="layer">
+        <div class="llabel">Adapter Ecosystem &mdash; ai-adapter SDK, ~30 lines to ship a governed model</div>
+        <div class="adapters">
+          <span class="ad">YOLOv8 &middot; detect</span>
+          <span class="ad">BLIP &middot; caption</span>
+          <span class="ad">Moondream &middot; VQA</span>
+          <span class="ad">InsightFace &middot; faces</span>
+          <span class="ad">Whisper &middot; STT</span>
+          <span class="ad">Piper &middot; TTS</span>
+          <span class="ad">fast-plate &middot; LPR</span>
+          <span class="ad">ByteTrack &middot; tracking</span>
+          <span class="ad">+ your own</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2. APP DECOMPOSITION -->
+  <section>
+    <div class="sec-head"><span class="sec-num">02</span><h2>Product surfaces: five apps in one shell</h2></div>
+    <p class="sec-intro prose">The first kind of app is a <strong>product surface</strong> — it has a UI and lives in the shell. Decompose these along interaction model and user, not features. Each has a genuinely different job, which is what makes it an app and not a tab. <em>(There's a second kind entirely — the headless vertical detectors — in the next section.)</em></p>
+
+    <div class="app-grid">
+      <div class="app-card" style="--hue:var(--nvr)">
+        <div class="ac-top"><h3>NVR</h3><span class="tag">operator surface</span></div>
+        <p class="owns"><b>Owns:</b> Live wall, playback timeline, cameras, recordings, ONVIF/PTZ.</p>
+        <p class="why"><b>Why an app:</b> dense, spatial, keyboard-driven, must be flawless. The control-room surface can't share a sidebar with firewall rules.</p>
+      </div>
+      <div class="app-card" style="--hue:var(--agent)">
+        <div class="ac-top"><h3>Camera Agent</h3><span class="tag">conversational</span></div>
+        <p class="owns"><b>Owns:</b> Voice + chat, skills, standing alarms / monitors / reports / tasks.</p>
+        <p class="why"><b>Why an app:</b> a conversational, always-on interaction model — nothing like the spatial NVR. Already standalone on :9100.</p>
+      </div>
+      <div class="app-card" style="--hue:var(--ai)">
+        <div class="ac-top"><h3>AI / Detections</h3><span class="tag">ml-ops</span></div>
+        <p class="owns"><b>Owns:</b> Models, BYOM, adapter registry (KAI-C), detection results.</p>
+        <p class="why"><b>Why an app:</b> different user (ML / ops) and lifecycle than cameras. This is where the adapter registry finally becomes visible.</p>
+      </div>
+      <div class="app-card" style="--hue:var(--sec)">
+        <div class="ac-top"><h3>Security / Network</h3><span class="tag">near-separate product</span></div>
+        <p class="owns"><b>Owns:</b> Suricata alerts, firewall, NAT, network monitoring.</p>
+        <p class="why"><b>Why an app:</b> this is essentially a network IDS. It does not belong next to "Live View."</p>
+      </div>
+      <div class="app-card" style="--hue:var(--gov)">
+        <div class="ac-top"><h3>Governance</h3><span class="tag">the moat</span></div>
+        <p class="owns"><b>Owns:</b> Audit logs, compliance reports, sovereignty, BYOK.</p>
+        <p class="why"><b>Why an app:</b> the regulated-buyer surface — your actual differentiator. Deserves to be seen, not buried in Settings.</p>
+      </div>
+      <div class="app-card" style="--hue:var(--text-faint)">
+        <div class="ac-top"><h3>Admin</h3><span class="tag">shell infrastructure</span></div>
+        <p class="owns"><b>Owns:</b> Users, roles, settings, firmware, integrations.</p>
+        <p class="why"><b>Why not an app:</b> shared by every app. Lives at the shell level, reachable from anywhere — not a peer of the NVR.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. ECOSYSTEM APPS + ROADMAP -->
+  <section>
+    <div class="sec-head"><span class="sec-num">03</span><h2>The second kind of app <em>is</em> the roadmap</h2></div>
+    <p class="sec-intro prose">Here's what I under-read the first time. The <code>examples/</code> directory is the real "more applications" answer — and it isn't hypothetical. It's already <strong>13 shipped vertical apps</strong> on the same NATS + KAI-C substrate, with <strong>~50 more</strong> documented across the READMEs and <code>ROADMAP.md</code>. But these are a different species from the five product surfaces: mostly <strong>headless detectors</strong> — subscribe to the event bus, run a rule or state machine, emit an alert. Most have no UI at all.</p>
+
+    <div class="cat-group">
+      <div class="cgl">Perimeter &amp; zone detectors <span class="ln"></span><span class="st">shipped</span></div>
+      <div class="cat-grid">
+        <div class="cat" style="--hue:var(--sec)"><span class="cn">intrusion-detection</span><span class="cd">people / vehicles in restricted zones &amp; hours</span></div>
+        <div class="cat" style="--hue:var(--sec)"><span class="cn">loitering-detection</span><span class="cd">dwell-time state machine</span></div>
+        <div class="cat" style="--hue:var(--sec)"><span class="cn">occupancy-counting</span><span class="cd">zone occupancy, edge-triggered alerts</span></div>
+        <div class="cat" style="--hue:var(--sec)"><span class="cn">line-crossing</span><span class="cd">directional tripwire, entry / exit counts</span></div>
+        <div class="cat" style="--hue:var(--sec)"><span class="cn">abandoned-object</span><span class="cd">unattended item, owner-proximity suppression</span></div>
+        <div class="cat" style="--hue:var(--sec)"><span class="cn">package-delivery</span><span class="cd">arrival &rarr; linger &rarr; pickup per track</span></div>
+      </div>
+    </div>
+
+    <div class="cat-group">
+      <div class="cgl">Search &amp; identity <span class="ln"></span><span class="st">shipped</span></div>
+      <div class="cat-grid">
+        <div class="cat" style="--hue:var(--ai)"><span class="cn">footage-search</span><span class="cd">natural-language search over recordings</span></div>
+        <div class="cat" style="--hue:var(--ai)"><span class="cn">license-plate-recognition</span><span class="cd">YOLOv8 + OCR chain, allowlists</span></div>
+        <div class="cat" style="--hue:var(--ai)"><span class="cn">smart-doorbell</span><span class="cd">face recognition + REST enrollment</span></div>
+      </div>
+    </div>
+
+    <div class="cat-group">
+      <div class="cgl">Conversational &amp; integrations <span class="ln"></span><span class="st">shipped</span></div>
+      <div class="cat-grid">
+        <div class="cat" style="--hue:var(--agent)"><span class="cn">camera-agent</span><span class="cd">the one app with a full UI</span></div>
+        <div class="cat" style="--hue:var(--nvr)"><span class="cn">home-assistant-relay</span><span class="cd">alerts &rarr; Home Assistant via MQTT</span></div>
+        <div class="cat" style="--hue:var(--nvr)"><span class="cn">inference-listener</span><span class="cd">minimal NATS subscriber template</span></div>
+        <div class="cat" style="--hue:var(--nvr)"><span class="cn">alerts-subscriber</span><span class="cd">fan-out to webhooks / logs / tooling</span></div>
+      </div>
+    </div>
+
+    <h3 style="margin: 38px 0 16px;">&hellip;and ~50 more, versioned by release</h3>
+    <div class="road">
+      <div class="road-col">
+        <div class="rch"><span class="v">v0.2</span><span class="vt">adapters &amp; telemetry</span></div>
+        <ul>
+          <li>YOLOv11 detector + tracking</li>
+          <li>CLIP / SigLIP semantic search</li>
+          <li>Pose estimation &rarr; fall detection</li>
+          <li>Audio events: gunshot, glass-break</li>
+          <li>TelemetrySource primitive</li>
+        </ul>
+      </div>
+      <div class="road-col">
+        <div class="rch"><span class="v">v0.3</span><span class="vt">ecosystem</span></div>
+        <ul>
+          <li>Drone Patrol &mdash; the hero example</li>
+          <li>Federated AI prototype</li>
+          <li>Re-identification across cameras</li>
+          <li>Depth estimation</li>
+          <li>Larger VLM: LLaVA-NeXT / Qwen2-VL</li>
+        </ul>
+      </div>
+      <div class="road-col">
+        <div class="rch"><span class="v">wishlist</span><span class="vt">23 adapters &middot; 15 apps</span></div>
+        <ul>
+          <li>Weapon &middot; fire / smoke &middot; PPE</li>
+          <li>Crowd density &middot; queue &middot; heatmaps</li>
+          <li>Gait recognition &middot; tailgating</li>
+          <li>Edge: TensorRT &middot; OpenVINO &middot; CoreML</li>
+          <li>RAG-over-events &middot; on-call escalation</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="callout">
+      <div class="cl">The gap: apps have no SDK, no catalog, no UI</div>
+      <p>The adapters got the full treatment — a contract, an SDK, a conformance suite, and (soon) a registry view. The vertical apps got <b>13 folders of ad-hoc Python</b>, each re-implementing NATS subscription + state machine + alerting, configured by hand-editing YAML. Going from 13 &rarr; 60 that way is how an ecosystem becomes sprawl. Give the apps what the adapters have: an <b>App SDK</b> (a new detector in ~30 lines), an <b>app catalog</b> in the shell (install / enable / configure without touching YAML), and a <b>per-app config + results surface</b> so a "queue length" or "PPE compliance" app has somewhere to live.</p>
+    </div>
+
+    <div class="callout" style="border-left-color: var(--agent); background: linear-gradient(180deg, rgba(169,139,251,0.06), transparent);">
+      <div class="cl" style="color: var(--agent);">Watch the convergence with the agent</div>
+      <p>The camera agent already ships <code>monitor</code> primitives — notify, count, line-crossing — that <b>overlap the standalone examples</b> (line-crossing, occupancy, and intrusion all redo work the agent's monitors also do, down to sharing ByteTrack). Decide the relationship deliberately: the examples should be the <b>engine</b> the agent orchestrates, not a parallel reimplementation of the same rules. One rule library, two front doors — a headless recipe and a conversational one.</p>
+    </div>
+  </section>
+
+  <!-- 4. NVR IA REDESIGN -->
+  <section>
+    <div class="sec-head"><span class="sec-num">04</span><h2>Subtract the NVR down to the operator surface</h2></div>
+    <p class="sec-intro prose">The current SPA is feature-broad and UX-shallow: a 19-item flat sidebar where a camera wall shares navigation with NAT rules. "Best-in-class" comes from subtracting and deepening, not adding.</p>
+
+    <div class="ba">
+      <div class="ba-col before">
+        <div class="bh"><span class="bt">Today &mdash; one flat sidebar</span><span class="bl">everything, equal weight</span></div>
+        <ul class="navlist">
+          <li><span class="g" style="background:var(--text-faint)"></span> Dashboard</li>
+          <li><span class="g" style="background:var(--text-faint)"></span> Live &middot; Playback &middot; Cameras</li>
+          <li><span class="g" style="background:var(--text-faint)"></span> RBAC &middot; BYOK</li>
+          <li><span class="g" style="background:var(--text-faint)"></span> Network &middot; Logs &middot; Firmware</li>
+          <li><span class="g" style="background:var(--text-faint)"></span> AI Engine &middot; BYOM &middot; Detections</li>
+          <li><span class="g" style="background:var(--text-faint)"></span> Compliance &middot; Alerts &middot; Incidents</li>
+          <li><span class="g" style="background:var(--text-faint)"></span> Integrations &middot; Cloud &middot; Support</li>
+          <li><span class="g" style="background:var(--text-faint)"></span> Settings (7 tabs, ~30 sub-pages)</li>
+        </ul>
+      </div>
+      <div class="ba-col after">
+        <div class="bh"><span class="bt">NVR app &mdash; four things, done well</span><span class="bl">focused</span></div>
+        <ul class="navlist">
+          <li class="keep"><span class="g" style="background:var(--nvr)"></span> Live &mdash; the flagship wall</li>
+          <li class="keep"><span class="g" style="background:var(--nvr)"></span> Playback &mdash; event-marked timeline</li>
+          <li class="keep"><span class="g" style="background:var(--nvr)"></span> Cameras &mdash; add / discover / health</li>
+          <li class="keep"><span class="g" style="background:var(--nvr)"></span> Wall &mdash; status, storage, alerts <em style="color:var(--text-faint)">(today's Dashboard, refit — not a new sibling)</em></li>
+        </ul>
+        <div class="rehome">
+          <div class="rl">&darr; rehomed to other apps / admin</div>
+          <div class="pills">
+            <span>AI Engine</span><span>BYOM</span><span>Detections</span><span>Alerts</span>
+            <span>Compliance</span><span>Network</span><span>Firewall</span><span>Logs</span>
+            <span>Firmware</span><span>Integrations</span><span>Cloud</span><span>Settings/*</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout">
+      <div class="cl">The flagship is Live</div>
+      <p>Wire up the dnd-kit you already ship (drag-reorder tiles), per-tile WebRTC/HLS with graceful fallback, inline PTZ, and keyboard nav (1&ndash;9 focus, F fullscreen, space pause). This one screen decides whether people call your UI "best."</p>
+    </div>
+  </section>
+
+  <!-- 4. CAMERA AGENT -->
+  <section>
+    <div class="sec-head"><span class="sec-num">05</span><h2>The Camera Agent, raised from demo to product</h2></div>
+    <p class="sec-intro prose">Good bones today — talk button, avatar, skills rail, alarm/monitor cards. As a first-class app it needs four things, all pointing at one idea: <strong>trust in a camera agent comes from showing what it saw.</strong></p>
+
+    <div class="spec">
+      <div class="spec-item" style="--hue:var(--agent)">
+        <h3><span class="n">01</span> Grounded conversation</h3>
+        <p>Voice and text in one thread — with the frame and detections the agent reasoned over shown <em>inline</em>. Grounding is the differentiator; render it.</p>
+      </div>
+      <div class="spec-item" style="--hue:var(--agent)">
+        <h3><span class="n">02</span> Skills as capabilities</h3>
+        <p>Each skill with its backing adapter, availability, and a plain-English "what it answers." Keep runtime enable/disable — it genuinely helps small-model routing.</p>
+      </div>
+      <div class="spec-item" style="--hue:var(--agent)">
+        <h3><span class="n">03</span> Standing intelligence</h3>
+        <p>Alarms, monitors, reports, tasks get a real management surface — list, status, history, mute, edit. And <b>persist state</b>: an alarm that dies on restart is a liability.</p>
+      </div>
+      <div class="spec-item" style="--hue:var(--agent)">
+        <h3><span class="n">04</span> Provenance</h3>
+        <p>Every answer traceable to a frame, a model, a correlation ID. You already thread those through KAI-C — surface them. Same governance story, applied to the agent.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5. AI ADAPTER -->
+  <section>
+    <div class="sec-head"><span class="sec-num">06</span><h2>Make the crown jewel visible</h2></div>
+    <p class="sec-intro prose">A governed, sovereignty-enforcing adapter SDK is exactly what regulated and air-gapped buyers pay for — and it's the least visible thing in the product. Two moves.</p>
+
+    <div class="spec">
+      <div class="spec-item" style="--hue:var(--ai)">
+        <h3><span class="n">A</span> Build the registry view</h3>
+        <p>One screen where an operator sees every installed adapter: model fingerprint, declared permissions, health, and its <b>sovereignty verdict</b>. This is the visible proof of your governance story.</p>
+      </div>
+      <div class="spec-item" style="--hue:var(--ai)">
+        <h3><span class="n">B</span> Enforce the contract in CI</h3>
+        <p>You already have a conformance suite. Gate every adapter on it. As apps and third parties code against KAI-C, its contract becomes load-bearing — treat it like a public API.</p>
+      </div>
+    </div>
+
+    <div class="callout">
+      <div class="cl">Pick one adapter path now</div>
+      <p>There are two ways to ship an adapter — the SDK path and the legacy monolith — and the docs already say the monolith is "not recommended." Choose the SDK story publicly and deprecate the other <b>before</b> you have external adapter authors, or you'll support both forever and confuse everyone building on you.</p>
+    </div>
+  </section>
+
+  <!-- 6. FOUNDATIONS BACKLOG -->
+  <section>
+    <div class="sec-head"><span class="sec-num">07</span><h2>Foundations that cap you at "feature-rich"</h2></div>
+    <p class="sec-intro prose">These are cross-cutting and worth doing in parallel with decomposition — they're the actual gap between good and best. Adding apps on top of missing states just spreads the shallowness.</p>
+
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr><th>Fix</th><th>Priority</th><th>Why it caps quality</th><th>Effort</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="item">State completeness<span class="sub">loading / empty / error on every list &amp; panel</span></td>
+            <td><span class="sev p0"><span class="stripe"></span>P0</span></td>
+            <td>The single biggest perceived-quality gap. Silent "Loading…" text and bare empty tables read as unfinished.</td>
+            <td class="effort">M &middot; broad</td>
+          </tr>
+          <tr>
+            <td class="item">Global error boundary<span class="sub">+ consistent toast layer</span></td>
+            <td><span class="sev p0"><span class="stripe"></span>P0</span></td>
+            <td>One component crash currently blanks the whole app. Non-negotiable for a control room.</td>
+            <td class="effort">S</td>
+          </tr>
+          <tr>
+            <td class="item">Virtualize big tables<span class="sub">alerts, logs, detections</span></td>
+            <td><span class="sev p0"><span class="stripe"></span>P0</span></td>
+            <td>Rendering ~5000 Suricata rows at once. Freezes on real data — the exact moment quality is judged.</td>
+            <td class="effort">S &middot; per table</td>
+          </tr>
+          <tr>
+            <td class="item">A real design system<span class="sub">tokens · Button/Badge/Input · one icon scale</span></td>
+            <td><span class="sev p1"><span class="stripe"></span>P1</span></td>
+            <td>Button styling and badge colors are ad-hoc across views. Tokenizing is what makes 5 apps feel like one product.</td>
+            <td class="effort">M</td>
+          </tr>
+          <tr>
+            <td class="item">Responsive + touch<span class="sub">tablet / phone operator layouts</span></td>
+            <td><span class="sev p1"><span class="stripe"></span>P1</span></td>
+            <td>Sidebar-collapses-to-icons isn't a mobile strategy. Operators use tablets on the floor.</td>
+            <td class="effort">M &middot; per app</td>
+          </tr>
+          <tr>
+            <td class="item">Accessibility pass<span class="sub">ARIA on icon buttons · focus rings · text status</span></td>
+            <td><span class="sev p2"><span class="stripe"></span>P2</span></td>
+            <td>Color-only camera status and invisible focus on dark bg. Also a procurement checkbox for gov buyers.</td>
+            <td class="effort">S &middot; ongoing</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 7. RISKS -->
+  <section>
+    <div class="sec-head"><span class="sec-num">08</span><h2>What to watch</h2></div>
+    <div class="risks">
+      <div class="risk">
+        <h3>Fragmentation</h3>
+        <p>"More apps" done wrong = five inconsistent UIs. The shared shell + design system is what makes decomposition a strength. <b>Build the shell first.</b></p>
+      </div>
+      <div class="risk">
+        <h3>Two adapter paths</h3>
+        <p>SDK vs legacy monolith. Pick one public story now, before external authors lock you into supporting both.</p>
+      </div>
+      <div class="risk">
+        <h3>Depth debt</h3>
+        <p>Current breadth is impressive but shallow. Fix state/design foundations in parallel, or new apps just spread the thinness.</p>
+      </div>
+      <div class="risk">
+        <h3>KAI-C is load-bearing</h3>
+        <p>As everything codes against it, its versioning, contract, and uptime become critical. Version it, document it, conformance-test it in CI.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 8. SEQUENCE -->
+  <section>
+    <div class="sec-head"><span class="sec-num">09</span><h2>Sequence</h2></div>
+    <p class="sec-intro prose">Order matters. The shell and foundations unblock everything downstream.</p>
+    <div class="seq">
+      <div class="seq-step">
+        <div class="marker">1</div>
+        <div><h3>Shell + design system + P0 foundations</h3><p>One shared layout, tokenized primitives, loading/empty/error states, error boundary, table virtualization. This is the platform floor. <em>Status (Jul 2026): first slice shipped — shared UI primitives, react-query data layer, per-route code splitting. Still open: global error boundary, table virtualization.</em></p></div>
+      </div>
+      <div class="seq-step">
+        <div class="marker">2</div>
+        <div><h3>Subtract the NVR</h3><p>Cut the sidebar to Live / Playback / Cameras / Wall. Deepen Live into the flagship. Rehome everything else behind the app switcher — but sequence the switcher honestly: grouped sidebar sections deliver the IA split today (<em>shipped Jul 2026</em>); promote to a real app switcher only once AI and Governance have the depth to justify their own rails. A switcher onto shallow apps feels worse than grouped nav.</p></div>
+      </div>
+      <div class="seq-step">
+        <div class="marker">3</div>
+        <div><h3>Registries + an app catalog + provenance</h3><p>Put the governance story on screen — the adapter registry, an app catalog + App SDK for the vertical detectors, and the agent's frame/model/correlation trail. This is what turns 60 planned apps into a browsable ecosystem instead of sprawl. <em>Status (Jul 2026): read-only adapter registry view shipped; permission approval, drift timeline, and metrics pending.</em></p></div>
+      </div>
+      <div class="seq-step">
+        <div class="marker">4</div>
+        <div><h3>Promote the Camera Agent into the shell</h3><p>Bring :9100 in as a first-class app: grounded conversation, capabilities view, persistent standing intelligence.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    OpenNVR platform blueprint &middot; derived from a read of open-nvr, camera-agent, and ai-adapter &middot; commit the platform + apps shape, subtract the NVR, surface governance, fix the floor.
+  </footer>
+
+</div>
+</div>

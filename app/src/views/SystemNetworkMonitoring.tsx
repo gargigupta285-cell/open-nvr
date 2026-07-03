@@ -18,7 +18,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate } from 'react-router-dom'
-import { Card, CardHeader, CardTitle, CardContent, Skeleton, ErrorCard } from "./Dashboard";
+import { Card, CardHeader, CardTitle, CardContent, Skeleton, ErrorCard } from "../components/ui";
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip as RTooltip, CartesianGrid, BarChart, Bar, Cell } from 'recharts'
 import { apiService } from "../lib/apiService";
 

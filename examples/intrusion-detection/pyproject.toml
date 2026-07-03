@@ -5,26 +5,29 @@ description = "OpenNVR intrusion-detection example app"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0" }
 
-# Deps are deliberately minimal — the example is meant to be a clean
-# template for community contributors. httpx for HTTP, PyYAML for the
-# config, websockets for the streaming-mode path through KAI-C's
+# The SDK owns the runtime stack (httpx KAI-C calls + webhooks, PyYAML
+# config, nats-py alert fan-out, the FrameApp poll loop, frame sources,
+# zone geometry) — see docs/design/app-sdk-spec.html. websockets stays
+# local: the §6 streaming-mode path through KAI-C's
 # /api/v1/infer/{adapter}/stream proxy (opt-in via
-# ``kaic_transport: ws`` in config; HTTP polling stays the default).
-# Image bytes go to KAI-C as base64 so we don't need cv2/PIL locally.
+# ``kaic_transport: ws`` in config) is unique to this example.
 dependencies = [
-    "httpx>=0.27,<1.0",
-    "PyYAML>=6.0,<7.0",
+    "opennvr-app-sdk",
     "websockets>=13.0",
-    # NATS alert fan-out (optional at runtime). The dep is declared
-    # unconditionally because adding a separate ``[nats]`` extra adds
-    # install friction without payoff — nats-py is small (~50 KB) and
-    # pure-Python aside from its asyncio runtime. If you're not using
-    # the NATS alert channel, leave ``nats_alerts_url`` unset and the
-    # library is never imported.
-    "nats-py>=2.6",
 ]
 
+[tool.uv.sources]
+opennvr-app-sdk = { path = "../../sdk/opennvr-app-sdk", editable = true }
+
 [project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+]
+
+# Mirrors the optional-dependencies group so a plain ``uv sync`` gets a
+# test-ready environment (uv installs the ``dev`` group by default).
+[dependency-groups]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23",

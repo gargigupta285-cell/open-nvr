@@ -48,6 +48,8 @@ The legacy endpoints `/infer`, `/infer/local`, and `/infer/cloud` (kept for Open
 
 **Fix path**: migrate OpenNVR backend onto `POST /api/v1/infer/{adapter_name}`, which has full audit + sovereignty + correlation_id. Once nothing uses legacy `/infer`, those endpoints retire.
 
+**Status (Jul 2026)**: the OpenNVR backend now defaults to the governed path (`OPENNVR_ADAPTER_CONTRACT=governed` in `server/services/kai_c_service.py`); `v1` and `legacy` remain as opt-out escape hatches. The legacy endpoints stay until those escape hatches are retired.
+
 
 
 
