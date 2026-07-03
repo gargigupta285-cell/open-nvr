@@ -28,6 +28,7 @@ This implementation uses HTTP Digest authentication which is more widely support
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -443,3 +444,103 @@ async def ptz_stop_digest(
         raise HTTPException(status_code=status, detail=f"PTZ stop failed: {text[:500]}")
 
     return {"status": "stopped"}
+
+
+async def get_system_datetime(
+    ip: str,
+    port: int = 80,
+) -> dict[str, Any]:
+    """Read the camera clock via GetSystemDateAndTime (no auth needed).
+
+    Returns a dict with utc_datetime (ISO string) and camera_timezone if present.
+    """
+    url = f"http://{ip}:{port}/onvif/device_service"
+    body = "<tds:GetSystemDateAndTime/>"
+    status, text = await _onvif_request(url, body, username=None, password=None)
+
+    if status not in (200, 401):
+        raise HTTPException(
+            status_code=status,
+            detail=f"GetSystemDateAndTime failed: {text[:500]}",
+        )
+
+    result: dict[str, Any] = {}
+
+    # Parse UTC date/time fields from SOAP response
+    fields = {
+        "year": r"<tt:Year>(\d+)</tt:Year>",
+        "month": r"<tt:Month>(\d+)</tt:Month>",
+        "day": r"<tt:Day>(\d+)</tt:Day>",
+        "hour": r"<tt:Hour>(\d+)</tt:Hour>",
+        "minute": r"<tt:Minute>(\d+)</tt:Minute>",
+        "second": r"<tt:Second>(\d+)</tt:Second>",
+    }
+    parsed = {}
+    for key, pattern in fields.items():
+        m = re.search(pattern, text)
+        if m:
+            parsed[key] = int(m.group(1))
+
+    if len(parsed) == 6:
+        try:
+            dt = datetime(
+                parsed["year"],
+                parsed["month"],
+                parsed["day"],
+                parsed["hour"],
+                parsed["minute"],
+                parsed["second"],
+                tzinfo=UTC,
+            )
+            result["utc_datetime"] = dt.isoformat()
+        except ValueError:
+            pass
+
+    tz_match = re.search(r"<tt:TimeZone><tt:TZ>([^<]+)</tt:TZ>", text)
+    if tz_match:
+        result["camera_timezone"] = tz_match.group(1)
+
+    return result
+
+
+async def set_system_datetime(
+    ip: str,
+    username: str,
+    password: str,
+    port: int = 80,
+) -> dict[str, Any]:
+    """Push the NVR's current UTC clock to the camera via SetSystemDateAndTime.
+
+    Uses Manual DateTimeType with the NVR's UTC time. Requires auth.
+    """
+    url = f"http://{ip}:{port}/onvif/device_service"
+    now = datetime.now(UTC)
+
+    body = f"""<tds:SetSystemDateAndTime>
+      <tds:DateTimeType>Manual</tds:DateTimeType>
+      <tds:DaylightSavings>false</tds:DaylightSavings>
+      <tds:UTCDateTime>
+        <tt:Time>
+          <tt:Hour>{now.hour}</tt:Hour>
+          <tt:Minute>{now.minute}</tt:Minute>
+          <tt:Second>{now.second}</tt:Second>
+        </tt:Time>
+        <tt:Date>
+          <tt:Year>{now.year}</tt:Year>
+          <tt:Month>{now.month}</tt:Month>
+          <tt:Day>{now.day}</tt:Day>
+        </tt:Date>
+      </tds:UTCDateTime>
+    </tds:SetSystemDateAndTime>"""
+
+    status, text = await _onvif_request(url, body, username, password)
+
+    if status == 401:
+        raise HTTPException(status_code=401, detail="Authentication failed")
+    if status != 200:
+        raise HTTPException(
+            status_code=status,
+            detail=f"SetSystemDateAndTime failed: {text[:500]}",
+        )
+
+    return {"synced_utc": now.isoformat()}

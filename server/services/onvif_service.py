@@ -23,8 +23,10 @@ This module wraps onvif-zeep sync clients in asyncio-friendly helpers via run_in
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 from typing import Any
 
+import httpx
 from fastapi import HTTPException
 
 from core.logging_config import main_logger
@@ -163,6 +165,93 @@ async def discover_onvif_devices(timeout: int = 4) -> list[dict[str, Any]]:
     except Exception as e:
         main_logger.error(f"WS-Discovery failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+_ONVIF_PROBE_BODY = "<tds:GetSystemDateAndTime/>"
+
+_SOAP_ENVELOPE = """\
+<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+               xmlns:tds="http://www.onvif.org/ver10/device/wsdl">
+  <soap:Body>
+    {body}
+  </soap:Body>
+</soap:Envelope>"""
+
+_ONVIF_CANDIDATE_PORTS = (80,)
+
+
+async def probe_onvif_device(
+    ip: str, port: int = 80, timeout: float = 0.5
+) -> dict[str, Any] | None:
+    """Probe a single IP:port for an ONVIF device service (no auth needed).
+
+    Sends unauthenticated GetSystemDateAndTime — the one ONVIF operation
+    cameras must answer without credentials.  Returns a device dict on hit,
+    None on miss / timeout.
+    """
+    url = f"http://{ip}:{port}/onvif/device_service"
+    envelope = _SOAP_ENVELOPE.format(body=_ONVIF_PROBE_BODY)
+    headers = {"Content-Type": "application/soap+xml; charset=utf-8"}
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, content=envelope, headers=headers)
+        # A real ONVIF device returns 200 or 401; either confirms ONVIF service presence.
+        # A non-ONVIF host typically gives connection refused, 404, or non-XML.
+        if resp.status_code in (200, 401) and (
+            "onvif.org" in resp.text or "SystemDateAndTime" in resp.text
+        ):
+            return {
+                "ip": ip,
+                "port": port,
+                "service_urls": [url],
+            }
+    except (httpx.ConnectError, httpx.TimeoutException, OSError):
+        pass
+    except Exception as exc:
+        main_logger.debug(f"probe_onvif_device {ip}:{port} unexpected: {exc}")
+    return None
+
+
+async def scan_onvif_subnet(
+    cidr: str,
+    ports: tuple[int, ...] = _ONVIF_CANDIDATE_PORTS,
+    concurrency: int = 64,
+) -> list[dict[str, Any]]:
+    """Scan a CIDR for ONVIF devices using unicast TCP probes.
+
+    Works across Docker bridge SNAT — no multicast required.  Probes each
+    host across candidate ports concurrently.  Returns a list of device dicts
+    with the same {ip, service_urls} shape as discover_onvif_devices().
+    """
+    try:
+        network = ipaddress.ip_network(cidr, strict=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid CIDR: {exc}")
+
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _bounded_probe(ip_str: str, port: int) -> dict[str, Any] | None:
+        async with sem:
+            return await probe_onvif_device(ip_str, port)
+
+    tasks = [
+        _bounded_probe(str(host), port)
+        for host in network.hosts()
+        for port in ports
+    ]
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Deduplicate by IP (keep first hit per IP regardless of port)
+    seen: set[str] = set()
+    devices: list[dict[str, Any]] = []
+    for r in results:
+        if isinstance(r, dict) and r.get("ip") and r["ip"] not in seen:
+            seen.add(r["ip"])
+            # Return the expected {ip, service_urls} shape; drop internal port key
+            devices.append({"ip": r["ip"], "service_urls": r["service_urls"]})
+    return devices
 
 
 def _make_camera(

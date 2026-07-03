@@ -21,12 +21,21 @@ Supports both WS-Security (via onvif-zeep) and HTTP Digest authentication.
 HTTP Digest is more compatible with Hikvision and similar devices.
 """
 
-from fastapi import APIRouter, HTTPException, Query
+import asyncio
+import ipaddress
 
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+
+from core.auth import get_current_superuser
+from core.database import get_db
+from routers.network import get_camera_lan_subnet, get_camera_lan_subnets
 from services.onvif_digest_service import (
     connect_and_get_profiles,
     fetch_profiles_digest,
     get_stream_uri_digest,
+    get_system_datetime,
+    set_system_datetime,
 )
 
 # Import both services - digest is the preferred one for Hikvision compatibility
@@ -37,20 +46,91 @@ from services.onvif_service import (
     ptz_continuous_move,
     ptz_presets,
     ptz_stop,
+    scan_onvif_subnet,
 )
 
 router = APIRouter(tags=["onvif"])
 
 
 @router.get("/discover")
-async def discover():
+async def discover(
+    cidr: list[str] | None = Query(
+        None,
+        description="One or more subnet CIDRs to scan (e.g. cidr=192.168.1.0/24&cidr=10.0.0.0/24). "
+                    "Falls back to all subnets configured in Camera LAN settings.",
+    ),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_superuser),
+):
+    """Discover ONVIF cameras via unicast subnet scan (works in Docker bridge mode).
+
+    Scans all configured Camera LAN subnets in parallel.  An optional cidr parameter
+    (repeatable) overrides the configured list; each must be within the primary subnet
+    when one is configured.  Multicast WS-Discovery runs as a best-effort fallback.
+    """
+    configured_subnets = get_camera_lan_subnets(db)
+    primary_cidr = get_camera_lan_subnet(db)
+
+    if cidr:
+        scan_cidrs: list[str] = []
+        for c in cidr:
+            try:
+                requested = ipaddress.ip_network(c, strict=False)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid CIDR '{c}': {exc}")
+            if primary_cidr:
+                try:
+                    configured = ipaddress.ip_network(primary_cidr, strict=False)
+                    if not requested.subnet_of(configured):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"CIDR {c} is not within the configured Camera LAN subnet {primary_cidr}.",
+                        )
+                except HTTPException:
+                    raise
+                except ValueError:
+                    pass
+            scan_cidrs.append(c)
+    elif configured_subnets:
+        scan_cidrs = configured_subnets
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No Camera LAN subnet configured and no cidr parameter provided. "
+                "Either set subnet_cidr under Network → Camera LAN settings, "
+                "or pass a cidr query parameter (e.g. cidr=192.168.1.0/24)."
+            ),
+        )
+
+    # Scan all subnets in parallel, deduplicate by IP
     try:
-        devices = await discover_onvif_devices()
-        return {"devices": devices}
-    except HTTPException:
-        raise
+        results_per_subnet = await asyncio.gather(
+            *[scan_onvif_subnet(c) for c in scan_cidrs],
+            return_exceptions=True,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    seen_ips: set[str] = set()
+    devices: list[dict] = []
+    for result in results_per_subnet:
+        if isinstance(result, list):
+            for d in result:
+                if d.get("ip") and d["ip"] not in seen_ips:
+                    seen_ips.add(d["ip"])
+                    devices.append(d)
+
+    # Best-effort multicast fallback (works only in host-mode or on native LAN)
+    try:
+        for md in await discover_onvif_devices():
+            if md.get("ip") and md["ip"] not in seen_ips:
+                seen_ips.add(md["ip"])
+                devices.append(md)
+    except Exception:
+        pass
+
+    return {"devices": devices, "scan_cidrs": scan_cidrs}
 
 
 @router.post("/connect")
@@ -157,6 +237,39 @@ async def camera_ptz_stop(
     try:
         result = await ptz_stop(ip, username, password, profile_token, port)
         return {"ip": ip, "profileToken": profile_token, "result": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/camera/{ip}/time")
+async def camera_get_time(
+    ip: str,
+    port: int = Query(80, ge=1, le=65535),
+):
+    """Read the camera clock via GetSystemDateAndTime (no credentials needed)."""
+    try:
+        result = await get_system_datetime(ip, port)
+        return {"ip": ip, **result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/camera/{ip}/time/sync")
+async def camera_sync_time(
+    ip: str,
+    port: int = Query(80, ge=1, le=65535),
+    username: str = Query(...),
+    password: str = Query(...),
+    current_user=Depends(get_current_superuser),
+):
+    """Push the NVR's current UTC time to the camera (superuser only)."""
+    try:
+        result = await set_system_datetime(ip, username, password, port)
+        return {"ip": ip, **result}
     except HTTPException:
         raise
     except Exception as e:
