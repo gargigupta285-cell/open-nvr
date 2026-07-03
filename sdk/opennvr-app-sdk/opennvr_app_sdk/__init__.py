@@ -15,8 +15,8 @@ Archetypes (spec §02):
   another app is already driving (loitering, counting, dashboards).
 * :class:`FrameApp` — drives inference itself by polling frames into
   KAI-C (intrusion, LPR, package delivery).
-* AlertSubscriber — consumes ``opennvr.alerts.*`` (HA relay, SIEM
-  bridges); lands with a later rollout step.
+* :class:`AlertSubscriber` — consumes ``opennvr.alerts.*`` (the
+  alerts-subscriber template, HA relay, SIEM bridges).
 
 Apache-2.0, unlike the AGPL example apps — the SDK is meant to be
 embedded in third-party apps the same way ``opennvr-adapter-sdk`` is.
@@ -34,6 +34,7 @@ from .alerts import (
     build_dispatcher,
     set_default_source,
 )
+from .alert_subscriber import AlertSubscriber, AlertSubscriberRunner, alert_app
 from .config import load_yaml, require
 from .contract import ContractServer
 from .detector import AppRunner, Detector, app
@@ -47,18 +48,21 @@ from .frame_sources import (
     build_frame_source,
     dict_frame_source,
 )
-from .geometry import Point, Zone, bbox_center
+from .geometry import Point, Tripwire, Zone, bbox_center
 from .manifest import AlertType, AppManifest, Param
 from .state import KeyedState, StateRecord, keyed_state
 
 __version__ = "0.1.0"
 
 __all__ = [
-    # Archetype bases + runner
+    # Archetype bases + runners
     "Detector",
     "FrameApp",
+    "AlertSubscriber",
     "AppRunner",
+    "AlertSubscriberRunner",
     "app",
+    "alert_app",
     # Alerts (§11.5)
     "Alert",
     "AlertSource",
@@ -82,6 +86,7 @@ __all__ = [
     # Geometry
     "Point",
     "Zone",
+    "Tripwire",
     "bbox_center",
     # Config helpers
     "load_yaml",

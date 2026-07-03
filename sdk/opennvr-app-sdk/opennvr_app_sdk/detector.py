@@ -63,13 +63,14 @@ from .alerts import (
 )
 from .contract import ContractMixin
 from .manifest import AppManifest
+from .nats_loop import NatsSubscriberMixin
 from .state import KeyedState
 from .state import keyed_state as _keyed_state
 
 logger = logging.getLogger(__name__)
 
 
-class Detector(ContractMixin):
+class Detector(ContractMixin, NatsSubscriberMixin):
     """Base class for NATS-subscribing detection apps.
 
     Subclasses set a class-level ``manifest`` (:class:`AppManifest`),
@@ -134,8 +135,7 @@ class Detector(ContractMixin):
         """Convenience for ``setup()`` — see :func:`~.state.keyed_state`."""
         return _keyed_state(ttl, **kwargs)
 
-    def stop(self) -> None:
-        self._stop_event.set()
+    # ``stop()`` comes from :class:`~.nats_loop.NatsSubscriberMixin`.
 
     # ── Per-message handling (testable without NATS) ───────────────
 
@@ -221,48 +221,17 @@ class Detector(ContractMixin):
         ``/health`` / ``/manifest`` / ``/state`` server when
         ``cfg.contract_port`` is set and self-registers with the
         OpenNVR app registry when ``cfg.opennvr_url`` is set — both
-        best-effort no-ops otherwise."""
+        best-effort no-ops otherwise.
+
+        The connect / subscribe / drain machinery itself lives on
+        :class:`~.nats_loop.NatsSubscriberMixin`, shared with the
+        AlertSubscriber archetype."""
         self.start_contract_server()
         self.register_with_opennvr()
         try:
             await self._run_nats_loop(once=once)
         finally:
             self.stop_contract_server()
-
-    async def _run_nats_loop(self, *, once: bool) -> None:
-        import nats
-
-        connect_kwargs: dict[str, Any] = {
-            "servers": [self.cfg.nats_url],
-            "connect_timeout": 5.0,
-            "reconnect_time_wait": 1.0,
-            "max_reconnect_attempts": -1,
-        }
-        token = getattr(self.cfg, "nats_token", None)
-        if token:
-            connect_kwargs["token"] = token
-        self._nc = await nats.connect(**connect_kwargs)
-        logger.info(
-            "%s started: subject=%r",
-            self.manifest.id if self.manifest else type(self).__name__,
-            self.cfg.subject_pattern,
-        )
-        try:
-            sub = await self._nc.subscribe(self.cfg.subject_pattern)
-            async for msg in sub.messages:
-                self._handle_raw(msg.data, subject=msg.subject)
-                if once:
-                    self.stop()
-                if self._stop_event.is_set():
-                    break
-        finally:
-            try:
-                await self._nc.drain()
-            except Exception:
-                try:
-                    await self._nc.close()
-                except Exception:
-                    pass
 
 
 # ── CLI runner ──────────────────────────────────────────────────────

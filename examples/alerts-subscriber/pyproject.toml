@@ -5,18 +5,26 @@ description = "OpenNVR alerts-subscriber example app (NATS-subscribing alert con
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0" }
 
-# Deliberately minimal — meant as a clean copy-as-template for
-# community contributors. nats-py for the subscribe loop, httpx for
-# optional webhook forwarding, PyYAML for config. No frame fetching,
-# no inference driving — this app rides the alert fan-out stream other
-# apps already publish.
+# The SDK owns the runtime stack (nats-py subscribe loop, PyYAML
+# config, httpx) — see docs/design/app-sdk-spec.html. This example is
+# the reference AlertSubscriber archetype: what's left in-repo is the
+# sink (print + optional webhook forward) plus its config parsing.
 dependencies = [
-    "nats-py>=2.6",
-    "httpx>=0.27,<1.0",
-    "PyYAML>=6.0,<7.0",
+    "opennvr-app-sdk",
 ]
 
+[tool.uv.sources]
+opennvr-app-sdk = { path = "../../sdk/opennvr-app-sdk", editable = true }
+
 [project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+]
+
+# Mirrors the optional-dependencies group so a plain ``uv sync`` gets a
+# test-ready environment (uv installs the ``dev`` group by default).
+[dependency-groups]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23",

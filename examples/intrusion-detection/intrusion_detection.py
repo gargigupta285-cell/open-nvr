@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 """
-Intrusion-detection example app.
+Intrusion-detection example app — now on the ``opennvr-app-sdk``.
 
 Watches one or more cameras for persons/vehicles entering operator-
 defined restricted zones during operator-defined restricted hours. On
@@ -11,9 +11,29 @@ webhook. Uses KAI-C's contract proxy (``POST /api/v1/infer/{adapter}``)
 for inference — so every alert is correlation-id-traceable through
 the audit log.
 
-This is the first first-party example app per §12 of the AI Adapter
-Contract design. Operators run it as a sidecar to OpenNVR; community
-contributors copy it as a template for their own monitoring apps.
+What lives where after the migration
+------------------------------------
+
+This is a FrameApp (App SDK spec §02): it DRIVES inference by polling
+frames into KAI-C rather than riding an existing inference stream. The
+SDK's :class:`~opennvr_app_sdk.FrameApp` base owns the interval loop,
+per-camera fetch/rule failure isolation, and the §03 contract
+endpoints. The frame sources, the zone geometry, and the §11.5 alert
+stack moved into the SDK (thin shims remain at ``frame_sources.py`` /
+``zone.py`` / ``alerts.py`` for import compatibility).
+
+What stays here — deliberately:
+
+* ``KaicClient`` — this app's HTTP detector call predates the
+  contract-v1 ``task`` body field; keeping the historical wire shape
+  (``{"camera_id", "frame_b64"}``) means deployed adapters see no
+  change. (The SDK ``KaiCClient`` sends ``task`` + params; swapping
+  would alter the wire body.)
+* ``KaicStreamClient`` — the §6 WebSocket streaming transport
+  (``kaic_transport: ws``) is unique to this example; the SDK's
+  FrameApp surface is HTTP-polling-shaped for now.
+* The restricted-hours gate and the zone rule — the app's business
+  logic.
 
 Run:
     python intrusion_detection.py --config config.yml          # daemon
@@ -22,6 +42,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import datetime as _dt
 import logging
@@ -30,7 +51,7 @@ import sys
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -39,9 +60,35 @@ import yaml
 
 from alerts import Alert, AlertDispatcher, build_dispatcher
 from frame_sources import FrameSource, FrameSourceError, build_frame_source
+from opennvr_app_sdk import AlertType, AppManifest, FrameApp, Param
+from opennvr_app_sdk.frame_sources import DictFrameSource
 from zone import Point, Zone, bbox_center
 
 logger = logging.getLogger("intrusion-detection")
+
+
+MANIFEST = AppManifest(
+    id="intrusion-detection",
+    name="Intrusion Detection",
+    version="1.0.0",
+    category="perimeter",
+    summary=(
+        "Alerts when a watched object enters a restricted zone during "
+        "restricted hours."
+    ),
+    requires_tasks=["object_detection"],  # checked vs GET /api/v1/adapters
+    subscribes=None,  # FrameApp: drives inference itself via KAI-C
+    params=[
+        Param("watch_labels", list, default=["person"]),
+        Param("poll_interval_seconds", float, default=5.0),
+        Param("restricted_hours", dict,
+              description="Daily {start, end} window; cross-midnight supported."),
+        Param("kaic_transport", str, default="http",
+              description="'http' polls per frame; 'ws' streams per camera (§6)."),
+        Param("zones", "geometry.polygon", per_camera=True),  # drawn in the catalog UI
+    ],
+    emits=[AlertType("intrusion", severity="high")],
+)
 
 
 # ── Config ─────────────────────────────────────────────────────────
@@ -125,6 +172,14 @@ class AppConfig:
     #   camera. Use when you actually need sub-second response on
     #   alerts; HTTP is fine for typical surveillance.
     kaic_transport: str = "http"
+    # App contract (spec §03) — all optional; see the SDK's contract
+    # module. ``contract_port`` serves /health /manifest /state;
+    # ``opennvr_url`` triggers registry self-registration on boot.
+    contract_port: int | None = None
+    contract_bind_host: str | None = None
+    contract_host: str | None = None
+    opennvr_url: str | None = None
+    opennvr_token: str | None = None
 
 
 def load_config(path: str) -> AppConfig:
@@ -211,6 +266,13 @@ def load_config(path: str) -> AppConfig:
         nats_alerts_subject_prefix=nats_prefix,
         request_timeout_seconds=float(raw.get("request_timeout_seconds", 30.0)),
         kaic_transport=kaic_transport,
+        contract_port=(
+            int(raw["contract_port"]) if raw.get("contract_port") is not None else None
+        ),
+        contract_bind_host=raw.get("contract_bind_host"),
+        contract_host=raw.get("contract_host"),
+        opennvr_url=raw.get("opennvr_url"),
+        opennvr_token=raw.get("opennvr_token"),
     )
 
 
@@ -224,6 +286,11 @@ class KaicClient:
     multipart adds boilerplate without benefit at 1-fps polling.
     Threads ``X-Correlation-Id`` so every alert traces back through
     KAI-C's audit log and the adapter's logs alike.
+
+    Kept app-side (rather than swapping to the SDK ``KaiCClient``) to
+    preserve this app's historical wire body — a bare
+    ``{"camera_id", "frame_b64"}`` without the contract-v1 ``task``
+    field.
     """
 
     def __init__(
@@ -518,13 +585,15 @@ def _json_loads(raw: Any) -> Any:
 # ── Detector loop ──────────────────────────────────────────────────
 
 
-class IntrusionDetector:
+class IntrusionDetector(FrameApp):
     """The main detector. Holds config + KAI-C client + dispatcher.
 
-    ``step(camera)`` runs one cycle for one camera; ``run()`` schedules
-    every camera every ``poll_interval_seconds`` until SIGINT/SIGTERM
-    or a stop_flag is set.
+    ``step(camera)`` runs one cycle for one camera (the historical
+    surface tests and ``--once`` drive); the SDK FrameApp base owns the
+    daemon loop, which reaches the same rule through :meth:`on_frame`.
     """
+
+    manifest = MANIFEST
 
     def __init__(
         self,
@@ -535,11 +604,11 @@ class IntrusionDetector:
         now: Callable[[], _dt.datetime] = _dt.datetime.now,
         stream_client_factory: Callable[[str], KaicStreamClient] | None = None,
     ) -> None:
+        # Compat alias — pre-SDK code (and the tests) used ``_config``;
+        # the SDK base spells it ``cfg``.
         self._config = config
         self._kaic = kaic_client
-        self._dispatcher = dispatcher
         self._now = now
-        self._stop_flag = False
         # Cache frame sources at init time so config errors surface
         # immediately, not on the first cycle.
         self._frame_sources: dict[str, FrameSource] = {}
@@ -552,8 +621,23 @@ class IntrusionDetector:
         # lazily on first ``step``. ``stream_client_factory`` is an
         # injection point for tests; production builds the default
         # ``KaicStreamClient`` from config.
-        self._stream_clients: dict[str, KaicStreamClient] = {}
         self._stream_client_factory = stream_client_factory or self._default_stream_client_factory
+
+        super().__init__(
+            config,
+            dispatcher,
+            # By-reference bridge: swapping an entry in
+            # ``self._frame_sources`` is picked up on the next tick.
+            frame_source=DictFrameSource(self._frame_sources),
+            cameras=[camera.camera_id for camera in config.cameras],
+            poll_interval_seconds=config.poll_interval_seconds,
+        )
+
+    def setup(self) -> None:
+        self._cameras_by_id: dict[str, CameraWatch] = {
+            camera.camera_id: camera for camera in self.cfg.cameras
+        }
+        self._stream_clients: dict[str, KaicStreamClient] = {}
 
     def _default_stream_client_factory(self, camera_id: str) -> KaicStreamClient:
         return KaicStreamClient(
@@ -563,9 +647,6 @@ class IntrusionDetector:
             api_key=self._config.kaic_api_key,
             timeout_seconds=self._config.request_timeout_seconds,
         )
-
-    def stop(self) -> None:
-        self._stop_flag = True
 
     def close(self) -> None:
         """Tear down WS clients (no-op if HTTP mode). Called from the
@@ -603,10 +684,23 @@ class IntrusionDetector:
             correlation_id=correlation_id,
         )
 
+    # ── The rule (one camera × one fetched frame) ──────────────────
+
+    def on_frame(self, camera_id: str, frame_bytes: bytes) -> list[Alert]:
+        """SDK FrameApp hook — the daemon loop's path to the rule. The
+        base loop fetched the frame; gate on restricted hours, then run
+        inference + zone matching. The base dispatches what we return."""
+        if not self._config.restricted_hours.contains(self._now()):
+            return []
+        camera = self._cameras_by_id[camera_id]
+        return self._detect_intrusions(camera, frame_bytes)
+
     def step(self, camera: CameraWatch) -> list[Alert]:
         """Run one detection cycle for one camera. Returns the list
         of alerts that were fired (mostly for testing — the dispatcher
-        already sent them through every channel)."""
+        already sent them through every channel). Historical surface,
+        kept for ``--once`` and the tests; dispatches its own alerts
+        because it runs outside the base loop."""
         # Outside restricted hours → no inference, no alert.
         now = self._now()
         if not self._config.restricted_hours.contains(now):
@@ -618,6 +712,20 @@ class IntrusionDetector:
             logger.warning("frame fetch failed for %s: %s", camera.camera_id, exc)
             return []
 
+        # Contract counters (spec §03): one fetched frame is one
+        # "event", mirroring the base loop's bookkeeping.
+        self._contract_note_event()
+        fired = self._detect_intrusions(camera, frame_bytes)
+        for alert in fired:
+            self._dispatcher.fire(alert)
+        self._contract_note_alerts(len(fired))
+        return fired
+
+    def _detect_intrusions(
+        self, camera: CameraWatch, frame_bytes: bytes
+    ) -> list[Alert]:
+        """Inference + zone matching for one frame. Pure w.r.t. the
+        dispatcher — callers (``step`` / the base loop) dispatch."""
         correlation_id = uuid.uuid4().hex
         try:
             infer_response = self._call_kaic(camera, frame_bytes, correlation_id)
@@ -666,9 +774,7 @@ class IntrusionDetector:
             center = bbox_center(bbox, camera.frame_width, camera.frame_height)
             if not camera.zone.contains(center):
                 continue
-            alert = self._build_alert(camera, det, center, correlation_id)
-            self._dispatcher.fire(alert)
-            fired.append(alert)
+            fired.append(self._build_alert(camera, det, center, correlation_id))
         return fired
 
     def _build_alert(
@@ -698,38 +804,6 @@ class IntrusionDetector:
             },
             tags=["intrusion", "restricted-zone", label],
         )
-
-    def run(self) -> None:
-        """Daemon loop. Polls every camera every
-        ``poll_interval_seconds``. Returns when ``stop()`` is called
-        (e.g. via SIGINT handler) or when the process is killed."""
-        logger.info(
-            "intrusion-detection started: %d cameras, poll=%.1fs, watch=%s, hours=%s-%s",
-            len(self._config.cameras),
-            self._config.poll_interval_seconds,
-            self._config.watch_labels,
-            self._config.restricted_hours.start.isoformat(),
-            self._config.restricted_hours.end.isoformat(),
-        )
-        while not self._stop_flag:
-            cycle_started = time.monotonic()
-            for camera in self._config.cameras:
-                if self._stop_flag:
-                    break
-                try:
-                    self.step(camera)
-                except Exception:
-                    # No single camera failure should kill the loop.
-                    logger.exception("step() raised for camera=%s", camera.camera_id)
-            elapsed = time.monotonic() - cycle_started
-            sleep_for = max(0.0, self._config.poll_interval_seconds - elapsed)
-            # Sleep in short slices so SIGINT is responsive.
-            slept = 0.0
-            while slept < sleep_for and not self._stop_flag:
-                chunk = min(0.25, sleep_for - slept)
-                time.sleep(chunk)
-                slept += chunk
-        logger.info("intrusion-detection stopped")
 
 
 # ── CLI ────────────────────────────────────────────────────────────
@@ -778,20 +852,26 @@ def main(argv: list[str] | None = None) -> int:
     )
     detector = IntrusionDetector(config, kaic_client, dispatcher)
 
-    # Wire SIGINT / SIGTERM to graceful shutdown.
-    def _handle_signal(_signum, _frame):
-        logger.info("signal received, stopping…")
-        detector.stop()
-
-    signal.signal(signal.SIGINT, _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
-
     try:
         if args.once:
             for camera in config.cameras:
                 detector.step(camera)
         else:
-            detector.run()
+            # The SDK FrameApp loop is async; drive it the same way the
+            # SDK AppRunner drives a Detector. SIGINT / SIGTERM trigger
+            # a clean exit.
+            loop = asyncio.new_event_loop()
+
+            def _handle_signal(_signum, _frame):
+                logger.info("signal received, stopping…")
+                loop.call_soon_threadsafe(detector.stop)
+
+            signal.signal(signal.SIGINT, _handle_signal)
+            signal.signal(signal.SIGTERM, _handle_signal)
+            try:
+                loop.run_until_complete(detector.run())
+            finally:
+                loop.close()
     finally:
         detector.close()   # WS clients (no-op in HTTP mode)
         kaic_client.close()
