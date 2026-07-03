@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 """
-Occupancy-counting example app.
+Occupancy-counting example app — on the ``opennvr-app-sdk``
+(App SDK spec §08 step 5, swept after the loitering reference
+migration).
 
 Counts how many watched-label entities (people, vehicles, …) are
 inside each operator-defined zone on every inference frame, and fires
@@ -10,8 +12,22 @@ an alert when a zone crosses an occupancy threshold — too many
 (over-occupancy: a crowded exit, an over-capacity room) or, optionally,
 too few (under-occupancy: a post that should always be staffed).
 
-Architecture
-------------
+What lives where after the migration
+------------------------------------
+
+The SDK's :class:`~opennvr_app_sdk.Detector` base owns the NATS
+subscribe loop, per-message JSON decoding + exception isolation, the
+``camera_id`` / ``result.detections`` payload walk, alert dispatch,
+the CLI, signal handling, and the §03 contract endpoints. The §11.5
+alert stack and the zone geometry moved to ``opennvr_app_sdk.alerts``
+/ ``opennvr_app_sdk.geometry`` (thin shims remain at ``alerts.py`` /
+``zone.py`` for import compatibility).
+
+What's left here is the rule — the edge-triggered occupancy state
+machine — plus this app's config parsing and its declarative MANIFEST.
+
+Architecture (unchanged)
+------------------------
 
 Like ``loitering-detection`` and unlike ``intrusion-detection``, this
 app SUBSCRIBES to KAI-C's NATS inference broadcast surface
@@ -35,6 +51,11 @@ Edge-triggering is what stops a crowded room from emitting one alert
 per inference frame. A short ``debounce_frames`` requirement (default
 1) can be raised so a single noisy frame doesn't flip the state.
 
+The state is deliberately a plain ``dict`` rather than the SDK's
+``keyed_state``: occupancy is a *level* keyed by a bounded, config-known
+camera set — there is no TTL/absence semantics to garbage-collect, and
+the debounce latch is a frame counter, not a time latch.
+
 Per-track identity is NOT used: occupancy is a count of in-zone
 detections per frame, so a detector that emits ``track_id`` and one
 that doesn't both work. Double-counting from duplicate boxes on the
@@ -47,22 +68,50 @@ Run::
 """
 from __future__ import annotations
 
-import argparse
-import asyncio
-import json
 import logging
-import signal
-import sys
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
-import yaml
-
-from alerts import Alert, AlertDispatcher, build_dispatcher
-from zone import Zone, bbox_center
+from opennvr_app_sdk import (
+    Alert,
+    AlertType,
+    AppManifest,
+    Detector,
+    Param,
+    app,
+)
+from opennvr_app_sdk.config import load_yaml
+from opennvr_app_sdk.geometry import Zone, bbox_center
 
 logger = logging.getLogger("occupancy-counting")
+
+
+MANIFEST = AppManifest(
+    id="occupancy-counting",
+    name="Occupancy Counting",
+    version="1.0.0",
+    category="analytics",
+    summary="Alerts on zone occupancy threshold crossings (over / under / cleared).",
+    requires_tasks=["object_detection"],  # checked vs GET /api/v1/adapters
+    subscribes="opennvr.inference.>",
+    params=[
+        Param("watch_labels", list, default=["person"]),
+        Param("max_occupancy", int, required=True,
+              description="Fire OVER when the in-zone count exceeds this."),
+        Param("min_occupancy", int,
+              description="Fire UNDER when the in-zone count drops below this."),
+        Param("debounce_frames", int, default=1,
+              description="Consecutive frames a new band must persist before firing."),
+        Param("clear_alerts", bool, default=False,
+              description="Also fire a low-severity alert when a zone returns to normal."),
+        Param("zones", "geometry.polygon", per_camera=True),  # drawn in the catalog UI
+    ],
+    emits=[
+        AlertType("occupancy_over", severity="high"),
+        AlertType("occupancy_under", severity="medium"),
+        AlertType("occupancy_cleared", severity="low"),
+    ],
+)
 
 
 # ── Config ─────────────────────────────────────────────────────────
@@ -105,9 +154,7 @@ def load_config(path: str) -> AppConfig:
 
     Raises ``ValueError`` on malformed config so the CLI can surface a
     useful operator message and exit non-zero."""
-    raw = yaml.safe_load(Path(path).read_text())
-    if not isinstance(raw, dict):
-        raise ValueError(f"config {path!r}: root must be a mapping")
+    raw = load_yaml(path)
 
     nats_url = str(raw.get("nats_url") or "").strip()
     if not nats_url:
@@ -248,28 +295,24 @@ class _ZoneState:
     last_count: int = 0
 
 
-# ── Counter loop ───────────────────────────────────────────────────
+# ── The rule ───────────────────────────────────────────────────────
 
 
-class OccupancyCounter:
-    """Consumes inference events from NATS and counts in-zone entities
-    per camera, firing edge-triggered occupancy alerts.
+class OccupancyCounter(Detector):
+    """Consumes inference events (via the SDK's Detector loop) and
+    counts in-zone entities per camera, firing edge-triggered
+    occupancy alerts.
 
     Stateful — one ``_ZoneState`` per camera_id. State is bounded by
     the configured camera set (events from unknown cameras are dropped
     before any state is created)."""
 
-    def __init__(self, config: AppConfig, dispatcher: AlertDispatcher) -> None:
-        self._config = config
-        self._dispatcher = dispatcher
+    manifest = MANIFEST
+
+    def setup(self) -> None:
         self._states: dict[str, _ZoneState] = {}
-        self._stop_event = asyncio.Event()
-        self._nc: Any = None
 
-    def stop(self) -> None:
-        self._stop_event.set()
-
-    # ── Pure handler (testable without NATS) ──────────────────────
+    # ── Pure helpers (testable without NATS) ──────────────────────
 
     def count_in_zone(self, camera: CameraZone, detections: list[Any]) -> int:
         """Count detections whose label is watched and whose bbox
@@ -297,20 +340,18 @@ class OccupancyCounter:
             return "under"
         return "normal"
 
-    def handle_event(self, event: dict[str, Any]) -> list[Alert]:
-        """Process one inference event. Returns alerts fired (empty if
-        no band transition committed this frame). Pure w.r.t.
-        ``self._states`` so it unit-tests without NATS."""
-        if not isinstance(event, dict):
-            return []
-        camera_id = event.get("camera_id")
-        if not camera_id or camera_id not in self._config.cameras:
-            return []
-        camera = self._config.cameras[camera_id]
-
-        result = event.get("result") or {}
-        detections = result.get("detections") if isinstance(result, dict) else None
-        if not isinstance(detections, list):
+    def on_detections(
+        self,
+        camera_id: str,
+        detections: list[dict[str, Any]],
+        event: dict[str, Any],
+    ) -> list[Alert]:
+        """The occupancy rule for one event. Returns the alerts to fire
+        (the SDK base dispatches them and ``handle_event`` returns
+        them, which is what the tests assert on)."""
+        camera = self._config.cameras.get(camera_id)
+        if camera is None:
+            # Another monitoring app may be watching this camera; we're not.
             return []
 
         count = self.count_in_zone(camera, detections)
@@ -345,12 +386,23 @@ class OccupancyCounter:
         if candidate == "normal" and not self._config.clear_alerts:
             return []
 
-        alert = self._build_alert(
+        return [self._build_alert(
             camera=camera, count=count, level=candidate,
             previous=previous, event=event,
-        )
-        self._dispatcher.fire(alert)
-        return [alert]
+        )]
+
+    def state_snapshot(self) -> dict[str, Any]:
+        """``GET /state`` — live occupancy per configured camera."""
+        return {
+            "cameras": {
+                camera_id: {
+                    "level": state.level,
+                    "last_count": state.last_count,
+                    "pending": state.pending,
+                }
+                for camera_id, state in self._states.items()
+            }
+        }
 
     def _build_alert(
         self,
@@ -404,101 +456,14 @@ class OccupancyCounter:
             tags=["occupancy", level, camera.zone.name],
         )
 
-    # ── NATS loop ─────────────────────────────────────────────────
-
-    async def run(self, *, once: bool = False) -> None:
-        import nats
-
-        connect_kwargs: dict[str, Any] = {
-            "servers": [self._config.nats_url],
-            "connect_timeout": 5.0,
-            "reconnect_time_wait": 1.0,
-            "max_reconnect_attempts": -1,
-        }
-        if self._config.nats_token:
-            connect_kwargs["token"] = self._config.nats_token
-        self._nc = await nats.connect(**connect_kwargs)
-        logger.info(
-            "occupancy-counting started: %d cameras, watch=%s, "
-            "debounce=%d, clear_alerts=%s, subject=%r",
-            len(self._config.cameras), self._config.watch_labels,
-            self._config.debounce_frames, self._config.clear_alerts,
-            self._config.subject_pattern,
-        )
-        try:
-            sub = await self._nc.subscribe(self._config.subject_pattern)
-            async for msg in sub.messages:
-                try:
-                    payload = json.loads(msg.data)
-                except json.JSONDecodeError as exc:
-                    logger.warning("skipping non-JSON message on %r: %s", msg.subject, exc)
-                    continue
-                try:
-                    self.handle_event(payload)
-                except Exception:
-                    logger.exception("handle_event failed for subject=%s", msg.subject)
-                if once:
-                    self.stop()
-                if self._stop_event.is_set():
-                    break
-        finally:
-            try:
-                await self._nc.drain()
-            except Exception:
-                try:
-                    await self._nc.close()
-                except Exception:
-                    pass
-
 
 # ── CLI ────────────────────────────────────────────────────────────
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="occupancy-counting",
-        description="Subscribe to KAI-C inference events; alert on zone occupancy thresholds.",
-    )
-    parser.add_argument("--config", required=True, help="Path to config.yml")
-    parser.add_argument("--once", action="store_true", help="Process one event then exit.")
-    parser.add_argument(
-        "--log-level", default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-    )
-    args = parser.parse_args(argv)
-
-    logging.basicConfig(
-        level=args.log_level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    try:
-        config = load_config(args.config)
-    except (ValueError, OSError) as exc:
-        print(f"config error: {exc}", file=sys.stderr)
-        return 2
-
-    dispatcher = build_dispatcher(
-        webhook_url=config.webhook_url,
-        nats_alerts_url=config.nats_alerts_url,
-        nats_alerts_token=config.nats_alerts_token,
-        nats_alerts_subject_prefix=config.nats_alerts_subject_prefix,
-    )
-    counter = OccupancyCounter(config, dispatcher)
-
-    loop = asyncio.new_event_loop()
-
-    def _handle_signal(_signum, _frame):
-        logger.info("signal received, stopping…")
-        loop.call_soon_threadsafe(counter.stop)
-
-    signal.signal(signal.SIGINT, _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
-    try:
-        loop.run_until_complete(counter.run(once=args.once))
-    finally:
-        dispatcher.close()
-        loop.close()
-    return 0
+    """Console-script entry point (``[project.scripts]``). The SDK
+    runner owns argparse, logging, signals, and the dispatcher."""
+    return app(OccupancyCounter, load_config=load_config).run(argv)
 
 
 if __name__ == "__main__":  # pragma: no cover

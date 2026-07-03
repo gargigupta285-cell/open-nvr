@@ -35,8 +35,18 @@ from .alerts import (
     set_default_source,
 )
 from .config import load_yaml, require
+from .contract import ContractServer
 from .detector import AppRunner, Detector, app
 from .frame_app import FrameApp, FrameSource, KaiCClient, KaiCError
+from .frame_sources import (
+    CameraFrameSource,
+    DictFrameSource,
+    FileFrameSource,
+    FrameSourceError,
+    HttpSnapshotSource,
+    build_frame_source,
+    dict_frame_source,
+)
 from .geometry import Point, Zone, bbox_center
 from .manifest import AlertType, AppManifest, Param
 from .state import KeyedState, StateRecord, keyed_state
@@ -80,4 +90,14 @@ __all__ = [
     "FrameSource",
     "KaiCClient",
     "KaiCError",
+    # Per-camera frame sources
+    "CameraFrameSource",
+    "FileFrameSource",
+    "HttpSnapshotSource",
+    "FrameSourceError",
+    "build_frame_source",
+    "DictFrameSource",
+    "dict_frame_source",
+    # Contract surface (§03)
+    "ContractServer",
 ]

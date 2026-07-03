@@ -5,11 +5,29 @@
 package-delivery — watch a porch ROI for package arrivals and
 pick-ups, fire alerts when something changes.
 
-Pipeline mirrors smart-doorbell / license-plate-recognition: HTTP-poll
-each camera, drive YOLOv8 via KAI-C, run a per-camera state machine,
-dispatch alerts. The interesting bit specific to package-delivery is
-the **arrive → present → linger → gone** transition diagram and the
-"porch-pirate vs owner" severity heuristic at the gone transition.
+Now built on the ``opennvr-app-sdk`` (App SDK spec §08 step 5 — the
+hard FrameApp validation case). The SDK's
+:class:`~opennvr_app_sdk.FrameApp` base owns the poll loop, per-camera
+fetch/rule failure isolation, and the §03 contract endpoints
+(``/health`` / ``/manifest`` / ``/state`` + registry
+self-registration). The frame sources and the §11.5 alert stack moved
+into the SDK (thin shims remain at ``frame_sources.py`` /
+``alerts.py`` for import compatibility).
+
+What stays here — deliberately — is the domain pipeline: the
+detect → ROI-filter → IoU-track stages (``package_pipeline.py``) and
+the **arrive → present → linger → gone** per-track state machine with
+the "porch-pirate vs owner" severity heuristic. Two SDK primitives
+were evaluated and NOT forced onto it:
+
+* ``keyed_state`` — the track lifecycle here is *frame-count*-driven
+  (``arrive_consecutive_hits`` / ``gone_consecutive_misses`` on the
+  IoU tracker's own ``_TrackState``), not TTL-driven; and the dedup
+  ledger must stay a plain ``{(camera, track, kind): monotonic_ts}``
+  dict (its exact shape is part of this app's pinned test surface).
+* the SDK ``KaiCClient`` — this app's detector call predates the
+  contract-v1 ``task``/``camera_id`` body fields; ``KaicDetectorClient``
+  keeps the historical wire shape so deployed adapters see no change.
 
 Run:
     python package_delivery.py --config config.yml
@@ -20,16 +38,15 @@ Once-through (for tests / one-shot evaluations):
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
-import json
 import logging
 import signal
-import sys
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import httpx
 import yaml
@@ -42,6 +59,8 @@ from alerts import (
     build_dispatcher,
 )
 from frame_sources import FrameSource, FrameSourceError, build_frame_source
+from opennvr_app_sdk import AlertType, AppManifest, FrameApp, Param
+from opennvr_app_sdk.frame_sources import DictFrameSource
 from package_pipeline import (
     DEFAULT_DETECTION_CONFIDENCE,
     DEFAULT_IOU_THRESHOLD,
@@ -64,12 +83,54 @@ CORRELATION_ID_HEADER = "X-Correlation-Id"
 # envelope under NATS's 1 MB default max_payload. Mirror smart-doorbell.
 _DEFAULT_SNAPSHOT_MAX_BYTES: int = 700 * 1024
 
+# The SDK FrameApp rejects a non-positive poll interval (its sleep is
+# the shutdown-interruptible kind). This app historically accepted 0
+# ("poll as fast as the cameras answer"); map that to a near-zero
+# interval so old configs — and the test fixtures — keep working.
+_MIN_POLL_INTERVAL_SECONDS = 0.001
+
 # Alert event kinds — used in the alert envelope's evidence so a
 # subscriber can route on event_kind without parsing the title.
 EVENT_ARRIVED = "package_arrived"
 EVENT_LINGERING = "package_lingering"
 EVENT_GONE_OWNER = "package_picked_up"
 EVENT_GONE_STRANGER = "package_taken"
+
+
+MANIFEST = AppManifest(
+    id="package-delivery",
+    name="Package Delivery",
+    version="1.0.0",
+    category="doorstep",
+    summary=(
+        "Watches a porch ROI for package arrivals, lingering boxes, and "
+        "pick-ups — with an owner-vs-stranger severity heuristic."
+    ),
+    requires_tasks=["object_detection"],  # checked vs GET /api/v1/adapters
+    subscribes=None,  # FrameApp: drives inference itself via KAI-C
+    params=[
+        Param("package_labels", list, default=list(DEFAULT_PACKAGE_LABELS)),
+        Param("person_labels", list, default=list(DEFAULT_PERSON_LABELS)),
+        Param("poll_interval_seconds", float, default=3.0),
+        Param("detection_confidence", float, default=DEFAULT_DETECTION_CONFIDENCE),
+        Param("arrive_consecutive_hits", int, default=2,
+              description="Consecutive sightings before 'arrived' fires (anti-flicker)."),
+        Param("gone_consecutive_misses", int, default=3,
+              description="Consecutive misses before a package counts as gone."),
+        Param("linger_alert_after_seconds", float, default=0.0,
+              description="Remind after this dwell; 0 disables the linger alert."),
+        Param("pickup_person_lookback_seconds", float, default=8.0,
+              description="Person-seen window for owner-vs-stranger; 0 disables."),
+        Param("dedup_window_seconds", float, default=30.0),
+        Param("roi", "geometry.polygon", per_camera=True),  # drawn in the catalog UI
+    ],
+    emits=[
+        AlertType(EVENT_ARRIVED, severity="low"),
+        AlertType(EVENT_LINGERING, severity="low"),
+        AlertType(EVENT_GONE_OWNER, severity="low"),
+        AlertType(EVENT_GONE_STRANGER, severity="high"),
+    ],
+)
 
 
 # ── Config ──────────────────────────────────────────────────────────
@@ -117,6 +178,15 @@ class AppConfig:
     nats_alerts_url: str | None = None
     nats_alerts_token: str | None = None
     nats_alerts_subject_prefix: str = DEFAULT_ALERT_SUBJECT_PREFIX
+
+    # App contract (spec §03) — all optional; see the SDK's contract
+    # module. ``contract_port`` serves /health /manifest /state;
+    # ``opennvr_url`` triggers registry self-registration on boot.
+    contract_port: int | None = None
+    contract_bind_host: str | None = None
+    contract_host: str | None = None
+    opennvr_url: str | None = None
+    opennvr_token: str | None = None
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -209,6 +279,13 @@ def load_config(path: str | Path) -> AppConfig:
         nats_alerts_url=raw.get("nats_alerts_url"),
         nats_alerts_token=raw.get("nats_alerts_token"),
         nats_alerts_subject_prefix=subject_prefix,
+        contract_port=(
+            int(raw["contract_port"]) if raw.get("contract_port") is not None else None
+        ),
+        contract_bind_host=raw.get("contract_bind_host"),
+        contract_host=raw.get("contract_host"),
+        opennvr_url=raw.get("opennvr_url"),
+        opennvr_token=raw.get("opennvr_token"),
     )
 
 
@@ -223,6 +300,11 @@ class KaicDetectorClient:
     the frame ships base64-encoded inside the JSON body. The SDK's
     body parser unwraps ``frame_b64`` into the binary payload before
     the adapter's service sees it.
+
+    Kept app-side (rather than swapping to the SDK ``KaiCClient``) to
+    preserve this app's historical wire body — a bare
+    ``{"frame_b64": ...}`` without the contract-v1 ``task`` /
+    ``camera_id`` fields.
     """
 
     def __init__(
@@ -267,9 +349,19 @@ class _PersonSighting:
 # ── The orchestrator ───────────────────────────────────────────────
 
 
-class PackageDelivery:
-    """Polls all configured cameras, runs detection + tracking,
-    dispatches alerts based on per-track state transitions."""
+class PackageDelivery(FrameApp):
+    """Polls all configured cameras (via the SDK FrameApp loop), runs
+    detection + tracking, dispatches alerts based on per-track state
+    transitions.
+
+    The SDK base owns the interval loop, per-camera failure isolation,
+    and the contract endpoints; :meth:`on_frame` is this app's rule.
+    Alerts are dispatched *inside* the rule (``_fire``) rather than
+    returned to the base, because the dedup outcome gates the state
+    machine — a suppressed 'gone' must NOT advance the track's state.
+    """
+
+    manifest = MANIFEST
 
     def __init__(
         self,
@@ -281,6 +373,32 @@ class PackageDelivery:
         self.pipeline = pipeline
         self.dispatcher = dispatcher
 
+        self._frame_sources: dict[str, FrameSource] = {}
+        for cam in config.cameras:
+            self._frame_sources[cam.camera_id] = build_frame_source(
+                camera_id=cam.camera_id, url=cam.frame_url,
+            )
+
+        super().__init__(
+            config,
+            dispatcher,
+            # By-reference bridge: swapping an entry in
+            # ``self._frame_sources`` (test stubs, camera reconfig) is
+            # picked up on the next tick.
+            frame_source=DictFrameSource(self._frame_sources),
+            cameras=[cam.camera_id for cam in config.cameras],
+            poll_interval_seconds=(
+                config.poll_interval_seconds
+                if config.poll_interval_seconds > 0
+                else _MIN_POLL_INTERVAL_SECONDS
+            ),
+        )
+
+    def setup(self) -> None:
+        config = self.config
+        self._cameras_by_id: dict[str, CameraConfig] = {
+            cam.camera_id: cam for cam in config.cameras
+        }
         # One IoU tracker per camera — tracks are per-camera, not
         # global, so the same suitcase moved between cameras starts a
         # fresh track. That's the right call for a porch app.
@@ -294,81 +412,40 @@ class PackageDelivery:
             cam.camera_id: [] for cam in config.cameras
         }
         # Dedup key: (camera_id, track_id, event_kind) → monotonic ts.
+        # A plain dict on purpose (not the SDK keyed_state): dedup
+        # reads "last actually-fired", never refreshes on suppression,
+        # and its shape is pinned by this app's test suite.
         self._last_fired: dict[tuple[str, str, str], float] = {}
 
         # Last frame per camera — needed for snapshot attachment on the
         # "gone" event (the package isn't in the current frame anymore).
         self._last_frame_jpeg: dict[str, bytes] = {}
 
-        self._stop = False
-        self._frame_sources: dict[str, FrameSource] = {}
-        for cam in config.cameras:
-            self._frame_sources[cam.camera_id] = build_frame_source(
-                camera_id=cam.camera_id, url=cam.frame_url,
-            )
-
     def request_stop(self) -> None:
-        self._stop = True
-
-    def run(self) -> None:
-        if not self.config.cameras:
-            raise SystemExit("config: at least one camera is required for the daemon")
-        logger.info(
-            "started: %d cameras, poll=%.1fs, package_labels=%s",
-            len(self.config.cameras),
-            self.config.poll_interval_seconds,
-            list(self.config.package_labels),
-        )
-        try:
-            while not self._stop:
-                cycle_started = time.monotonic()
-                for cam in self.config.cameras:
-                    if self._stop:
-                        break
-                    try:
-                        self._process_camera(cam)
-                    except Exception:
-                        logger.exception(
-                            "camera=%s: unexpected error in cycle",
-                            cam.camera_id,
-                        )
-                if self._stop:
-                    break
-                elapsed = time.monotonic() - cycle_started
-                time.sleep(max(0.0, self.config.poll_interval_seconds - elapsed))
-        finally:
-            try:
-                self.dispatcher.close()
-            except Exception:
-                logger.exception("dispatcher.close() failed")
+        """Historical name — the SDK base spells it ``stop()``."""
+        self.stop()
 
     def step(self) -> None:
         """Single pass over every camera. Used by --once and tests."""
-        for cam in self.config.cameras:
-            self._process_camera(cam)
+        self.handle_tick()
 
-    # ── Per-camera tick ────────────────────────────────────────────
+    # ── The rule (one camera × one fetched frame) ──────────────────
 
-    def _process_camera(self, cam: CameraConfig) -> None:
+    def on_frame(
+        self, camera_id: str, frame_bytes: bytes
+    ) -> Iterable[Alert] | None:
+        cam = self._cameras_by_id[camera_id]
         correlation_id = uuid.uuid4().hex
-        try:
-            frame = self._frame_sources[cam.camera_id].fetch()
-        except FrameSourceError as exc:
-            logger.warning(
-                "camera=%s: frame fetch failed: %s correlation_id=%s",
-                cam.camera_id, exc, correlation_id,
-            )
-            return
 
         reads = self.pipeline.process_frame(
-            frame, roi=cam.roi, correlation_id=correlation_id,
+            frame_bytes, roi=cam.roi, correlation_id=correlation_id,
         )
         if reads is None:
-            return  # detector error already logged
+            return None  # detector error already logged
 
         now = time.monotonic()
         self._record_persons(cam.camera_id, reads.persons, now)
-        self._last_frame_jpeg[cam.camera_id] = frame
+        self._last_frame_jpeg[cam.camera_id] = frame_bytes
 
         tracker = self._trackers[cam.camera_id]
         matched_ids, missed_ids = tracker.update(reads.packages, now=now)
@@ -376,13 +453,39 @@ class PackageDelivery:
         # ── State-machine transitions ──
         for tid in matched_ids:
             track = tracker.tracks[tid]
-            self._on_track_hit(cam, track, frame, correlation_id, now)
+            self._on_track_hit(cam, track, frame_bytes, correlation_id, now)
         for tid in list(missed_ids):
             track = tracker.tracks.get(tid)
             if track is None:
                 continue
             if self._on_track_miss(cam, track, correlation_id, now):
                 tracker.drop(tid)
+        # Alerts were dispatched inside _fire (the dedup outcome gates
+        # the state machine); nothing for the base loop to dispatch.
+        return None
+
+    def state_snapshot(self) -> dict[str, Any]:
+        """``GET /state`` — live per-camera tracks + sighting counts."""
+        return {
+            "cameras": {
+                camera_id: {
+                    "active_tracks": [
+                        {
+                            "track_id": track.track_id,
+                            "label": track.label,
+                            "state": track.state,
+                            "hits": track.hits,
+                            "misses": track.misses,
+                        }
+                        for track in tracker.tracks.values()
+                    ],
+                    "recent_person_sightings": len(
+                        self._person_sightings.get(camera_id, [])
+                    ),
+                }
+                for camera_id, tracker in self._trackers.items()
+            }
+        }
 
     # ── Transition handlers ─────────────────────────────────────────
 
@@ -631,6 +734,10 @@ class PackageDelivery:
                 tags=[event_kind],
             )
         )
+        # Wire the app-dispatched alert into the SDK contract counters
+        # (/health's alerts_fired) — the base loop can't see it because
+        # on_frame returns None.
+        self._contract_note_alerts(1)
         return True
 
 
@@ -701,15 +808,27 @@ def main(argv: list[str] | None = None) -> int:
             logger.exception("dispatcher.close() failed")
         return 0
 
-    # SIGINT / SIGTERM trigger a clean exit.
+    if not cfg.cameras:
+        raise SystemExit("config: at least one camera is required for the daemon")
+
+    # The SDK FrameApp loop is async; drive it the same way the SDK
+    # AppRunner drives a Detector. SIGINT / SIGTERM trigger a clean exit.
+    loop = asyncio.new_event_loop()
+
     def _sig(signum: int, frame: Any) -> None:
         logger.info("received signal %d; stopping", signum)
-        runtime.request_stop()
+        loop.call_soon_threadsafe(runtime.stop)
 
     signal.signal(signal.SIGINT, _sig)
     signal.signal(signal.SIGTERM, _sig)
-
-    runtime.run()
+    try:
+        loop.run_until_complete(runtime.run())
+    finally:
+        try:
+            runtime.dispatcher.close()
+        except Exception:
+            logger.exception("dispatcher.close() failed")
+        loop.close()
     return 0
 
 

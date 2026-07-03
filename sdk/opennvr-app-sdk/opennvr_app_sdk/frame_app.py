@@ -32,6 +32,7 @@ from typing import Any, Iterable, Protocol
 import httpx
 
 from .alerts import Alert, AlertDispatcher
+from .contract import ContractMixin
 from .manifest import AppManifest
 
 logger = logging.getLogger(__name__)
@@ -127,7 +128,7 @@ class KaiCClient:
         return response.json()
 
 
-class FrameApp:
+class FrameApp(ContractMixin):
     """Base class for frame-polling apps.
 
     Subclasses set ``manifest``, optionally override :meth:`setup`, and
@@ -167,6 +168,7 @@ class FrameApp:
             )
         self._interval = poll_interval_seconds
         self._stop_event = asyncio.Event()
+        self._contract_init()
         self.setup()
 
     # ── App surface ────────────────────────────────────────────────
@@ -199,6 +201,10 @@ class FrameApp:
                 continue
             if not frame:
                 continue
+            # Contract counters (spec §03): for a FrameApp, one fetched
+            # frame is one "event" — /health's last_event_age_s then
+            # doubles as camera-stall detection.
+            self._contract_note_event()
             try:
                 produced = self.on_frame(camera_id, frame)
             except Exception:
@@ -207,12 +213,27 @@ class FrameApp:
             for alert in produced or []:
                 self._dispatcher.fire(alert)
                 fired.append(alert)
+        self._contract_note_alerts(len(fired))
         return fired
 
     async def run(self, *, once: bool = False) -> None:
         """Poll every ``poll_interval_seconds`` until ``stop()`` (or
         one tick with ``once=True``). The inter-tick sleep is
-        interruptible so shutdown is immediate."""
+        interruptible so shutdown is immediate.
+
+        Also owns the app-contract lifecycle (spec §03): starts the
+        ``/health`` / ``/manifest`` / ``/state`` server when
+        ``cfg.contract_port`` is set and self-registers with the
+        OpenNVR app registry when ``cfg.opennvr_url`` is set — both
+        best-effort no-ops otherwise."""
+        self.start_contract_server()
+        self.register_with_opennvr()
+        try:
+            await self._run_poll_loop(once=once)
+        finally:
+            self.stop_contract_server()
+
+    async def _run_poll_loop(self, *, once: bool) -> None:
         logger.info(
             "%s started: %d cameras, interval=%.1fs",
             self.manifest.id if self.manifest else type(self).__name__,

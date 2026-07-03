@@ -34,11 +34,13 @@ model_fingerprint, completed_at, …). The spec sketches a typed
 ``InferenceEvent`` view; that is deferred so migrated apps that already
 treat the event as a dict keep working unchanged.
 
-TODO(app-sdk-spec §03): serve the app contract's HTTP surface —
-``GET /health``, ``GET /manifest`` (= ``self.manifest.to_dict()``),
-``GET /state`` — and self-register via ``POST /api/v1/apps/register``
-on boot. Blocked on the server-side app registry, which doesn't exist
-yet; ``AppManifest.to_dict()`` is already the payload shape.
+The base also carries the app contract surface (spec §03) via
+:class:`~.contract.ContractMixin`: when the config has a
+``contract_port``, ``run()`` serves ``GET /health`` / ``/manifest`` /
+``/state`` on a stdlib HTTP server, and when it has an
+``opennvr_url``, boot POSTs ``/api/v1/apps/register`` (best-effort).
+Both are off by default — a config without those keys behaves exactly
+as before.
 """
 from __future__ import annotations
 
@@ -59,6 +61,7 @@ from .alerts import (
     reset_default_source,
     scoped_default_source,
 )
+from .contract import ContractMixin
 from .manifest import AppManifest
 from .state import KeyedState
 from .state import keyed_state as _keyed_state
@@ -66,7 +69,7 @@ from .state import keyed_state as _keyed_state
 logger = logging.getLogger(__name__)
 
 
-class Detector:
+class Detector(ContractMixin):
     """Base class for NATS-subscribing detection apps.
 
     Subclasses set a class-level ``manifest`` (:class:`AppManifest`),
@@ -107,6 +110,7 @@ class Detector:
             if self.manifest is not None
             else None
         )
+        self._contract_init()
         self.setup()
 
     # ── App surface ────────────────────────────────────────────────
@@ -161,6 +165,10 @@ class Detector:
         malformed shapes return ``[]``), delegate to
         :meth:`on_detections`, and dispatch every returned alert.
         Returns the list of alerts fired."""
+        # Contract counters (spec §03): every decoded event counts as
+        # "seen" — /health's last_event_age_s is stall detection for
+        # the pipe, not a per-shape metric.
+        self._contract_note_event()
         if not isinstance(event, dict):
             return []
         camera_id = event.get("camera_id")
@@ -180,6 +188,7 @@ class Detector:
             for alert in produced:
                 self._dispatcher.fire(alert)
                 fired.append(alert)
+            self._contract_note_alerts(len(fired))
             return fired
         finally:
             if token is not None:
@@ -206,7 +215,21 @@ class Detector:
     async def run(self, *, once: bool = False) -> None:
         """Connect to NATS, subscribe, drive the handler on every
         received event. Returns when ``stop()`` is called or when
-        ``once=True`` and one message has been processed."""
+        ``once=True`` and one message has been processed.
+
+        Also owns the app-contract lifecycle (spec §03): starts the
+        ``/health`` / ``/manifest`` / ``/state`` server when
+        ``cfg.contract_port`` is set and self-registers with the
+        OpenNVR app registry when ``cfg.opennvr_url`` is set — both
+        best-effort no-ops otherwise."""
+        self.start_contract_server()
+        self.register_with_opennvr()
+        try:
+            await self._run_nats_loop(once=once)
+        finally:
+            self.stop_contract_server()
+
+    async def _run_nats_loop(self, *, once: bool) -> None:
         import nats
 
         connect_kwargs: dict[str, Any] = {
