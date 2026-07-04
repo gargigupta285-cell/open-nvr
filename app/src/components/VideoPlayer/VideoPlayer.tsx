@@ -773,7 +773,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     return (
       <div
         ref={containerRef}
-        className={`relative bg-black overflow-hidden group ${className}`}
+        className={`relative bg-black overflow-hidden group flex items-center justify-center ${className}`}
         tabIndex={0}
         onDoubleClick={handleDoubleClick}
       >
@@ -792,16 +792,26 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           </div>
         )}
 
-        {/* Video element */}
-        <video
-          ref={videoRef}
-          className="w-full h-full object-contain"
-          playsInline
-          muted={isMuted}
-          autoPlay={autoPlay}
-          crossOrigin="anonymous"
-          preload={mode === 'playback' ? 'metadata' : 'auto'}
-        />
+        {/* Fixed 16:9 frame — locks the stream into a letterboxed/pillarboxed
+            box so a non-16:9 source never distorts the layout. In fullscreen the
+            container fills the (possibly non-16:9) screen, so cap the frame to the
+            largest 16:9 area that fits the viewport and center it. */}
+        <div
+          className={`relative w-full h-full ${
+            isFullscreen ? 'max-w-[177.78vh] max-h-[56.25vw]' : ''
+          }`}
+        >
+          {/* Video element */}
+          <video
+            ref={videoRef}
+            className="w-full h-full object-contain"
+            playsInline
+            muted={isMuted}
+            autoPlay={autoPlay}
+            crossOrigin="anonymous"
+            preload={mode === 'playback' ? 'metadata' : 'auto'}
+          />
+        </div>
 
         {/* Loading overlay */}
         {isLoading && (

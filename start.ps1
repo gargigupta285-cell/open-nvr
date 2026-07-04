@@ -322,7 +322,8 @@ function Show-RunningInfo {
     Write-Color ""
     Write-Color "  ✓ OpenNVR is running!" Green
     Write-Color "  Web UI (local) → http://localhost:8000  (login: $u)" Cyan
-    Write-Color "  Web UI (LAN)   → https://<this-host-ip>/  (via the TLS proxy)" Cyan
+    Write-Color "  Web UI (HTTPS) → https://localhost/" Cyan
+    Write-Color "  Web UI (LAN)   → https://<this-host-ip>/" Cyan
     Write-Color "  API Docs       → http://localhost:8000/docs" Cyan
     if ((Get-EnvVar "OPENNVR_EXAMPLE") -eq 'camera-agent') {
         Write-Color "  Camera Agent   → http://localhost:9100/demo  (ask your cameras - voice or chat)" Cyan

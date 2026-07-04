@@ -493,12 +493,16 @@ export function LiveView() {
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
       >
-        <div 
-          ref={gridRef} 
-          className="grid gap-2 relative"
-          style={{ 
+        <div
+          ref={gridRef}
+          className="grid gap-2 relative content-start"
+          style={{
             gridTemplateColumns: `repeat(${layoutDef.gridCols}, minmax(0, 1fr))`,
-            gridTemplateRows: `repeat(${layoutDef.gridRows}, minmax(0, 1fr))`,
+            // Rows are sized to the tiles' own 16:9 aspect (see Tile) instead of
+            // stretching to fill viewport height. `content-start` disables grid's
+            // default `align-content: stretch`, which would otherwise stretch the
+            // auto rows to fill the container and make tiles taller than 16:9.
+            gridTemplateRows: `repeat(${layoutDef.gridRows}, auto)`,
           }}
         >
           {layoutDef.tiles.map((tile, i) => {
@@ -735,12 +739,17 @@ function Tile({
   
   return (
     <div className="flex flex-col bg-[var(--bg-2)] border border-neutral-700 relative overflow-hidden h-full">
-      {/* Video container */}
-      <div className="aspect-video relative flex-1">
+      {/* Video container — fixed 16:9 frame. Width comes from the grid column;
+          height is locked to 16:9 by aspect-video (no flex-1 stretch, which would
+          let the tile grow taller than 16:9 and letterbox the stream unevenly). */}
+      <div className="aspect-video relative w-full overflow-hidden">
         {!cameraId && <div className="absolute right-2 top-2 z-20 text-[10px] uppercase tracking-wide bg-black/60 px-1 py-0.5">NO CAMERA</div>}
         {!hasLink && cameraId && <div className="absolute right-2 top-2 z-20 text-[10px] uppercase tracking-wide bg-black/60 px-1 py-0.5">NO LINK</div>}
 
-        <div className="w-full h-full">
+        {/* Absolute so the <video>'s intrinsic size (e.g. a 1:1 stream) can't
+            stretch the box taller than 16:9 — the box height comes only from
+            aspect-video, and object-contain letter/pillarboxes the stream. */}
+        <div className="absolute inset-0">
           {hasLink ? (
             <VideoPlayer
               ref={playerRef}
