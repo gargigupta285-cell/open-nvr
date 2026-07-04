@@ -47,6 +47,16 @@ export const aiService = {
   runInference: (data: any) => api.post('/api/v1/ai-models/inference', data),
   getAdapterMetrics: (name: string) =>
     api.get(`/api/v1/ai-models/adapters/${encodeURIComponent(name)}/metrics`),
+
+  // Adapter permission approval (AI Adapter Contract v1 governance).
+  getAdapterPermissions: (name: string) =>
+    api.get(`/api/v1/ai-models/adapters/${encodeURIComponent(name)}/permissions`),
+  grantAdapterPermissions: (name: string, keys: string[]) =>
+    api.post(`/api/v1/ai-models/adapters/${encodeURIComponent(name)}/permissions/grant`, { keys }),
+  revokeAdapterPermissions: (name: string, keys: string[]) =>
+    api.post(`/api/v1/ai-models/adapters/${encodeURIComponent(name)}/permissions/revoke`, { keys }),
+  approveAllAdapterPermissions: (name: string) =>
+    api.post(`/api/v1/ai-models/adapters/${encodeURIComponent(name)}/permissions/approve-all`),
   runRecordingInference: (data: any) =>
     api.post('/api/v1/ai-models/inference/recording', data),
 

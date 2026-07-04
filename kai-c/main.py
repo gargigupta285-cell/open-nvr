@@ -294,7 +294,7 @@ async def lifespan(app: FastAPI):
     )
     for name, url in ADAPTER_REGISTRY.items():
         try:
-            await _registry.register(name, url)
+            adapter = await _registry.register(name, url)
         except SovereigntyViolation as exc:
             logger.warning("sovereignty refused %s@%s: %s", name, url, exc)
             _audit.emit(
@@ -309,6 +309,20 @@ async def lifespan(app: FastAPI):
             # continue. Operators can re-register via the v2 endpoint
             # once the adapter is up.
             logger.info("registration deferred for %s@%s: %s", name, url, exc)
+        else:
+            # Contract §8.5 — config-as-consent. This adapter came from
+            # the operator's OWN startup configuration (compose overlay /
+            # ADAPTER_REGISTRY env), and writing it there IS the consent
+            # act — so its declared permission keys are granted here
+            # rather than parked in ``pending`` awaiting a UI click. The
+            # grant is a first-class audit event (adapter_grant_id +
+            # actor "system:startup-config"), keeping the receipt chain
+            # intact. Only THIS seed loop auto-grants: adapters added at
+            # runtime via POST /api/v1/adapters/register keep the human
+            # gate, and permission DRIFT on a later poll still flips a
+            # seeded adapter back to pending (see registry.refresh()).
+            if adapter.pending_keys():
+                _registry.approve_all(name, actor="system:startup-config")
     await _registry.start_polling()
 
     # NATS publisher for the event-bus broadcast surface. Starts AFTER
@@ -386,6 +400,43 @@ def get_adapter_url(model_name: str = "default") -> str:
     return ADAPTER_REGISTRY.get(model_name, ADAPTER_REGISTRY["default"])
 
 
+def enforce_legacy_serving_gate(model_name: str) -> None:
+    """§8/§11 approval gate for the LEGACY ``/infer`` + ``/infer/local``
+    passthroughs, which resolve adapters via the static ``ADAPTER_REGISTRY``
+    dict and so bypass ``registry.proxy_infer``'s gate. Fail closed: if the
+    live registry knows this adapter and it is not fully approved, refuse
+    with 403 and audit ``inference.refused_permission`` — matching the
+    governed path. If the live registry has no entry (an adapter that never
+    registered with the v2 registry), the legacy escape hatch is preserved.
+    """
+    registry = _registry
+    if registry is None:  # pragma: no cover — guarded by lifespan
+        return
+    adapter = registry.get(model_name)
+    if adapter is None:
+        return
+    if not adapter.is_serving_allowed:
+        pending = adapter.pending_keys()
+        get_audit().emit(
+            AuditEventType.INFERENCE_REFUSED_PERMISSION,
+            adapter=model_name,
+            approval_status=adapter.approval_status,
+            pending_permissions=pending,
+            reason=(
+                "legacy inference path refused; adapter is not fully "
+                f"approved ({len(pending)} permission(s) await operator grant)"
+            ),
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"adapter {model_name!r} is {adapter.approval_status}: "
+                f"{len(pending)} declared permission(s) await operator "
+                "approval before it may serve inference"
+            ),
+        )
+
+
 class InferenceRequest(BaseModel):
     """Request model for inference endpoint"""
     camera_id: str
@@ -454,10 +505,15 @@ async def process_inference(request: InferenceRequest):
     
     Flow: OpenNVR Backend → KAI-C → AI Adapter (from registry) → KAI-C → OpenNVR Backend
     """
+    # §8/§11 fail-closed gate (outside the try so its 403 isn't swallowed by
+    # the generic 500 handler below): a pending/not-approved adapter must not
+    # serve via the legacy path either.
+    enforce_legacy_serving_gate(request.model_name)
+
     try:
         # Get AI Adapter URL from internal registry (user never provides this!)
         adapter_url = get_adapter_url(request.model_name)
-        
+
         # Create KAI-C connector for the adapter
         connector = KaiConnector(adapter_url=adapter_url)
         
@@ -528,6 +584,11 @@ async def process_local_inference(request: dict):
 
     Flow: OpenNVR Backend -> KAI-C -> AI Adapter -> KAI-C -> OpenNVR Backend
     """
+    # §8/§11 fail-closed gate for the legacy local path (outside the try so
+    # its 403 survives the generic 500 handler). ``/infer/local`` always
+    # resolves the "default" adapter (get_adapter_url() with no arg).
+    enforce_legacy_serving_gate("default")
+
     try:
         adapter_url = get_adapter_url()
 
@@ -976,6 +1037,107 @@ async def v1_adapter_metrics(name: str):
     return snapshot
 
 
+# ── A2.4b: adapter permission-approval endpoints (§8 / §11) ─────────
+# The operator-UI approval flow the KAI-C README deferred. All behind
+# require_internal_api_key like the rest of the v1 surface. The
+# ``actor`` recorded in KAI-C's audit trail is the OpenNVR user, threaded
+# through the ``X-Actor`` header the server proxy sets; falls back to a
+# generic label when absent (e.g. a direct operator curl).
+
+
+class PermissionKeysRequest(BaseModel):
+    """Body for the grant / revoke endpoints — a list of permission
+    keys (see ``registry.permission_keys``)."""
+    keys: list[str] = Field(default_factory=list)
+
+
+def _actor_from_header(x_actor: Optional[str]) -> str:
+    return x_actor.strip() if x_actor and x_actor.strip() else "operator"
+
+
+@app.get(
+    "/api/v1/adapters/{name}/permissions",
+    dependencies=[Depends(require_internal_api_key)],
+)
+async def v1_adapter_permissions(name: str):
+    """§8 / §11 — the permission view for one adapter: declared keys
+    (with human labels, kind, and sovereignty-conflict flags), the
+    granted set, the still-pending set, and the derived approval_status.
+    404 for an unknown adapter."""
+    view = get_registry().permissions_view(name)
+    if view is None:
+        raise HTTPException(status_code=404, detail=f"unknown adapter: {name}")
+    return view
+
+
+@app.post(
+    "/api/v1/adapters/{name}/permissions/grant",
+    dependencies=[Depends(require_internal_api_key)],
+)
+async def v1_adapter_permissions_grant(
+    name: str,
+    payload: PermissionKeysRequest,
+    x_actor: Optional[str] = Header(None),
+):
+    """Grant a set of declared permission keys. Only keys the adapter
+    actually declares take effect. Returns the updated permission view."""
+    registry = get_registry()
+    try:
+        _, grant_id = registry.grant_permissions(
+            name, payload.keys, _actor_from_header(x_actor)
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown adapter: {name}")
+    view = registry.permissions_view(name)
+    view["grant_id"] = grant_id
+    return view
+
+
+@app.post(
+    "/api/v1/adapters/{name}/permissions/revoke",
+    dependencies=[Depends(require_internal_api_key)],
+)
+async def v1_adapter_permissions_revoke(
+    name: str,
+    payload: PermissionKeysRequest,
+    x_actor: Optional[str] = Header(None),
+):
+    """Revoke a set of granted permission keys. Revoking any key flips
+    the adapter back to ``pending`` and stops it serving. Returns the
+    updated permission view."""
+    registry = get_registry()
+    try:
+        _, grant_id = registry.revoke_permissions(
+            name, payload.keys, _actor_from_header(x_actor)
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown adapter: {name}")
+    view = registry.permissions_view(name)
+    view["grant_id"] = grant_id
+    return view
+
+
+@app.post(
+    "/api/v1/adapters/{name}/permissions/approve-all",
+    dependencies=[Depends(require_internal_api_key)],
+)
+async def v1_adapter_permissions_approve_all(
+    name: str,
+    x_actor: Optional[str] = Header(None),
+):
+    """Grant every declared permission key — the "approve" button.
+    Returns the updated permission view (approval_status="approved"
+    unless the adapter re-declares more scope before this lands)."""
+    registry = get_registry()
+    try:
+        _, grant_id = registry.approve_all(name, _actor_from_header(x_actor))
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown adapter: {name}")
+    view = registry.permissions_view(name)
+    view["grant_id"] = grant_id
+    return view
+
+
 # ── B1 NATS publishing helper ──────────────────────────────────────
 
 
@@ -1094,6 +1256,11 @@ async def v1_infer(
 
     try:
         status_code, body = await registry.proxy_infer(adapter_name, payload, correlation_id)
+    except PermissionError as exc:
+        # §8 / §11 approval gate — fail closed. The registry already
+        # emitted inference.refused_permission (it owns the pending-key
+        # detail); we just translate to a 403 for the caller.
+        raise HTTPException(status_code=403, detail=str(exc))
     except Exception as exc:
         latency_ms = int((time.monotonic() - started) * 1000)
         audit.emit(
@@ -1206,6 +1373,26 @@ async def v1_infer_stream(websocket: WebSocket, adapter_name: str):
         websocket.headers.get(CORRELATION_ID_HEADER.lower())
         or new_correlation_id()
     )
+
+    if not adapter.is_serving_allowed:
+        # §8 / §11 approval gate — fail closed on the streaming path too.
+        # A pending / not-fully-approved adapter never streams. Audit the
+        # refusal (same event type as the HTTP path) and close with
+        # policy_refused.
+        pending = adapter.pending_keys()
+        get_audit().emit(
+            AuditEventType.INFERENCE_REFUSED_PERMISSION,
+            correlation_id=correlation_id,
+            adapter=adapter_name,
+            approval_status=adapter.approval_status,
+            pending_permissions=pending,
+            reason="adapter is not fully approved; streaming refused",
+        )
+        await websocket.close(
+            code=CLOSE_POLICY_REFUSED,
+            reason=f"adapter {adapter_name} awaiting operator approval",
+        )
+        return
 
     proxy = StreamProxy(
         client_ws=websocket,

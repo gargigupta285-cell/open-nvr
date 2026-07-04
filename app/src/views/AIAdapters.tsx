@@ -22,10 +22,11 @@
 // /api/v1/adapters migration.
 
 import { useState, type ReactNode } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { Activity, Layers, RefreshCw, ShieldAlert, Server } from 'lucide-react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Activity, Cpu, Database, Globe, HardDrive, Info, Layers, Lock, RefreshCw, ShieldAlert, ShieldCheck, Share2, Server } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
+import { useSnackbar } from '../components/Snackbar'
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, EmptyState, ErrorCard, PageHeader, Skeleton, type BadgeVariant } from '../components/ui'
 
 type AdapterInfo = Record<string, any>
@@ -238,6 +239,221 @@ function FingerprintChanges({ changes }: { changes: string[] }) {
   )
 }
 
+/* ----------------------- Permission approval ---------------------- */
+// The visible proof of the governance story (design spec §06): an adapter
+// declares the host resources it wants; nothing is granted until an operator
+// approves it, and the gateway fails closed until then.
+
+type PermissionKind = 'gpu' | 'network_egress' | 'host_filesystem' | 'shared_memory' | 'host_metadata'
+
+type DeclaredPermission = {
+  key: string
+  label: string
+  kind: PermissionKind
+  sovereignty_conflict: boolean
+}
+
+type AdapterPermissionsResp = {
+  adapter: string
+  approval_status: 'pending' | 'approved'
+  declared: DeclaredPermission[]
+  granted: string[]
+  pending: string[]
+}
+
+const PERMISSION_KIND_ICON: Record<PermissionKind, ReactNode> = {
+  gpu: <Cpu size={13} />,
+  network_egress: <Globe size={13} />,
+  host_filesystem: <HardDrive size={13} />,
+  shared_memory: <Share2 size={13} />,
+  host_metadata: <Database size={13} />,
+}
+
+function permissionKindIcon(kind: PermissionKind): ReactNode {
+  return PERMISSION_KIND_ICON[kind] ?? <Lock size={13} />
+}
+
+function useAdapterPermissions(name: string) {
+  // The approval badge is important enough to fetch on mount for every card —
+  // it's the governance status the operator needs to see immediately.
+  return useQuery({
+    queryKey: ['adapter-permissions', name],
+    queryFn: async () => {
+      const { data } = await apiService.getAdapterPermissions(name)
+      return data as AdapterPermissionsResp
+    },
+    retry: 0,
+  })
+}
+
+function AdapterApprovalBadge({ name }: { name: string }) {
+  const query = useAdapterPermissions(name)
+  if (query.isPending) return <Skeleton className="h-5 w-28" />
+  // Fail loud, not silent: if we can't read approval status, never imply the
+  // adapter is fine — surface an explicit unknown state so a pending adapter
+  // can't hide behind a failed request.
+  if (query.isError) {
+    return (
+      <Badge variant="neutral">
+        <ShieldAlert size={12} /> approval status unavailable
+      </Badge>
+    )
+  }
+  const status = query.data?.approval_status
+  if (status === 'approved') {
+    return (
+      <Badge variant="success">
+        <ShieldCheck size={12} /> approved
+      </Badge>
+    )
+  }
+  if (status === 'pending') {
+    return (
+      <Badge variant="warning">
+        <ShieldAlert size={12} /> approval required
+      </Badge>
+    )
+  }
+  return null
+}
+
+function AdapterPermissionsSection({ name }: { name: string }) {
+  const [open, setOpen] = useState(false)
+  const queryClient = useQueryClient()
+  const { showSuccess, showError } = useSnackbar()
+  const query = useAdapterPermissions(name)
+
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ['adapter-permissions', name] })
+    queryClient.invalidateQueries({ queryKey: ['kai-c-capabilities'] })
+  }
+
+  const grant = useMutation({
+    mutationFn: (keys: string[]) => apiService.grantAdapterPermissions(name, keys),
+    onSuccess: (_data, keys) => {
+      invalidate()
+      showSuccess(`Granted ${keys.length === 1 ? keys[0] : `${keys.length} permissions`} to ${name}.`)
+    },
+    onError: (err) => showError(extractApiError(err, 'Could not grant permission.')),
+  })
+
+  const revoke = useMutation({
+    mutationFn: (keys: string[]) => apiService.revokeAdapterPermissions(name, keys),
+    onSuccess: (_data, keys) => {
+      invalidate()
+      showSuccess(`Revoked ${keys.length === 1 ? keys[0] : `${keys.length} permissions`} from ${name}.`)
+    },
+    onError: (err) => showError(extractApiError(err, 'Could not revoke permission.')),
+  })
+
+  const approveAll = useMutation({
+    mutationFn: () => apiService.approveAllAdapterPermissions(name),
+    onSuccess: () => {
+      invalidate()
+      showSuccess(`Approved all permissions for ${name}.`)
+    },
+    onError: (err) => showError(extractApiError(err, 'Could not approve permissions.')),
+  })
+
+  const busy = grant.isPending || revoke.isPending || approveAll.isPending
+  const p = query.data
+  const granted = new Set(p?.granted ?? [])
+  const pending = new Set(p?.pending ?? [])
+  const anyPending = (p?.pending?.length ?? 0) > 0
+
+  return (
+    <div>
+      <Button variant="ghost" className="text-xs px-2 py-1" onClick={() => setOpen(!open)}>
+        <ShieldCheck size={12} /> {open ? 'Hide permissions' : 'Permissions'}
+      </Button>
+      {open && (
+        <div className="mt-2">
+          {query.isPending ? (
+            <div className="space-y-2">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <Skeleton key={i} className="h-10" />
+              ))}
+            </div>
+          ) : query.isError ? (
+            <div className="text-sm text-red-300/90 border border-red-700/40 rounded p-3">
+              {extractApiError(query.error, 'Could not load adapter permissions.')}
+            </div>
+          ) : p ? (
+            <div className="space-y-2">
+              {p.approval_status === 'pending' && (
+                <div className="flex items-start gap-2 text-xs text-amber-300 border border-amber-700/40 bg-amber-900/20 rounded p-3">
+                  <ShieldAlert size={14} className="flex-shrink-0 mt-0.5" />
+                  <span>This adapter cannot serve inference until its permissions are approved.</span>
+                </div>
+              )}
+
+              {p.declared.length === 0 ? (
+                <div className="text-xs text-[var(--text-dim)] border border-[var(--border)] rounded bg-[var(--bg-2)] p-3">
+                  This adapter declares no host permissions — nothing to approve.
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  {p.declared.map((perm) => {
+                    const isGranted = granted.has(perm.key)
+                    const isPending = pending.has(perm.key)
+                    return (
+                      <div
+                        key={perm.key}
+                        className="flex items-center gap-2 border border-[var(--border)] rounded bg-[var(--bg-2)] px-3 py-2"
+                      >
+                        <span className="text-[var(--text-dim)]">{permissionKindIcon(perm.kind)}</span>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-sm truncate" title={perm.label}>{perm.label}</div>
+                          {perm.sovereignty_conflict && (
+                            <div className="flex items-center gap-1 text-[11px] text-red-400 mt-0.5">
+                              <ShieldAlert size={11} /> conflicts with local_only
+                            </div>
+                          )}
+                        </div>
+                        <Badge variant={isGranted ? 'success' : 'warning'}>{isGranted ? 'granted' : 'pending'}</Badge>
+                        {isGranted ? (
+                          <Button
+                            variant="danger"
+                            className="text-xs px-2 py-1"
+                            disabled={busy}
+                            onClick={() => revoke.mutate([perm.key])}
+                          >
+                            Revoke
+                          </Button>
+                        ) : (
+                          <Button
+                            variant="primary"
+                            className="text-xs px-2 py-1"
+                            disabled={busy || !isPending}
+                            onClick={() => grant.mutate([perm.key])}
+                          >
+                            Grant
+                          </Button>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+
+              {anyPending && (
+                <div className="flex items-center justify-between gap-2 pt-1">
+                  <div className="flex items-center gap-1 text-[11px] text-[var(--text-dim)]">
+                    <Info size={11} /> {p.pending.length} permission{p.pending.length === 1 ? '' : 's'} awaiting approval
+                  </div>
+                  <Button variant="primary" className="text-xs px-2 py-1" disabled={busy} onClick={() => approveAll.mutate()}>
+                    <ShieldCheck size={12} /> Approve all
+                  </Button>
+                </div>
+              )}
+            </div>
+          ) : null}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function AdapterMetricsSection({ name }: { name: string }) {
   const [open, setOpen] = useState(false)
   const query = useQuery({
@@ -400,6 +616,7 @@ export function AIAdapters() {
                 <Layers size={16} className="text-[var(--text-dim)]" />
                 <CardTitle>{a.name}</CardTitle>
                 <div className="ml-auto flex items-center gap-2">
+                  <AdapterApprovalBadge name={a.name} />
                   {a.status && <Badge variant={statusVariant(a.status)}>{a.status}</Badge>}
                 </div>
               </CardHeader>
@@ -444,6 +661,8 @@ export function AIAdapters() {
                     </div>
                   </div>
                 )}
+
+                <AdapterPermissionsSection name={a.name} />
 
                 <AdapterMetricsSection name={a.name} />
 

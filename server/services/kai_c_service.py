@@ -946,6 +946,73 @@ class KaiCService:
         response.raise_for_status()
         return response.json()
 
+    # ── Adapter permission-approval proxy (§8 / §11) ────────────────
+    #
+    # Thin proxies onto KAI-C's governed permission endpoints. Same
+    # X-Internal-Api-Key auth as get_adapter_metrics; the mutating calls
+    # additionally forward an ``X-Actor`` header so KAI-C's own audit
+    # trail records WHICH OpenNVR user made the grant/revoke. All raise
+    # httpx errors verbatim so the router can map 404→404 / down→502.
+
+    def _kai_c_headers(self, *, actor: str | None = None) -> dict[str, str]:
+        headers = {"Accept": "application/json"}
+        internal_key = self._internal_api_key()
+        if internal_key:
+            headers["X-Internal-Api-Key"] = internal_key
+        if actor:
+            headers["X-Actor"] = actor
+        return headers
+
+    async def get_adapter_permissions(self, adapter_name: str) -> dict[str, Any]:
+        """Fetch the permission view for one adapter (declared / granted
+        / pending / approval_status). Raises httpx errors on failure."""
+        response = await self.http_client.get(
+            f"{self.kai_c_url}/api/v1/adapters/{urlquote(adapter_name, safe='')}/permissions",
+            timeout=10.0,
+            headers=self._kai_c_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def grant_adapter_permissions(
+        self, adapter_name: str, keys: list[str], actor: str | None = None
+    ) -> dict[str, Any]:
+        """Grant permission keys for an adapter. Returns the updated view."""
+        response = await self.http_client.post(
+            f"{self.kai_c_url}/api/v1/adapters/{urlquote(adapter_name, safe='')}/permissions/grant",
+            json={"keys": keys},
+            timeout=10.0,
+            headers=self._kai_c_headers(actor=actor),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def revoke_adapter_permissions(
+        self, adapter_name: str, keys: list[str], actor: str | None = None
+    ) -> dict[str, Any]:
+        """Revoke permission keys for an adapter. Returns the updated view."""
+        response = await self.http_client.post(
+            f"{self.kai_c_url}/api/v1/adapters/{urlquote(adapter_name, safe='')}/permissions/revoke",
+            json={"keys": keys},
+            timeout=10.0,
+            headers=self._kai_c_headers(actor=actor),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def approve_all_adapter_permissions(
+        self, adapter_name: str, actor: str | None = None
+    ) -> dict[str, Any]:
+        """Grant every declared key (the "approve" button). Returns the
+        updated view."""
+        response = await self.http_client.post(
+            f"{self.kai_c_url}/api/v1/adapters/{urlquote(adapter_name, safe='')}/permissions/approve-all",
+            timeout=10.0,
+            headers=self._kai_c_headers(actor=actor),
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def close(self):
         """Cleanup resources."""
         await self.http_client.aclose()
