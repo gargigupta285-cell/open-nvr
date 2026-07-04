@@ -107,7 +107,8 @@ When it finishes, the launcher prints the access URLs and a one-time setup token
 ```
   ✓ OpenNVR is running!
   Web UI (local) → http://localhost:8000  (login: admin)
-  Web UI (LAN)   → https://<this-host-ip>/  (via the TLS proxy)
+  Web UI (HTTPS) → https://localhost/
+  Web UI (LAN)   → https://<this-host-ip>/
   Camera Agent   → http://localhost:9100/demo   (only if you chose it)
 
   🔑 First-time setup token (one-time use — copy into the UI):
