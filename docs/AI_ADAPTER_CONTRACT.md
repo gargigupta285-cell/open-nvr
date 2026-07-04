@@ -436,9 +436,16 @@ A few notes on the shape:
     }
   ]
   ```
-- `permissions` is the **sandboxing declaration** (§8). KAI-C reads
-  this and applies the declared scope as container constraints when
-  managing the adapter's lifecycle.
+- `permissions` is the **sandboxing declaration and the operator
+  approval gate** (§8). KAI-C reads this at registration, holds the
+  adapter in `pending` until an operator has granted every declared
+  scope, and applies the declared scope as container constraints when
+  managing the adapter's lifecycle. Mind the terminology: this whole
+  JSON document is the adapter's *capability card*;
+  `tasks_advertised` says what the adapter can do, `permissions` says
+  what it needs — the two never interact. §8.1 walks the full card
+  block-by-block; §8.4 is the authoring guide community contributors
+  are reviewed against.
 - `scheduling.fair_queuing: "per_camera"` opts the adapter in to
   KAI-C's per-camera fair-queuing (§9). Default `"none"` lets KAI-C
   forward requests as fast as they arrive; `"per_camera"` makes KAI-C
@@ -681,9 +688,169 @@ prefix-namespacing is encouraged for non-canonical codes).
 ## 8. Permission declaration + sandbox enforcement
 
 Adapters declare what they need in `/capabilities.permissions`. KAI-C
-reads this on adapter registration and applies the declared scope as
-container constraints. The operator sees the requested permissions
-before enabling the adapter — like an app-store permission prompt.
+reads this on adapter registration, shows the operator the requested
+scopes — like an app-store permission prompt — and holds the adapter
+in a **pending** state until every declared scope is granted. The
+gate is fail-closed: a pending adapter is stored, health-polled, and
+visible, but cannot serve a single inference until approved.
+
+This section is the full developer guide for the card and the gate:
+what the card looks like (§8.1), what a permission actually *means*
+(§8.2), the approval lifecycle end-to-end (§8.3), and the authoring
+rules community adapters are reviewed against (§8.4).
+
+This is the **biggest security upgrade** the contract delivers and the
+single best argument for why HTTP-adapter-per-container beats
+in-process plugins for community-contributed code. The enforcement
+half — and the model-tamper containment claim — is documented in
+[`SECURITY_ARCHITECTURE.md`](./SECURITY_ARCHITECTURE.md) (Jul 2026
+addendum).
+
+### 8.1 Anatomy of a capability card
+
+Terminology first, because "capabilities" is overloaded three ways:
+
+| Term | Meaning |
+|---|---|
+| **capability card** | The *whole* JSON document `GET /capabilities` returns — identity, model, endpoints, tasks, permissions, scheduling, cost. "Capabilities" unqualified means this card. |
+| `tasks_advertised` (+ optional `capabilities` descriptor list, §4) | **What the adapter can do.** Free-text task names that feed the derived task index, the capability catalog / skills surface, and agent discovery (`nvr.adapters.find(task=...)`). Purely descriptive — never gated, never approved. |
+| `permissions` | **What the adapter needs.** Host-scope authorization requests that gate whether the adapter may serve *at all*. Nothing to do with tasks or skills: granting a permission adds no task, and no task implies a permission. |
+
+Here is the real card served by the reference YOLOv8 adapter
+([`ai-adapter/adapters/yolov8/main.py`](https://github.com/open-nvr/ai-adapter/blob/main/adapters/yolov8/main.py)
+— the whole card is one `AdapterApp(...)` constructor call; the SDK
+renders it), annotated block by block:
+
+```json
+{
+  // ── IDENTITY. Who wrote this, under what license, which contract
+  //    versions it speaks. A change to name or version between polls
+  //    is treated as a NEW adapter — re-registration required (§11.3).
+  "adapter": {
+    "name": "yolov8-object-detection",
+    "version": "1.0.0",
+    "vendor": "open-nvr",
+    "license": "AGPL-3.0",
+    "model_card_url": "https://github.com/ultralytics/ultralytics",
+    "supported_contract_versions": ["1"]
+  },
+
+  // ── MODEL IDENTITY. `fingerprint` is the tamper signal: KAI-C
+  //    records it at registration and diffs it on every 60s poll.
+  //    A mismatch fires adapter.fingerprint_mismatch (critical
+  //    alert) but keeps serving — the operator decides whether it
+  //    was a legitimate weights update (§11.3).
+  "model": {
+    "name": "yolov8n",
+    "version": "8.0.196",
+    "framework": "onnx",
+    "size_mb": 12.2,
+    "modalities_in": ["image"],
+    "modalities_out": ["bbox_classes"],
+    "fingerprint": "sha256:c4f3a1...e7"
+  },
+
+  // ── MECHANICS. Which wire surface exists and how to feed it.
+  "endpoints": {
+    "infer": {
+      "supported": true,
+      "input_content_types": ["multipart/form-data", "application/json"]
+    },
+    "infer_stream": {
+      "supported": true,
+      "max_concurrent_streams": 16,
+      "supports_shared_memory": false
+    }
+  },
+
+  // ── WHAT IT CAN DO. Free-text; feeds the task index, the
+  //    capability catalog, and agent adapter discovery. Never gated.
+  "tasks_advertised": ["object_detection"],
+
+  // ── WHAT IT NEEDS. The approval gate (§8.2–§8.3). Each declared
+  //    scope expands into exactly one grantable key the operator
+  //    approves individually. This block is why this adapter
+  //    registers as `pending` on a fresh install: it asks for the
+  //    GPU device plus one host filesystem path.
+  "permissions": {
+    "gpu": true,                        // key: gpu
+    "network_egress": [],               // none — sovereignty-clean
+    "host_filesystem": ["/weights"],    // key: host_filesystem:/weights
+    "shared_memory_paths": [],
+    "host_metadata": false
+  },
+
+  // ── SCHEDULING. Hints for KAI-C's fair queuing (§9). max_inflight
+  //    is the honest concurrency of the underlying runtime, not an
+  //    aspiration.
+  "scheduling": {
+    "max_inflight": 1,
+    "preferred_batch_size": 1,
+    "fair_queuing": "per_camera"
+  },
+
+  // ── COST. All zeroes for a local adapter; metered cloud adapters
+  //    fill these in and get budget enforcement (§4).
+  "cost": {
+    "currency": "USD",
+    "estimated_per_call": 0.0,
+    "estimated_per_hour": 0.0,
+    "rate_limit_per_minute": null,
+    "is_metered": false
+  }
+}
+```
+
+The two blocks reviewers and operators read first are
+`tasks_advertised` (capability discovery) and `permissions` (the
+gate). Everything else is identity and mechanics.
+
+### 8.2 Permissions are authorization scopes, not hardware facts
+
+A permission answers **"may I?"**, never "is it there?". Declaring
+`gpu: true` means *"may I be handed the GPU device?"* — an
+authorization request the operator grants or refuses. Whether a GPU
+actually exists on the host is a different question with a different
+endpoint: `GET /hardware/evaluation` (§3.3).
+
+The reference YOLOv8 adapter makes the contrast concrete. It declares
+`gpu: true` (authorization), but its onnxruntime backend serves
+happily on CPU when no CUDA device is present — the hardware
+evaluation just says so:
+
+```json
+{
+  "verdict": "warn",
+  "reasoning": "Weights loaded but no CUDA device — running on CPU (expect 5-20x slower inference)",
+  "details": { "gpu_required": false, "gpu_in_use": false,
+               "onnxruntime_providers": ["CPUExecutionProvider"] }
+}
+```
+
+The adapter serves. Permission granted + hardware absent = slow but
+legal. Permission *not* granted + hardware present = refused. The two
+axes never substitute for each other.
+
+**Grantable keys.** Each declared scope expands into one stable
+string key — the unit the operator grants and revokes, and the unit
+audit events reference
+(`kai-c/kai_c/registry.py::permission_keys`):
+
+| Declared scope | Grantable key(s) |
+|---|---|
+| `gpu: true` | `gpu` |
+| `host_metadata: true` | `host_metadata` |
+| `network_egress: ["api.example.com"]` | `network_egress:api.example.com` — one key per host |
+| `host_filesystem: ["/weights"]` | `host_filesystem:/weights` — one key per path |
+| `shared_memory_paths: ["/dev/shm/opennvr/frames"]` | `shared_memory_paths:/dev/shm/opennvr/frames` — one key per path |
+
+Keys are compared by **string equality**, so declare canonical values
+— directory paths without a trailing slash, hostnames without a
+scheme. Key ordering is deterministic (`gpu`, `host_metadata`, then
+sorted per-host / per-path keys) so API responses and audit events
+are stable.
+
+**Enforcement.** The declared scope maps onto container constraints:
 
 | Permission | Enforcement |
 |---|---|
@@ -693,31 +860,177 @@ before enabling the adapter — like an app-store permission prompt.
 | `shared_memory_paths: ["/path"]` | tmpfs mount writable only at listed paths |
 | `host_metadata: false` | Block AWS/GCP/Azure IMDS endpoints + `/proc/host*` |
 
-**Operator approval is mandatory** for any permission outside the
-safe-by-default set. Specifically, an adapter that declares any of the
-following registers into a **pending** state — stored, polled, and
-visible in the OpenNVR UI — but KAI-C MUST refuse to route inference
-to it (HTTP `/infer` proxying and WS streaming both fail closed with
-`inference.refused_permission` audited) until the operator explicitly
-approves every declared permission from the OpenNVR UI:
+Per §15.3: sovereignty enforcement of `network_egress` (registration
+refusal under `local_only`) and the approval gate itself are live
+today; nftables / mount-level sandbox enforcement of the remaining
+scopes is on the v0.3 roadmap. The declaration + grant + audit chain
+is the trust contract that grounds both.
 
-- `gpu: true`
-- `network_egress` non-empty
-- `host_filesystem` non-empty
-- `shared_memory_paths` non-empty
-- `host_metadata: true`
+### 8.3 The approval lifecycle — fail-closed
 
-The UI prompt looks like an app-store permission dialog: the operator
-sees the adapter name, version, fingerprint (§4), declared permission
-list, and a grant/revoke button per permission (plus an approve-all).
-Grants and revocations are recorded to the audit log (§11.2) with a
-stable `adapter_grant_id` and the acting operator so a future incident
-review can answer "who approved this adapter to call out to
-api.openai.com on 2026-04-12."
+```
+declare (in /capabilities)
+   │  register
+   ▼
+pending ──── operator grants every declared key ────▶ approved (serving)
+   ▲                                                       │
+   ├──── operator revokes any granted key ─────────────────┤
+   └──── NEW key appears on a later 60s poll ──────────────┘
+```
 
-This is the **biggest security upgrade** the contract delivers and the
-single best argument for why HTTP-adapter-per-container beats
-in-process plugins for community-contributed code.
+1. **Declare.** The adapter states its scopes in
+   `/capabilities.permissions`. The declaration is the source of
+   truth; KAI-C will not infer scopes from behaviour.
+
+2. **Register as pending.** An adapter that declares *any* permission
+   registers into `pending` — stored, `/health`-polled, visible in
+   the registry and the OpenNVR UI — but KAI-C MUST refuse to route
+   inference to it on **every** serving path: the governed
+   `POST /api/v1/infer/{name}` proxy, the WebSocket stream (close
+   code `4001`), *and* the legacy `/infer` + `/infer/local`
+   passthroughs. Every refusal is audited as
+   `inference.refused_permission`. An adapter that declares nothing
+   is trivially approved (∅ ⊆ ∅) and serves immediately.
+
+3. **Operator grants, per scope.** The UI prompt looks like an
+   app-store permission dialog: adapter name, version, fingerprint
+   (§4), and one grant/revoke control per key (plus approve-all).
+   The API surface is
+   `GET/POST /api/v1/adapters/{name}/permissions[/grant|/revoke|/approve-all]`.
+   Every grant and revocation is recorded to the audit log (§11.2)
+   with a unique `adapter_grant_id`, the acting operator, and a
+   timestamp — so a future incident review can answer "who approved
+   this adapter to call out to api.openai.com on 2026-04-12" with a
+   receipt. Only *declared* keys can be granted; granting a key the
+   adapter never asked for is a no-op. `approval_status` is always
+   derived (`approved` iff every declared key is granted) — never
+   stored, so it can't drift out of sync.
+
+4. **Serving.** Once every declared key is granted, the adapter
+   serves on all paths.
+
+5. **Revoke → pending again.** Revoking any granted key immediately
+   flips the adapter back to `pending` and stops serving.
+
+**The 60-second re-poll.** KAI-C re-fetches `/capabilities` every 60s
+(§11) and diffs the card. The trust-relevant outcomes:
+
+| Drift between polls | Registry response | Why |
+|---|---|---|
+| `model.fingerprint` changed | `adapter.fingerprint_mismatch` audit + critical alert; **keep serving** | Weights updates are routine and the alert is loud; the operator decides re-approve vs de-register (§11.3) |
+| Permission **added** | **Blocking.** Flip to `pending`, stop serving immediately; audit + `adapter.permission_drift_blocking` alert | Model-tamper containment: a swapped or compromised model service that suddenly wants egress or a new path is stopped on the next poll — this complements the fingerprint signal |
+| Permission **removed** | Allowed; scope narrowed. The stale grant is **pruned** (actor `system:permission_no_longer_declared`) | A later re-add must earn fresh approval instead of silently inheriting the old grant |
+| `network_egress` declared under `local_only` | Refused at registration; on drift, de-registered with `inference.refused_sovereignty` audit | Sovereignty is absolute (§11.1) |
+
+The asymmetry is deliberate: fingerprint drift *alerts and serves*,
+permission drift *stops*. Widening host scope without consent is
+exactly what a compromised adapter does; a fail-open response there
+would defeat the gate.
+
+### 8.4 Authoring rules — how to declare permissions
+
+These are the rules community adapters are reviewed against. They all
+reduce to one sentence: **the card must describe the build you ship,
+and nothing more.**
+
+1. **Declare build-accurately.** The declaration describes what *this
+   image* touches at runtime — not what the model family could use.
+   The YOLOv8 lesson: the reference adapter ships one CPU+GPU-capable
+   image and declares `gpu: true`, so operators on CPU-only hosts are
+   still asked to grant a GPU that isn't there. If you ship separate
+   CPU and GPU builds, the CPU image MUST declare `gpu: false`; only
+   the GPU build declares `gpu: true`. Same logic for weights: files
+   **baked into the image at build time are NOT `host_filesystem`** —
+   they're inside the container already. The BLIP adapter bakes its
+   weights, declares nothing, and auto-approves; YOLOv8 bind-mounts
+   `/weights` from the host, so it declares
+   `host_filesystem:/weights`.
+
+2. **Declare minimally.** Every key you declare is one operator
+   decision at install time and one permanent line of audit surface
+   for the deployment's lifetime. If you can drop a scope by changing
+   your build (bake the weights, cache at build time, bind loopback),
+   drop it.
+
+3. **The empty set is the zero-friction default.** An adapter that
+   declares no permissions auto-approves and serves the moment it
+   registers — no operator action, no dialog. This is the target
+   state for most local adapters; the gate binds exactly where risk
+   enters (GPU, egress, host paths, host metadata).
+
+4. **Never declare egress you don't strictly need.** Under
+   `local_only` — the default posture for the deployments this
+   platform exists for — *any* declared `network_egress` entry means
+   your adapter is refused at registration, full stop (§11.1).
+   Wildcard entries are refused even under `federated`. If your
+   adapter is a cloud proxy by nature, declare every host explicitly
+   and accept that you only run under `federated` / `cloud_allowed`.
+
+**Worked example — a community cloud adapter.** Suppose you publish
+`ppe-cloud`, a PPE-compliance adapter that sends frames to a vendor
+API:
+
+```python
+from opennvr_adapter_sdk import AdapterApp, Permissions
+
+app = AdapterApp(
+    service_factory=PpeCloudService,
+    name="ppe-cloud", version="1.0.0", vendor="you", license="MIT",
+    tasks_advertised=["ppe_compliance"],
+    permissions=Permissions(
+        gpu=False,                              # inference is remote
+        network_egress=["api.ppevendor.com"],   # the ONE host you call
+        host_filesystem=[],
+        shared_memory_paths=[],
+        host_metadata=False,
+    ),
+).fastapi_app
+```
+
+What the operator experiences:
+
+- Under `local_only`: registration is **refused outright** — the
+  declared egress marks this as a cloud-proxy adapter (§11.1). No
+  dialog, no pending state.
+- Under `federated` / `cloud_allowed`: the adapter registers as
+  `pending`. The permission view
+  (`GET /api/v1/adapters/ppe-cloud/permissions`) shows:
+
+  ```json
+  {
+    "adapter": "ppe-cloud",
+    "approval_status": "pending",
+    "declared": [
+      { "key": "network_egress:api.ppevendor.com",
+        "label": "Network egress to api.ppevendor.com",
+        "kind": "network_egress",
+        "sovereignty_conflict": false }
+    ],
+    "granted": [],
+    "pending": ["network_egress:api.ppevendor.com"]
+  }
+  ```
+
+  The operator sees one dialog with one grant button. On grant, an
+  `adapter.permission_granted` audit event lands with an
+  `adapter_grant_id`, the operator's identity, and a timestamp — and
+  the adapter starts serving. Any inference attempted before that
+  grant is refused and audited.
+
+### 8.5 Startup-seeded adapters — config-as-consent
+
+> **Status: landing in this PR series.**
+
+Adapters seeded from the operator's own startup configuration (the
+compose overlay / adapter registry the operator wrote by hand) receive
+an automatic grant of their declared keys at seed time, recorded with
+actor `system:startup-config`. Rationale: writing the adapter into
+the deployment config *is* the consent act — re-prompting in the UI
+for a declaration the operator already typed would be friction
+without security. The grant is still a first-class audit event with
+an `adapter_grant_id`, so the receipt chain stays intact; adapters
+registered at runtime (UI, API, community images) always go through
+the full §8.3 pending flow.
 
 ## 9. Fair queuing inside KAI-C
 

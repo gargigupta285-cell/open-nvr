@@ -60,10 +60,14 @@ The A2.4b operator approval flow is implemented, **fail-closed**:
   compromised model service), it flips back to `pending` and stops serving
   immediately; removed permissions prune their stale grants so a re-added
   scope needs fresh approval.
-* **Zero-friction default:** every bundled adapter declares an empty
-  permission set and therefore auto-approves — fresh installs and upgrades
-  keep serving with no operator action. The gate binds exactly where risk
-  enters: third-party / cloud / elevated-scope adapters.
+* **Zero-friction default:** bundled adapters that declare no permissions
+  (blip, insightface, bytetrack, fast-plate-ocr, whisper, piper) auto-approve.
+  yolov8 currently declares `gpu` + a weights path, so it meets the gate —
+  covered by the startup-config auto-grant (config-as-consent, audited as
+  actor `system:startup-config`) landing in this PR series, plus a
+  build-accurate declaration fix in ai-adapter (the CPU build should declare
+  `gpu: false`). The gate binds exactly where risk enters: third-party /
+  cloud / elevated-scope adapters added at runtime.
 
 To our knowledge this per-scope, fail-closed, operator-receipted permission
 model for AI inference services is unique among IP-camera / NVR platforms —
