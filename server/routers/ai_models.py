@@ -207,6 +207,159 @@ async def get_adapter_metrics(
         )
 
 
+class PermissionKeysRequest(BaseModel):
+    """Body for the grant / revoke permission endpoints."""
+
+    keys: list[str] = []
+
+
+def _map_kai_c_permission_error(e: Exception, adapter_name: str) -> HTTPException:
+    """Shared status mapping for the permission proxy routes — KAI-C's
+    404 (unknown adapter) maps to a backend 404; anything else (5xx,
+    connect error, timeout) is a gateway problem → 502. Mirrors the
+    metrics route."""
+    if isinstance(e, httpx.HTTPStatusError):
+        if e.response.status_code == status.HTTP_404_NOT_FOUND:
+            return HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Unknown adapter: {adapter_name}",
+            )
+        return HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"KAI-C returned {e.response.status_code} for adapter permissions",
+        )
+    return HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail=f"Failed to reach KAI-C for adapter permissions: {e!s}",
+    )
+
+
+@router.get("/adapters/{adapter_name}/permissions")
+async def get_adapter_permissions(
+    adapter_name: str,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Fetch the permission-approval view for one adapter (§8 / §11):
+    declared permission keys with labels + sovereignty-conflict flags,
+    the granted set, the still-pending set, and the derived
+    approval_status. Read-only — no audit log.
+
+    Requires authenticated user.
+    """
+    kai_c_service = get_kai_c_service()
+    try:
+        return await kai_c_service.get_adapter_permissions(adapter_name)
+    except Exception as e:
+        raise _map_kai_c_permission_error(e, adapter_name)
+
+
+@router.post("/adapters/{adapter_name}/permissions/grant")
+async def grant_adapter_permissions(
+    adapter_name: str,
+    request: PermissionKeysRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Grant permission keys for an adapter (§8 / §11). Governance
+    mutation — writes an audit log recording the actor, adapter, keys,
+    and the grant_id KAI-C returns.
+
+    Requires authenticated user.
+    """
+    kai_c_service = get_kai_c_service()
+    try:
+        result = await kai_c_service.grant_adapter_permissions(
+            adapter_name, request.keys, actor=current_user.username
+        )
+    except Exception as e:
+        raise _map_kai_c_permission_error(e, adapter_name)
+
+    try:
+        write_audit_log(
+            db,
+            action="adapter.permission.grant",
+            user_id=current_user.id,
+            entity_type="adapter",
+            entity_id=adapter_name,
+            details={"keys": request.keys, "grant_id": (result.get("grant_id") if isinstance(result, dict) else None)},
+        )
+    except Exception:
+        pass  # never fail the mutation on an audit-log hiccup
+    return result
+
+
+@router.post("/adapters/{adapter_name}/permissions/revoke")
+async def revoke_adapter_permissions(
+    adapter_name: str,
+    request: PermissionKeysRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Revoke permission keys for an adapter (§8 / §11). Revoking any
+    key flips the adapter back to pending and stops it serving. Writes
+    an audit log.
+
+    Requires authenticated user.
+    """
+    kai_c_service = get_kai_c_service()
+    try:
+        result = await kai_c_service.revoke_adapter_permissions(
+            adapter_name, request.keys, actor=current_user.username
+        )
+    except Exception as e:
+        raise _map_kai_c_permission_error(e, adapter_name)
+
+    try:
+        write_audit_log(
+            db,
+            action="adapter.permission.revoke",
+            user_id=current_user.id,
+            entity_type="adapter",
+            entity_id=adapter_name,
+            details={"keys": request.keys, "grant_id": (result.get("grant_id") if isinstance(result, dict) else None)},
+        )
+    except Exception:
+        pass
+    return result
+
+
+@router.post("/adapters/{adapter_name}/permissions/approve-all")
+async def approve_all_adapter_permissions(
+    adapter_name: str,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Grant every declared permission key for an adapter — the operator
+    "approve" button (§8 / §11). Writes an audit log.
+
+    Requires authenticated user.
+    """
+    kai_c_service = get_kai_c_service()
+    try:
+        result = await kai_c_service.approve_all_adapter_permissions(
+            adapter_name, actor=current_user.username
+        )
+    except Exception as e:
+        raise _map_kai_c_permission_error(e, adapter_name)
+
+    try:
+        write_audit_log(
+            db,
+            action="adapter.permission.approve",
+            user_id=current_user.id,
+            entity_type="adapter",
+            entity_id=adapter_name,
+            details={
+                "keys": result.get("granted", []) if isinstance(result, dict) else [],
+                "grant_id": (result.get("grant_id") if isinstance(result, dict) else None),
+            },
+        )
+    except Exception:
+        pass
+    return result
+
+
 @router.get("/use-cases", response_model=list[UseCaseEntry])
 async def get_use_cases(
     current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)

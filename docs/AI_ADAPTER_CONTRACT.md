@@ -694,9 +694,12 @@ before enabling the adapter — like an app-store permission prompt.
 | `host_metadata: false` | Block AWS/GCP/Azure IMDS endpoints + `/proc/host*` |
 
 **Operator approval is mandatory** for any permission outside the
-safe-by-default set. Specifically, KAI-C MUST refuse to register an
-adapter that declares any of the following until the operator
-explicitly approves it from the OpenNVR UI:
+safe-by-default set. Specifically, an adapter that declares any of the
+following registers into a **pending** state — stored, polled, and
+visible in the OpenNVR UI — but KAI-C MUST refuse to route inference
+to it (HTTP `/infer` proxying and WS streaming both fail closed with
+`inference.refused_permission` audited) until the operator explicitly
+approves every declared permission from the OpenNVR UI:
 
 - `gpu: true`
 - `network_egress` non-empty
@@ -706,10 +709,11 @@ explicitly approves it from the OpenNVR UI:
 
 The UI prompt looks like an app-store permission dialog: the operator
 sees the adapter name, version, fingerprint (§4), declared permission
-list, and a single approve/reject button per permission. Approvals
-are recorded to the audit log (§10.5) with a stable
-`adapter_grant_id` so a future incident review can answer "who
-approved this adapter to call out to api.openai.com on 2026-04-12."
+list, and a grant/revoke button per permission (plus an approve-all).
+Grants and revocations are recorded to the audit log (§11.2) with a
+stable `adapter_grant_id` and the acting operator so a future incident
+review can answer "who approved this adapter to call out to
+api.openai.com on 2026-04-12."
 
 This is the **biggest security upgrade** the contract delivers and the
 single best argument for why HTTP-adapter-per-container beats
@@ -816,8 +820,8 @@ time range, adapter, camera, outcome, and category — that's the
 | Event | When | Fields recorded |
 |---|---|---|
 | `adapter.registered` | Adapter passes registration checks | adapter_name, adapter_version, model_name, model_version, model_fingerprint, declared_permissions, registration_url, contract_version |
-| `adapter.permission_granted` | Operator approves a non-default permission (§8) | adapter_grant_id, adapter_name, permission_kind, permission_value, operator_user_id |
-| `adapter.permission_revoked` | Operator or system revokes a grant | adapter_grant_id, reason |
+| `adapter.permission_granted` | Operator grants non-default permission key(s) (§8) | adapter_grant_id, adapter, keys, actor, approval_status |
+| `adapter.permission_revoked` | Operator or system revokes granted key(s) | adapter_grant_id, adapter, keys, actor, approval_status |
 | `adapter.deregistered` | Adapter removed (operator action / drift / shutdown) | reason |
 | `adapter.capability_drift` | `/capabilities` poll shows changed values (§11.3) | field_path, previous_value, current_value, action_taken |
 | `adapter.fingerprint_mismatch` | `model.fingerprint` changed between polls | previous_fingerprint, current_fingerprint |
@@ -871,7 +875,7 @@ polls is treated as follows:
 | `adapter.version` or `adapter.name` | Treat as new adapter; require re-registration. Old registration de-registered. |
 | `model.fingerprint` | Audit `adapter.fingerprint_mismatch`. Alert operator. Keep serving (operator may decide it's a legitimate update); UI offers "re-approve" + "de-register" actions. |
 | `model.version` | Audit `adapter.capability_drift`. Inform operator. Keep serving. |
-| `permissions.*` adding a new permission | **Blocking.** De-register adapter. Operator must re-approve from registration flow. |
+| `permissions.*` adding a new permission | **Blocking.** Adapter stays registered but flips back to `pending` and stops serving. Operator must re-approve the new scope from the permission UI. |
 | `permissions.*` removing a permission | Allow; record audit event. |
 | `endpoints.*` | Audit; no action. |
 | `scheduling.*` | Apply new values on next request. No audit. |

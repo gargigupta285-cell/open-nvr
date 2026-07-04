@@ -144,14 +144,19 @@ async def test_refresh_fingerprint_drift_emits_event(registry, adapter_stub, aud
 
 
 @pytest.mark.asyncio
-async def test_refresh_adds_permission_deregisters(registry, adapter_stub, audit):
-    """§11.3 blocking change: adding a permission de-registers the adapter."""
+async def test_refresh_adds_permission_moves_to_pending(registry, adapter_stub, audit):
+    """§8 / §11 blocking change: adding a permission KEEPS the adapter
+    but moves it back to ``pending`` so the operator UI can show
+    "new permission requested, re-approve" (it no longer vanishes)."""
     await registry.register("yolov8", adapter_stub.url)
-    # Adapter now claims it needs GPU permission — under §11.3 this is a
-    # blocking drift event.
+    # Adapter now claims it needs GPU permission — a newly-added scope.
     adapter_stub.update_capabilities(_base_caps(gpu=True))
     await registry.refresh("yolov8")
-    assert registry.get("yolov8") is None  # de-registered
+    adapter = registry.get("yolov8")
+    assert adapter is not None  # kept, not de-registered
+    assert adapter.approval_status == "pending"
+    assert "gpu" in adapter.pending_keys()
+    assert not adapter.is_serving_allowed
     rows = audit.read_all()
     drift = [r for r in rows if r["type"] == "adapter.capability_drift"]
     assert any("gpu" in r.get("added_permissions", []) for r in drift)
