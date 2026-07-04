@@ -46,12 +46,15 @@ export function CardContent({ children, className = '' }: { children: ReactNode;
 
 export type BadgeVariant = 'success' | 'warning' | 'destructive' | 'neutral' | 'info'
 
+// Theme-token driven (see the --badge-* variables in index.css): the dark
+// theme keeps the translucent deep tints, the light theme swaps to pale
+// tints with dark text — raw palette classes here would wash out on light.
 const BADGE_STYLES: Record<BadgeVariant, string> = {
-  success: 'bg-green-900/50 text-green-400',
-  warning: 'bg-yellow-900/50 text-yellow-400',
-  destructive: 'bg-red-900/50 text-red-400',
-  neutral: 'bg-gray-900/50 text-gray-400',
-  info: 'bg-blue-900/50 text-blue-400',
+  success: 'bg-[var(--badge-success-bg)] text-[var(--badge-success-text)]',
+  warning: 'bg-[var(--badge-warning-bg)] text-[var(--badge-warning-text)]',
+  destructive: 'bg-[var(--badge-destructive-bg)] text-[var(--badge-destructive-text)]',
+  neutral: 'bg-[var(--badge-neutral-bg)] text-[var(--badge-neutral-text)]',
+  info: 'bg-[var(--badge-info-bg)] text-[var(--badge-info-text)]',
 }
 
 export function Badge({ children, variant = 'neutral', className = '' }: { children: ReactNode; variant?: BadgeVariant; className?: string }) {
