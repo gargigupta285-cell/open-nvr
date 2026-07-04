@@ -19,10 +19,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# The app SDK owns the runtime stack (nats-py, PyYAML, httpx); only
+# paho-mqtt (the MQTT-discovery backend) stays app-side. Build from
+# the repo root so the SDK folder is in the build context.
+COPY sdk/opennvr-app-sdk /opt/opennvr-app-sdk
 RUN pip install --no-cache-dir \
-        "httpx>=0.27,<1.0" \
-        "PyYAML>=6.0,<7.0" \
-        "nats-py>=2.6,<3.0" \
+        /opt/opennvr-app-sdk \
         "paho-mqtt>=2.0,<3.0"
 
 COPY examples/home-assistant-relay/__init__.py            ./__init__.py

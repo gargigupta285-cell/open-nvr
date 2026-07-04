@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 """
-Abandoned-object (unattended-item) example app.
+Abandoned-object (unattended-item) example app — now on the
+``opennvr-app-sdk``.
 
 Fires an alert when a watched object (bag, suitcase, backpack, box, …)
 stays roughly stationary inside an operator-defined zone for longer
@@ -10,8 +11,23 @@ than a dwell threshold AND no person has been near it for a
 suppression window — the classic "unattended baggage" primitive for
 transport hubs, lobbies, and secure perimeters.
 
-Architecture
-------------
+What lives where after the migration
+------------------------------------
+
+The SDK's :class:`~opennvr_app_sdk.Detector` base owns the NATS
+subscribe loop, per-message JSON decoding + exception isolation, the
+``camera_id`` / ``result.detections`` payload walk, ``completed_at``
+timestamp parsing with a clock fallback, alert dispatch, the CLI, and
+signal handling. The zone geometry and the §11.5 alert stack live in
+``opennvr_app_sdk.geometry`` / ``opennvr_app_sdk.alerts`` (thin shims
+remain at ``zone.py`` / ``alerts.py`` for import compatibility).
+
+What's left here is the rule — the stationary-anchor state machine and
+the person-proximity suppression — plus this app's config parsing and
+its declarative MANIFEST.
+
+Architecture (unchanged)
+------------------------
 
 Subscribes to KAI-C's NATS inference broadcast surface like the other
 monitoring apps (zero adapter cost on top of the detection stream
@@ -25,16 +41,21 @@ How "abandoned" is decided
 --------------------------
 
 For each watched-object track in the zone we remember where it was
-first seen and when. A track counts as *stationary* while its center
-stays within ``move_tolerance_px`` of that anchor; if it moves further
-the anchor resets (the object was carried, not abandoned). When a
-track has been stationary in-zone for ``dwell_seconds`` AND no
+first seen and when (an SDK ``keyed_state`` record: the anchor point
+rides ``data``, the settle time is the record's ``first_seen`` — reset
+whenever the object moves). A track counts as *stationary* while its
+center stays within ``move_tolerance_px`` of that anchor; if it moves
+further the anchor resets (the object was carried, not abandoned).
+When a track has been stationary in-zone for ``dwell_seconds`` AND no
 ``person`` detection has been seen within ``person_radius_px`` of it
-during the last ``owner_grace_seconds``, we fire once.
+during the last ``owner_grace_seconds``, we fire once (the record's
+``alerted`` latch).
 
 The person-proximity suppression is what stops every parked bag next
 to its owner from alerting — an object is only "abandoned" once its
-likely owner has left its vicinity.
+likely owner has left its vicinity. The recent-people buffer stays a
+plain per-camera list (like package-delivery's person sightings): it
+is a time-windowed ring buffer, not TTL-keyed presence state.
 
 Run::
 
@@ -43,24 +64,55 @@ Run::
 """
 from __future__ import annotations
 
-import argparse
-import asyncio
-import datetime as _dt
-import json
 import logging
 import math
-import signal
-import sys
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
-import yaml
-
-from alerts import Alert, AlertDispatcher, build_dispatcher
-from zone import Point, Zone, bbox_center
+from opennvr_app_sdk import (
+    Alert,
+    AlertType,
+    AppManifest,
+    Detector,
+    Param,
+    app,
+)
+from opennvr_app_sdk.config import load_yaml
+from opennvr_app_sdk.geometry import Point, Zone, bbox_center
+from opennvr_app_sdk.state import StateRecord, keyed_state
 
 logger = logging.getLogger("abandoned-object")
+
+
+MANIFEST = AppManifest(
+    id="abandoned-object",
+    name="Abandoned Object",
+    version="1.0.0",
+    category="perimeter",
+    summary=(
+        "Alerts when a watched object sits stationary in a zone past a "
+        "dwell threshold with no person nearby."
+    ),
+    # Needs per-object identity on top of detection — chain a tracking
+    # adapter (e.g. bytetrack) so detections carry ``track_id``.
+    requires_tasks=["object_detection", "object_tracking"],
+    subscribes="opennvr.inference.>",
+    params=[
+        Param("object_labels", list, default=["backpack", "handbag", "suitcase"]),
+        Param("person_label", str, default="person"),
+        Param("dwell_seconds", float, default=30.0),
+        Param("move_tolerance_px", float, default=40.0,
+              description="Center drift allowed before the object counts as carried."),
+        Param("person_radius_px", float, default=250.0,
+              description="Person-proximity radius that suppresses the alert."),
+        Param("owner_grace_seconds", float, default=10.0,
+              description="How recently a nearby person still counts as the owner."),
+        Param("track_ttl_seconds", float, default=60.0,
+              description="Idle time after which an object track is forgotten."),
+        Param("zones", "geometry.polygon", per_camera=True),  # drawn in the catalog UI
+    ],
+    emits=[AlertType("abandoned-object", severity="high")],
+)
 
 
 # ── Config ─────────────────────────────────────────────────────────
@@ -94,9 +146,7 @@ class AppConfig:
 
 
 def load_config(path: str) -> AppConfig:
-    raw = yaml.safe_load(Path(path).read_text())
-    if not isinstance(raw, dict):
-        raise ValueError(f"config {path!r}: root must be a mapping")
+    raw = load_yaml(path)
 
     nats_url = str(raw.get("nats_url") or "").strip()
     if not nats_url:
@@ -183,58 +233,70 @@ def load_config(path: str) -> AppConfig:
 
 
 @dataclass
-class _ObjectTrack:
-    """Tracks one stationary-object candidate within a camera."""
+class _ObjectRecord(StateRecord):
+    """The SDK ``StateRecord`` under this app's historical vocabulary:
+    ``settled_since`` (when the object settled at its current anchor)
+    is the record's ``first_seen`` — the app resets it whenever the
+    object moves beyond tolerance, restarting the dwell clock. The
+    anchor point and label ride as typed fields; the ``alerted`` latch
+    comes straight from the base."""
 
-    label: str
-    anchor: Point          # where the object first settled
-    settled_since: float    # when it settled at the current anchor
-    last_seen: float
-    alerted: bool = False
+    label: str = ""
+    anchor: Point | None = None
 
-
-# ── Detector loop ──────────────────────────────────────────────────
+    @property
+    def settled_since(self) -> float:
+        return self.first_seen
 
 
 def _distance(a: Point, b: Point) -> float:
     return math.hypot(a.x - b.x, a.y - b.y)
 
 
-class AbandonedObjectDetector:
-    """Tracks stationary watched-objects in zones, suppresses those
-    near a person, and fires when one is unattended past the dwell
-    threshold."""
+# ── The rule ───────────────────────────────────────────────────────
 
-    def __init__(self, config: AppConfig, dispatcher: AlertDispatcher, *, clock: Any = None) -> None:
-        self._config = config
-        self._dispatcher = dispatcher
-        self._clock = clock or (lambda: _dt.datetime.now(_dt.timezone.utc))
-        # (camera_id, track_id) -> _ObjectTrack
-        self._objects: dict[tuple[str, str], _ObjectTrack] = {}
-        # (camera_id) -> list of (person_center, ts) seen recently
+
+class AbandonedObjectDetector(Detector):
+    """Tracks stationary watched-objects in zones (via the SDK's
+    Detector loop), suppresses those near a person, and fires when one
+    is unattended past the dwell threshold.
+
+    Stateful — one ``_ObjectRecord`` per (camera_id, track_id) key in
+    an SDK ``keyed_state``, plus a plain per-camera ring buffer of
+    recent person sightings for the proximity suppression. Both are
+    bounded: object tracks are GC'd after ``track_ttl_seconds`` idle,
+    the people buffer is trimmed to the owner-grace window.
+    """
+
+    manifest = MANIFEST
+
+    def setup(self) -> None:
+        # auto_gc off: the historical GC is scoped to the camera the
+        # current event belongs to (other cameras' tracks age on their
+        # own event streams) — driven explicitly in _gc instead of
+        # inside touch().
+        self._objects = keyed_state(
+            ttl=self.cfg.track_ttl_seconds,
+            auto_gc=False,
+            record_factory=_ObjectRecord,
+        )
+        # (camera_id) -> list of (person_center, ts) seen recently.
         self._recent_people: dict[str, list[tuple[Point, float]]] = {}
         self._warned_missing_track = False
-        self._stop_event = asyncio.Event()
-        self._nc: Any = None
 
-    def stop(self) -> None:
-        self._stop_event.set()
-
-    # ── Pure handler (testable without NATS) ──────────────────────
-
-    def handle_event(self, event: dict[str, Any]) -> list[Alert]:
-        if not isinstance(event, dict):
+    def on_detections(
+        self,
+        camera_id: str,
+        detections: list[dict[str, Any]],
+        event: dict[str, Any],
+    ) -> list[Alert]:
+        """The abandon rule for one event. Returns the alerts to fire
+        (the SDK base dispatches them). The existing tests drive it
+        through ``handle_event`` without spinning up NATS."""
+        camera = self.cfg.cameras.get(camera_id)
+        if camera is None:
             return []
-        camera_id = event.get("camera_id")
-        if not camera_id or camera_id not in self._config.cameras:
-            return []
-        camera = self._config.cameras[camera_id]
-        event_ts = self._parse_ts(event.get("completed_at"))
-
-        result = event.get("result") or {}
-        detections = result.get("detections") if isinstance(result, dict) else None
-        if not isinstance(detections, list):
-            return []
+        event_ts = self.parse_event_ts(event.get("completed_at"))
 
         self._gc(camera_id, event_ts)
 
@@ -243,7 +305,7 @@ class AbandonedObjectDetector:
         for det in detections:
             if not isinstance(det, dict):
                 continue
-            if str(det.get("label", "")).lower() != self._config.person_label:
+            if str(det.get("label", "")).lower() != self.cfg.person_label:
                 continue
             bbox = det.get("bbox")
             if isinstance(bbox, dict):
@@ -258,7 +320,7 @@ class AbandonedObjectDetector:
             if not isinstance(det, dict):
                 continue
             label = str(det.get("label", "")).lower()
-            if label not in self._config.object_labels:
+            if label not in self.cfg.object_labels:
                 continue
             track_id = det.get("track_id")
             if track_id is None:
@@ -278,70 +340,53 @@ class AbandonedObjectDetector:
             if not camera.zone.contains(center):
                 continue
             key = (camera_id, str(track_id))
-            track = self._objects.get(key)
-            if track is None:
-                self._objects[key] = _ObjectTrack(
-                    label=label, anchor=center,
-                    settled_since=event_ts, last_seen=event_ts,
-                )
+            is_new = key not in self._objects
+            track: _ObjectRecord = self._objects.touch(key, at=event_ts)
+            if is_new:
+                track.label = label
+                track.anchor = center
                 continue
-            track.last_seen = event_ts
+            assert track.anchor is not None
             # Moved beyond tolerance → it was carried; reset the anchor
             # and the dwell clock, clear any prior alert latch.
-            if _distance(center, track.anchor) > self._config.move_tolerance_px:
+            if _distance(center, track.anchor) > self.cfg.move_tolerance_px:
                 track.anchor = center
-                track.settled_since = event_ts
+                track.first_seen = event_ts  # settled_since reset
                 track.alerted = False
                 continue
             dwell = event_ts - track.settled_since
-            if dwell < self._config.dwell_seconds or track.alerted:
+            if dwell < self.cfg.dwell_seconds or track.alerted:
                 continue
             # Suppress if a person was near the object recently.
             if self._person_near(camera_id, track.anchor, event_ts):
                 continue
-            alert = self._build_alert(
+            fired.append(self._build_alert(
                 camera=camera, label=track.label, track_id=str(track_id),
                 dwell_seconds=dwell, anchor=track.anchor, event=event,
-            )
-            self._dispatcher.fire(alert)
-            fired.append(alert)
+            ))
             track.alerted = True
         return fired
 
     def _person_near(self, camera_id: str, point: Point, now_ts: float) -> bool:
-        cutoff = now_ts - self._config.owner_grace_seconds
+        cutoff = now_ts - self.cfg.owner_grace_seconds
         for p, ts in self._recent_people.get(camera_id, []):
-            if ts >= cutoff and _distance(p, point) <= self._config.person_radius_px:
+            if ts >= cutoff and _distance(p, point) <= self.cfg.person_radius_px:
                 return True
         return False
 
     def _gc(self, camera_id: str, now_ts: float) -> None:
-        # Forget idle object tracks.
-        obj_cutoff = now_ts - self._config.track_ttl_seconds
-        stale = [
-            k for k, t in self._objects.items()
-            if k[0] == camera_id and t.last_seen < obj_cutoff
-        ]
-        for k in stale:
-            del self._objects[k]
+        # Forget idle object tracks — scoped to this camera only.
+        obj_cutoff = now_ts - self.cfg.track_ttl_seconds
+        for key, track in self._objects.items():
+            if key[0] == camera_id and track.last_seen < obj_cutoff:
+                self._objects.pop(key)
         # Trim the recent-people buffer to the owner-grace window.
-        ppl_cutoff = now_ts - self._config.owner_grace_seconds
+        ppl_cutoff = now_ts - self.cfg.owner_grace_seconds
         bucket = self._recent_people.get(camera_id)
         if bucket:
             self._recent_people[camera_id] = [
                 (p, ts) for p, ts in bucket if ts >= ppl_cutoff
             ]
-
-    def _parse_ts(self, raw: Any) -> float:
-        if isinstance(raw, str):
-            try:
-                ts = _dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=_dt.timezone.utc)
-                return ts.timestamp()
-            except ValueError:
-                pass
-        return self._clock().timestamp()
 
     def _build_alert(
         self, *, camera: CameraZone, label: str, track_id: str,
@@ -371,101 +416,19 @@ class AbandonedObjectDetector:
             tags=["abandoned-object", camera.zone.name, label],
         )
 
-    # ── NATS loop ─────────────────────────────────────────────────
 
-    async def run(self, *, once: bool = False) -> None:
-        import nats
-
-        connect_kwargs: dict[str, Any] = {
-            "servers": [self._config.nats_url],
-            "connect_timeout": 5.0,
-            "reconnect_time_wait": 1.0,
-            "max_reconnect_attempts": -1,
-        }
-        if self._config.nats_token:
-            connect_kwargs["token"] = self._config.nats_token
-        self._nc = await nats.connect(**connect_kwargs)
-        logger.info(
-            "abandoned-object started: %d cameras, objects=%s, dwell=%.0fs, "
-            "person_radius=%.0fpx, subject=%r",
-            len(self._config.cameras), self._config.object_labels,
-            self._config.dwell_seconds, self._config.person_radius_px,
-            self._config.subject_pattern,
-        )
-        try:
-            sub = await self._nc.subscribe(self._config.subject_pattern)
-            async for msg in sub.messages:
-                try:
-                    payload = json.loads(msg.data)
-                except json.JSONDecodeError as exc:
-                    logger.warning("skipping non-JSON message on %r: %s", msg.subject, exc)
-                    continue
-                try:
-                    self.handle_event(payload)
-                except Exception:
-                    logger.exception("handle_event failed for subject=%s", msg.subject)
-                if once:
-                    self.stop()
-                if self._stop_event.is_set():
-                    break
-        finally:
-            try:
-                await self._nc.drain()
-            except Exception:
-                try:
-                    await self._nc.close()
-                except Exception:
-                    pass
+# Spec-preferred short name; ``AbandonedObjectDetector`` is the
+# historical one the tests (and README snippets) import.
+AbandonedObject = AbandonedObjectDetector
 
 
 # ── CLI ────────────────────────────────────────────────────────────
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="abandoned-object",
-        description="Subscribe to KAI-C inference events; alert on unattended objects.",
-    )
-    parser.add_argument("--config", required=True, help="Path to config.yml")
-    parser.add_argument("--once", action="store_true", help="Process one event then exit.")
-    parser.add_argument(
-        "--log-level", default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-    )
-    args = parser.parse_args(argv)
-
-    logging.basicConfig(
-        level=args.log_level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    try:
-        config = load_config(args.config)
-    except (ValueError, OSError) as exc:
-        print(f"config error: {exc}", file=sys.stderr)
-        return 2
-
-    dispatcher = build_dispatcher(
-        webhook_url=config.webhook_url,
-        nats_alerts_url=config.nats_alerts_url,
-        nats_alerts_token=config.nats_alerts_token,
-        nats_alerts_subject_prefix=config.nats_alerts_subject_prefix,
-    )
-    detector = AbandonedObjectDetector(config, dispatcher)
-
-    loop = asyncio.new_event_loop()
-
-    def _handle_signal(_signum, _frame):
-        logger.info("signal received, stopping…")
-        loop.call_soon_threadsafe(detector.stop)
-
-    signal.signal(signal.SIGINT, _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
-    try:
-        loop.run_until_complete(detector.run(once=args.once))
-    finally:
-        dispatcher.close()
-        loop.close()
-    return 0
+    """Console-script entry point (``[project.scripts]``). The SDK
+    runner owns argparse, logging, signals, and the dispatcher."""
+    return app(AbandonedObjectDetector, load_config=load_config).run(argv)
 
 
 if __name__ == "__main__":  # pragma: no cover

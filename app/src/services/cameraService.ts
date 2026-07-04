@@ -59,7 +59,7 @@ export const cameraService = {
   getCameraMediaMTXStatus: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}/mediamtx-status`),
 
   // ONVIF
-  onvifDiscover: () => api.get('/api/v1/discover'),
+  onvifDiscover: (params?: { cidr?: string | string[] }) => api.get('/api/v1/discover', { params }),
   onvifConnect: (
     ip: string,
     params: { username: string; password: string; port?: number }
@@ -84,4 +84,12 @@ export const cameraService = {
     ip: string,
     params: { username: string; password: string; profileToken: string; action: 'setPreset' | 'getPresets' | 'gotoPreset'; name?: string; presetToken?: string; port?: number }
   ) => api.post(`/api/v1/camera/${encodeURIComponent(ip)}/ptz/preset`, '', { params }),
+  onvifGetTime: (
+    ip: string,
+    params: { port?: number }
+  ) => api.get(`/api/v1/camera/${encodeURIComponent(ip)}/time`, { params }),
+  onvifSyncTime: (
+    ip: string,
+    params: { username: string; password: string; port?: number }
+  ) => api.post(`/api/v1/camera/${encodeURIComponent(ip)}/time/sync`, '', { params }),
 }

@@ -1177,6 +1177,7 @@ class NetworkConfig(BaseModel):
     mtu: int = 1500
     description: str | None = None
     subnet_cidr: str | None = None
+    scan_subnets: list[str] | None = None
     blacklisted_ips: list[str] | None = None
 
     @field_validator("ipv4_address", "ipv4_gateway", "preferred_dns", "alternate_dns")

@@ -5,13 +5,27 @@ description = "OpenNVR abandoned-object example app (NATS-subscribing monitoring
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0" }
 
+# The SDK owns the runtime stack (nats-py subscribe loop, httpx alert
+# webhooks, PyYAML config), the zone geometry, and the keyed TTL state
+# — see docs/design/app-sdk-spec.html. What's left in-repo is the rule
+# (the stationary-anchor state machine + person-proximity suppression)
+# plus this app's config parsing.
 dependencies = [
-    "nats-py>=2.6",
-    "httpx>=0.27,<1.0",
-    "PyYAML>=6.0,<7.0",
+    "opennvr-app-sdk",
 ]
 
+[tool.uv.sources]
+opennvr-app-sdk = { path = "../../sdk/opennvr-app-sdk", editable = true }
+
 [project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+]
+
+# Mirrors the optional-dependencies group so a plain ``uv sync`` gets a
+# test-ready environment (uv installs the ``dev`` group by default).
+[dependency-groups]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23",

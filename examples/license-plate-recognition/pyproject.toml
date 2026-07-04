@@ -5,18 +5,28 @@ description = "OpenNVR license-plate-recognition example app — drives YOLOv8 +
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0" }
 
-# Deliberately minimal — the example is meant to be a clean
-# template for community contributors. httpx for the KAI-C calls,
-# PyYAML for config, nats-py for the optional alert fan-out, and
-# Pillow for cropping the vehicle bbox before the OCR call.
+# The SDK owns the runtime stack (httpx KAI-C calls + webhooks, PyYAML
+# config, nats-py alert fan-out, the FrameApp poll loop and frame
+# sources) — see docs/design/app-sdk-spec.html. Pillow stays local:
+# cropping the vehicle bbox before the OCR call is this app's
+# pipeline concern.
 dependencies = [
-    "httpx>=0.27,<1.0",
-    "PyYAML>=6.0,<7.0",
-    "nats-py>=2.6",
+    "opennvr-app-sdk",
     "Pillow>=10.0,<12.0",
 ]
 
+[tool.uv.sources]
+opennvr-app-sdk = { path = "../../sdk/opennvr-app-sdk", editable = true }
+
 [project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+]
+
+# Mirrors the optional-dependencies group so a plain ``uv sync`` gets a
+# test-ready environment (uv installs the ``dev`` group by default).
+[dependency-groups]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23",

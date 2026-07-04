@@ -2,13 +2,38 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 """
-home-assistant-relay — bridge OpenNVR alerts into Home Assistant.
+home-assistant-relay — bridge OpenNVR alerts into Home Assistant,
+now on the ``opennvr-app-sdk``.
 
 Subscribes to ``opennvr.alerts.>`` on NATS, runs each alert through
 the HA mapper (alert envelope → HA entity definition + state),
 publishes via either MQTT discovery or HA's REST API, and schedules
 an auto-off flip for binary_sensors after a configurable window so
 the dashboard reads like an event log, not a sticky alarm.
+
+What lives where after the migration
+------------------------------------
+
+This app is an :class:`~opennvr_app_sdk.AlertSubscriber` (App SDK spec
+§02, the "pass-through" shape — same archetype as the reference
+``alerts-subscriber``). The SDK base owns the NATS connect / subscribe
+/ drain loop, the §03 contract endpoints, and the CLI / signal
+lifecycle behind ``alert_app(HomeAssistantRelay).run()``.
+
+Deliberately app-side (the "don't force it" clause):
+
+* ``ha_mapper.py`` — the alert → HA-entity mapping rules and override
+  table. HA vocabulary (device_class, ``binary_sensor`` vs ``sensor``)
+  is this bridge's business, not the SDK's.
+* ``publishers.py`` — the MQTT-discovery and HA-REST clients. Both
+  are **async** (paho bridged via ``asyncio.to_thread``, httpx's
+  AsyncClient), which is also why this app overrides the base's
+  per-message hook: ``_handle_raw`` here is a coroutine (the shared
+  NATS loop awaits awaitable results), so the sink can ``await`` its
+  publisher instead of squeezing async I/O through the sync
+  ``on_alert`` hook.
+* the auto-off generation machinery — HA-entity semantics, not alert
+  semantics.
 
 Why MQTT discovery is the default
 ----------------------------------
@@ -28,17 +53,20 @@ Run:
 """
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import logging
-import signal
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
+from opennvr_app_sdk import (
+    AlertSubscriber,
+    AppManifest,
+    Param,
+    alert_app,
+)
+from opennvr_app_sdk.config import load_yaml
 
 from ha_mapper import HaEntity, HaMapper, MappingOverride, parse_overrides
 from publishers import (
@@ -50,6 +78,30 @@ from publishers import (
 )
 
 logger = logging.getLogger("home-assistant-relay")
+
+
+MANIFEST = AppManifest(
+    id="home-assistant-relay",
+    name="Home Assistant Relay",
+    version="1.0.0",
+    category="integration",
+    summary=(
+        "Bridges the opennvr.alerts.* fan-out into Home Assistant "
+        "entities via MQTT discovery or the HA REST API, with "
+        "auto-off windows so sensors read like an event log."
+    ),
+    requires_tasks=[],  # rides the alert bus; no adapter prerequisites
+    subscribes="opennvr.alerts.>",
+    params=[
+        Param("subject_pattern", str, default="opennvr.alerts.>"),
+        Param("backend", str, default="mqtt",
+              description="'mqtt' (discovery; preferred) or 'rest'."),
+        Param("default_auto_off_seconds", int, default=30,
+              description="Auto-off window for binary_sensors when a "
+                          "mapping override doesn't set one."),
+    ],
+    emits=[],  # pass-through: consumes alerts, emits none
+)
 
 
 # ── Config ─────────────────────────────────────────────────────────
@@ -80,9 +132,10 @@ class AppConfig:
 
 
 def load_config(path: str | Path) -> AppConfig:
-    raw = yaml.safe_load(Path(path).read_text())
-    if not isinstance(raw, dict):
-        raise SystemExit(f"config file {path} did not parse to a dict")
+    # Historical quirk kept on purpose: this app's validation raises
+    # ``SystemExit`` with an operator-facing message (the other
+    # examples raise ``ValueError``); its tests pin that contract.
+    raw = load_yaml(path)
 
     nats_url = str(raw.get("nats_url") or "").strip()
     if not nats_url:
@@ -189,13 +242,20 @@ def load_config(path: str | Path) -> AppConfig:
 # ── Relay daemon ───────────────────────────────────────────────────
 
 
-class HomeAssistantRelay:
+class HomeAssistantRelay(AlertSubscriber):
     """The daemon. One instance per process.
 
     Lifecycle:
-      ``await relay.run()`` — connects to NATS, subscribes, dispatches
-      every alert through the mapper into the publisher. Blocks until
-      ``stop()`` (or SIGINT / SIGTERM) fires.
+      ``await relay.run()`` — the SDK base connects to NATS,
+      subscribes, and drives every alert through the mapper into the
+      publisher. Blocks until ``stop()`` (or SIGINT / SIGTERM via the
+      runner) fires.
+
+    Async sink:
+      Both publishers are awaitable, so this app overrides the base's
+      ``_handle_raw`` as a *coroutine* (the SDK's NATS loop awaits
+      awaitable results) instead of implementing the sync ``on_alert``
+      hook. Decode + isolation semantics mirror the base method.
 
     Auto-off:
       For each binary_sensor we publish, schedule a task that flips
@@ -205,16 +265,25 @@ class HomeAssistantRelay:
       entity "ON" as long as alerts keep firing.
     """
 
+    manifest = MANIFEST
+
     def __init__(
         self,
         config: AppConfig,
-        mapper: HaMapper,
-        publisher: Publisher,
+        mapper: HaMapper | None = None,
+        publisher: Publisher | None = None,
     ) -> None:
-        self._config = config
-        self._mapper = mapper
-        self._publisher = publisher
-        self._stop_event = asyncio.Event()
+        # ``mapper`` / ``publisher`` are injectable for the tests (the
+        # historical 3-arg constructor); the SDK runner constructs the
+        # relay with config alone and the defaults are built from it.
+        self._mapper = mapper or HaMapper(
+            overrides=config.overrides,
+            default_auto_off_seconds=config.default_auto_off_seconds,
+        )
+        self._publisher = publisher or build_publisher(config)
+        super().__init__(config)
+
+    def setup(self) -> None:
         self._auto_off_tasks: dict[str, asyncio.Task] = {}
         # Per-entity monotonic generation counter. Each fresh alert
         # bumps the entity's generation; the auto-off task captures
@@ -232,58 +301,27 @@ class HomeAssistantRelay:
         self._failed_count = 0
         self._skipped_count = 0
 
-    def stop(self) -> None:
-        self._stop_event.set()
-
-    async def run(self) -> None:
-        # Lazy import — keeps the module importable in test envs
-        # that don't have nats-py.
-        import nats  # type: ignore
-
-        connect_kwargs: dict[str, Any] = {
-            "servers": [self._config.nats_url],
-            "connect_timeout": 5.0,
-            "reconnect_time_wait": 1.0,
-            "max_reconnect_attempts": -1,
-        }
-        if self._config.nats_token:
-            connect_kwargs["token"] = self._config.nats_token
-        nc = await nats.connect(**connect_kwargs)
+    async def run(self, *, once: bool = False) -> None:
+        # The historical ``--once`` contract stops after the first
+        # *published* alert, not the first message — unmappable or
+        # failed alerts keep the smoke test waiting. Map the runner's
+        # ``once`` onto that instead of the loop-level stop.
+        if once:
+            self._once_mode = True
         logger.info(
-            "connected to %s, subscribing to %r (backend=%s)",
-            self._config.nats_url,
-            self._config.subject_pattern,
-            self._config.backend,
+            "subscribing to %r on %s (backend=%s)",
+            self.cfg.subject_pattern,
+            self.cfg.nats_url,
+            self.cfg.backend,
         )
         try:
-            sub = await nc.subscribe(self._config.subject_pattern)
-            async for msg in sub.messages:
-                if self._stop_event.is_set():
-                    break
-                try:
-                    payload = json.loads(msg.data)
-                except json.JSONDecodeError as exc:
-                    logger.warning(
-                        "skipping non-JSON message on %r: %s",
-                        msg.subject, exc,
-                    )
-                    continue
-                await self._handle_alert(payload)
-                if self._stop_event.is_set():
-                    break
+            await super().run(once=False)
         finally:
             # Cancel any pending auto-off tasks so we don't block on
             # them — operator wants a fast exit.
             for task in self._auto_off_tasks.values():
                 task.cancel()
             self._auto_off_tasks.clear()
-            try:
-                await nc.drain()
-            except Exception:
-                try:
-                    await nc.close()
-                except Exception:
-                    logger.exception("nats close failed")
             try:
                 await self._publisher.aclose()
             except Exception:
@@ -294,6 +332,36 @@ class HomeAssistantRelay:
                 self._received_count, self._published_count,
                 self._failed_count, self._skipped_count,
             )
+
+    def state_snapshot(self) -> dict[str, Any]:
+        """``GET /state`` — running relay counters."""
+        return {
+            "received": self._received_count,
+            "published": self._published_count,
+            "failed": self._failed_count,
+            "skipped": self._skipped_count,
+            "pending_auto_off": len(self._auto_off_tasks),
+        }
+
+    # ── Per-message handling (async override of the SDK hook) ─────
+
+    async def _handle_raw(self, data: bytes, *, subject: str = "") -> bool:
+        """Async twin of :meth:`AlertSubscriber._handle_raw` — same
+        decode + isolation contract, but the sink is awaited so the
+        publishers' async I/O stays on the event loop."""
+        try:
+            payload = json.loads(data)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            logger.warning("skipping non-JSON message on %r: %s", subject, exc)
+            return False
+        self._contract_note_event()
+        try:
+            await self._handle_alert(payload)
+        except Exception:
+            # No single alert failure should kill the bridge.
+            logger.exception("alert handling failed for subject=%s", subject)
+            return False
+        return True
 
     async def step(self, alert: dict[str, Any]) -> None:
         """Process one alert. Public so tests can drive without NATS."""
@@ -381,63 +449,9 @@ def build_publisher(config: AppConfig) -> Publisher:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="home-assistant-relay",
-        description=(
-            "Bridge OpenNVR NATS alerts into Home Assistant entities."
-        ),
-    )
-    parser.add_argument("--config", required=True, help="Path to config.yml")
-    parser.add_argument(
-        "--once", action="store_true",
-        help="Process one alert and exit (smoke testing).",
-    )
-    parser.add_argument(
-        "--log-level", default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-    )
-    args = parser.parse_args(argv)
-
-    logging.basicConfig(
-        level=args.log_level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-
-    try:
-        config = load_config(args.config)
-    except OSError as exc:
-        # File-not-found / permission-denied → friendly stderr line
-        # + exit 2 (same shape as the other gallery examples).
-        # ``load_config`` itself raises SystemExit on schema errors,
-        # which propagates naturally with its own message + code.
-        print(f"config error: {exc}", file=sys.stderr)
-        return 2
-
-    mapper = HaMapper(
-        overrides=config.overrides,
-        default_auto_off_seconds=config.default_auto_off_seconds,
-    )
-    publisher = build_publisher(config)
-    relay = HomeAssistantRelay(config, mapper, publisher)
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    def _handle_signal(_signum, _frame):
-        logger.info("signal received, stopping…")
-        loop.call_soon_threadsafe(relay.stop)
-
-    signal.signal(signal.SIGINT, _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
-
-    if args.once:
-        relay._once_mode = True  # type: ignore[attr-defined]
-
-    try:
-        loop.run_until_complete(relay.run())
-    finally:
-        loop.close()
-    return 0
+    """Console-script entry point. The SDK runner owns argparse,
+    logging, signals, and the loop lifecycle."""
+    return alert_app(HomeAssistantRelay, load_config=load_config).run(argv)
 
 
 if __name__ == "__main__":  # pragma: no cover

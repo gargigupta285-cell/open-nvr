@@ -36,23 +36,33 @@ from services.adapter_contract import build_infer_payload, flatten_infer_respons
 from services.frame_capture import PersistentCapturePool
 
 # Frame-transport mode for the live inference loop.
-#   "governed" → AI Adapter Contract v1 over KAI-C's governed
+#   "governed" (default) → AI Adapter Contract v1 over KAI-C's governed
 #               /api/v1/infer/{adapter} surface: persistent-pool JPEG
 #               bytes, base64 in the body (+ camera_id + internal key).
 #               KAI-C applies sovereignty/fingerprint governance AND
 #               publishes the result on NATS, so subscriber example apps
-#               see the server's own camera inference. Requires the
-#               adapter to be registered in KAI-C's v1 registry.
-#   "v1" (default) → same contract body, but POSTed to the legacy
-#               /infer/local passthrough (no NATS/governance). Safe when
-#               the v1 registry isn't configured. Works with SDK
-#               adapters (yolov8, blip, vlm, …); no shared volume.
+#               and the metrics tap see the server's own camera
+#               inference. KAI-C seeds its v1 registry from
+#               ADAPTER_REGISTRY at startup, so adapters that were
+#               reachable at KAI-C boot are governed with no extra setup;
+#               an adapter that came up later can be re-registered via
+#               POST /api/v1/adapters/register.
+#   "v1"      → same contract body, but POSTed to the legacy
+#               /infer/local passthrough (no NATS, no audit, no
+#               correlation IDs). Escape hatch for registry problems.
 #   "legacy"  → original behaviour: write latest.jpg, send an
 #               opennvr:// file URI, expect a flat response. Only works
 #               with the in-tree app/ adapters over a shared volume.
-# Default to v1 (contract-correct + safe). Set "governed" once adapters
-# are registered to get NATS fan-out + governance from server inference.
-_ADAPTER_CONTRACT_MODE = os.environ.get("OPENNVR_ADAPTER_CONTRACT", "v1").strip().lower()
+_ADAPTER_CONTRACT_MODE = os.environ.get("OPENNVR_ADAPTER_CONTRACT", "governed").strip().lower()
+if _ADAPTER_CONTRACT_MODE not in ("governed", "v1", "legacy"):
+    # A typo must not silently demote inference to the ungoverned path.
+    import logging
+
+    logging.getLogger("main").warning(
+        "OPENNVR_ADAPTER_CONTRACT=%r is not one of governed|v1|legacy; using 'governed'",
+        _ADAPTER_CONTRACT_MODE,
+    )
+    _ADAPTER_CONTRACT_MODE = "governed"
 
 try:
     import cv2
@@ -903,6 +913,38 @@ class KaiCService:
         except Exception as e:
             main_logger.error(f"Failed to fetch schema from KAI-C: {e}")
             raise
+
+    async def get_adapter_metrics(self, adapter_name: str) -> dict[str, Any]:
+        """
+        Fetch the windowed metrics rollup for one adapter from KAI-C's
+        governed surface (observability spec §05).
+
+        Flow: Backend → KAI-C → (KAI-C serves its in-memory rollup,
+        fed by the /metrics scrape on the 60s registry poll)
+
+        Args:
+            adapter_name: The registered adapter name.
+
+        Returns:
+            The rollup dict (latency percentiles, outcome counts,
+            saturation gauges, fingerprint-change timeline).
+
+        Raises:
+            httpx.HTTPStatusError: KAI-C answered non-2xx (404 for an
+                unknown adapter — the router maps status codes).
+            httpx.HTTPError: KAI-C unreachable.
+        """
+        headers = {"Accept": "application/json"}
+        internal_key = self._internal_api_key()
+        if internal_key:
+            headers["X-Internal-Api-Key"] = internal_key
+        response = await self.http_client.get(
+            f"{self.kai_c_url}/api/v1/adapters/{urlquote(adapter_name, safe='')}/metrics",
+            timeout=10.0,
+            headers=headers,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def close(self):
         """Cleanup resources."""

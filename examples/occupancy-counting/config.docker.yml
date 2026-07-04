@@ -1,0 +1,60 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# occupancy-counting config consumed by docker-compose.apps.yml.
+#
+# Variables of the form ${VAR} are substituted by the
+# occupancy-counting-config-init container at compose-up time (busybox
+# sed, same pattern as the camera-agent overlay). Only the variables
+# listed in the init container are replaced — everything else is left
+# untouched.
+#
+# DO NOT edit the substituted values directly. To change the secret,
+# update .env and re-run ``docker compose up`` so the init container
+# re-templates the file.
+
+# ── NATS endpoint (KAI-C's event bus, compose service ``nats``) ────
+nats_url: "nats://nats:4222"
+# The standard stack runs NATS with ``--auth INTERNAL_API_KEY``.
+nats_token: "${INTERNAL_API_KEY}"
+
+subject_pattern: "opennvr.inference.>"
+
+# ── What to count / thresholds — EDIT for your scene ───────────────
+watch_labels:
+  - "person"
+max_occupancy: 10
+min_occupancy: null
+debounce_frames: 1
+clear_alerts: false
+
+# ── Alert delivery ─────────────────────────────────────────────────
+# Alerts always go to stdout (``docker compose logs occupancy-counting``).
+webhook_url: null
+# Fan alerts back onto the bus so the operator-UI alerts inbox and any
+# other subscriber pick them up without per-app webhooks.
+nats_alerts_url: "nats://nats:4222"
+nats_alerts_token: "${INTERNAL_API_KEY}"
+
+# ── Cameras — EDIT: camera_id must match KAI-C's event subjects ────
+cameras:
+  - camera_id: "cam-1"
+    frame_width: 1920
+    frame_height: 1080
+    zone_name: "full-frame"
+    max_occupancy: 10
+    zone:
+      - [0, 0]
+      - [1920, 0]
+      - [1920, 1080]
+      - [0, 1080]
+
+# ── App contract (spec §03) — powers the App Catalog ───────────────
+# The SDK serves /health /manifest /state on contract_port and
+# self-registers with the OpenNVR app registry on boot. The
+# registration token comes from the OPENNVR_INTERNAL_API_KEY
+# environment variable set by the overlay, so it is not templated here.
+contract_port: 9201
+contract_bind_host: "0.0.0.0"
+contract_host: "occupancy-counting"   # the compose service name
+opennvr_url: "http://opennvr-core:8000"

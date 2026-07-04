@@ -17,8 +17,11 @@
  */
 
 import { useEffect, useMemo, useState } from 'react'
+import { FileSearch } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { Modal } from '../components/Modal'
+import { Button, EmptyState, PageHeader, Table, THead, TBody, TR, TH, TD, Skeleton } from '../components/ui'
+import { extractApiError } from '../lib/apiError'
 
 type LogItem = {
   id: number
@@ -65,7 +68,7 @@ export function Events() {
           setTotal(data.total || 0)
         }
       } catch (e: any) {
-        if (!cancelled) setError(e?.response?.data?.detail || e.message || 'Failed to load logs')
+        if (!cancelled) setError(extractApiError(e, 'Failed to load logs'))
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -102,7 +105,7 @@ export function Events() {
 
   return (
     <section className="space-y-4">
-      <h1 className="text-lg font-semibold">Audit Logs</h1>
+      <PageHeader title="Audit Logs" description="Every configuration change, login, and administrative action recorded by the platform." />
 
       {/* Filters */}
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 text-sm">
@@ -135,49 +138,52 @@ export function Events() {
         </select>
       </div>
 
-      <div className="overflow-auto border border-neutral-700">
-        <table className="w-full text-sm table-fixed">
-          <thead className="bg-[var(--panel-2)] text-left">
-            <tr>
-              <th className="p-2 w-[180px]">Time</th>
-              <th className="p-2 w-[140px]">User</th>
-              <th className="p-2 w-[220px]">Action</th>
-              <th className="p-2 w-[260px]">Entity</th>
-              <th className="p-2 w-[100px]">Details</th>
-              <th className="p-2 w-[120px]">IP</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading && (
-              <tr><td className="p-3" colSpan={6}>Loading…</td></tr>
-            )}
-            {!loading && logs.length === 0 && (
-              <tr><td className="p-3 text-center text-[var(--text-dim)]" colSpan={6}>No logs</td></tr>
-            )}
-            {!loading && logs.map((log) => (
-              <tr key={log.id} className="odd:bg-[var(--bg-2)] even:bg-[var(--panel)] align-top">
-                <td className="p-2 whitespace-nowrap">{new Date(log.timestamp).toLocaleString()}</td>
-                <td className="p-2 whitespace-nowrap" title={String(log.username || log.user_id || '-')}>{log.username || log.user_id || '-'}</td>
-                <td className="p-2 truncate" title={log.action}>{friendlyAction(log.action)}</td>
-                <td className="p-2 truncate" title={`${log.entity_type || '-'}${log.entity_id ? `:${log.entity_id}` : ''}`}>{log.entity_type || '-'}{log.entity_id ? `:${log.entity_id}` : ''}</td>
-                <td className="p-2">
-                  <button
-                    className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)] text-xs"
-                    onClick={() => setSelected(log)}
-                  >View</button>
-                </td>
-                <td className="p-2">{log.ip || '-'}</td>
-              </tr>
+      {loading ? (
+        <div className="space-y-2">
+          {Array.from({ length: 8 }).map((_, i) => (
+            <Skeleton key={i} className="h-9" />
+          ))}
+        </div>
+      ) : logs.length === 0 ? (
+        <EmptyState
+          icon={<FileSearch size={28} />}
+          title="No audit log entries match"
+          description={action || entityType || userId ? 'Try clearing the filters above — entries exist but none match the current filter.' : 'Actions like logins, camera changes, and user management will appear here as they happen.'}
+        />
+      ) : (
+        <Table className="table-fixed">
+          <THead>
+            <TR>
+              <TH className="w-[180px]">Time</TH>
+              <TH className="w-[140px]">User</TH>
+              <TH className="w-[220px]">Action</TH>
+              <TH className="w-[260px]">Entity</TH>
+              <TH className="w-[100px]">Details</TH>
+              <TH className="w-[120px]">IP</TH>
+            </TR>
+          </THead>
+          <TBody striped>
+            {logs.map((log) => (
+              <TR key={log.id} className="align-top">
+                <TD className="whitespace-nowrap">{new Date(log.timestamp).toLocaleString()}</TD>
+                <TD className="whitespace-nowrap" title={String(log.username || log.user_id || '-')}>{log.username || log.user_id || '-'}</TD>
+                <TD className="truncate" title={log.action}>{friendlyAction(log.action)}</TD>
+                <TD className="truncate" title={`${log.entity_type || '-'}${log.entity_id ? `:${log.entity_id}` : ''}`}>{log.entity_type || '-'}{log.entity_id ? `:${log.entity_id}` : ''}</TD>
+                <TD>
+                  <Button className="text-xs px-2 py-1" onClick={() => setSelected(log)}>View</Button>
+                </TD>
+                <TD>{log.ip || '-'}</TD>
+              </TR>
             ))}
-          </tbody>
-        </table>
-      </div>
+          </TBody>
+        </Table>
+      )}
 
       {/* Pagination */}
       <div className="flex items-center gap-2 text-sm mt-2">
-        <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" disabled={page <= 1} onClick={() => goto(page - 1)}>Prev</button>
+        <Button disabled={page <= 1} onClick={() => goto(page - 1)}>Prev</Button>
         <span>Page {page} / {totalPages} • {total} total</span>
-        <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" disabled={page >= totalPages} onClick={() => goto(page + 1)}>Next</button>
+        <Button disabled={page >= totalPages} onClick={() => goto(page + 1)}>Next</Button>
       </div>
 
       {error && <div className="text-red-400 text-sm">{error}</div>}

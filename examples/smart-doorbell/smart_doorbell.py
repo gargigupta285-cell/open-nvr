@@ -6,12 +6,27 @@ smart-doorbell — poll a doorbell camera, recognise faces via the
 InsightFace adapter through KAI-C, fire alerts with severity that
 depends on whether the face is registered.
 
-Pipeline mirrors intrusion-detection: HTTP-poll each camera, run
-inference via KAI-C, dispatch alerts. The interesting bit specific
-to Smart Doorbell is the **face-DB enrollment flow** — operators
-register family members ahead of time via the ``enroll`` CLI
-subcommand below, which talks directly to the InsightFace adapter's
-``/faces/register`` route (KAI-C does not proxy that surface).
+Now built on the ``opennvr-app-sdk``. The SDK's
+:class:`~opennvr_app_sdk.FrameApp` base owns the poll loop, per-camera
+fetch/rule failure isolation, and the §03 contract endpoints. The
+frame sources and the §11.5 alert stack moved into the SDK (thin shims
+remain at ``frame_sources.py`` / ``alerts.py`` for import
+compatibility).
+
+What stays here — deliberately:
+
+* the **face-DB enrollment flow** — operators register family members
+  ahead of time via the ``enroll`` CLI subcommand below, which talks
+  directly to the InsightFace adapter's ``/faces/register`` route
+  (KAI-C does not proxy that surface, so neither does the SDK);
+* ``KaicRecognitionClient`` — this app's recognition call carries its
+  own body shape (``task`` + ``threshold``, no ``camera_id``); the SDK
+  ``KaiCClient`` would add ``camera_id``, changing the wire body
+  deployed adapters see;
+* the recognised/unknown severity routing, the snapshot-for-strangers
+  policy, and the dedup ledger (a plain dict keyed by
+  ``(camera, person-or-unknown-bucket)`` — its shape is pinned by this
+  app's tests).
 
 Run as a daemon:
     python smart_doorbell.py daemon --config config.yml
@@ -30,6 +45,7 @@ List enrolled faces:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import json
 import logging
@@ -39,7 +55,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import httpx
 import yaml
@@ -59,6 +75,8 @@ from face_recognition_pipeline import (
     RecognitionClient,
 )
 from frame_sources import FrameSource, FrameSourceError, build_frame_source
+from opennvr_app_sdk import AlertType, AppManifest, FrameApp, Param
+from opennvr_app_sdk.frame_sources import DictFrameSource
 
 logger = logging.getLogger("smart-doorbell")
 
@@ -72,6 +90,41 @@ CORRELATION_ID_HEADER = "X-Correlation-Id"
 # dropped from the envelope (the alert still fires) and a WARN log
 # line names the camera so the operator can shrink the source.
 _DEFAULT_SNAPSHOT_MAX_BYTES: int = 700 * 1024
+
+# The SDK FrameApp rejects a non-positive poll interval (its sleep is
+# the shutdown-interruptible kind). This app historically accepted 0
+# ("poll as fast as the cameras answer"); map that to a near-zero
+# interval so old configs — and the test fixtures — keep working.
+_MIN_POLL_INTERVAL_SECONDS = 0.001
+
+
+MANIFEST = AppManifest(
+    id="smart-doorbell",
+    name="Smart Doorbell",
+    version="1.0.0",
+    category="doorstep",
+    summary=(
+        "Recognises faces at the door via InsightFace through KAI-C; "
+        "known visitors ride low-severity, strangers high with a snapshot."
+    ),
+    requires_tasks=["face_recognition"],  # checked vs GET /api/v1/adapters
+    subscribes=None,  # FrameApp: drives inference itself via KAI-C
+    params=[
+        Param("poll_interval_seconds", float, default=1.0),
+        Param("recognition_threshold", float, default=DEFAULT_RECOGNITION_THRESHOLD),
+        Param("dedup_window_seconds", float, default=60.0,
+              description="Per-(camera, person) re-fire suppression; 0 fires every read."),
+        Param("attach_snapshot_for_unknowns", bool, default=True,
+              description="Embed a base64 JPEG in unknown-face alerts only."),
+        Param("snapshot_max_bytes", int, default=_DEFAULT_SNAPSHOT_MAX_BYTES,
+              description="Pre-base64 snapshot cap; 0 disables the limit."),
+    ],
+    emits=[
+        AlertType("known_visitor", severity="low"),
+        AlertType("unknown_visitor", severity="high",
+                  description="Unrecognised face; carries a snapshot when enabled."),
+    ],
+)
 
 
 # ── Config ──────────────────────────────────────────────────────────
@@ -126,6 +179,15 @@ class AppConfig:
     nats_alerts_url: str | None = None
     nats_alerts_token: str | None = None
     nats_alerts_subject_prefix: str = DEFAULT_ALERT_SUBJECT_PREFIX
+
+    # App contract (spec §03) — all optional; see the SDK's contract
+    # module. ``contract_port`` serves /health /manifest /state;
+    # ``opennvr_url`` triggers registry self-registration on boot.
+    contract_port: int | None = None
+    contract_bind_host: str | None = None
+    contract_host: str | None = None
+    opennvr_url: str | None = None
+    opennvr_token: str | None = None
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -183,6 +245,13 @@ def load_config(path: str | Path) -> AppConfig:
         nats_alerts_url=raw.get("nats_alerts_url"),
         nats_alerts_token=raw.get("nats_alerts_token"),
         nats_alerts_subject_prefix=subject_prefix,
+        contract_port=(
+            int(raw["contract_port"]) if raw.get("contract_port") is not None else None
+        ),
+        contract_bind_host=raw.get("contract_bind_host"),
+        contract_host=raw.get("contract_host"),
+        opennvr_url=raw.get("opennvr_url"),
+        opennvr_token=raw.get("opennvr_token"),
     )
 
 
@@ -199,6 +268,10 @@ class KaicRecognitionClient:
     JSON body. The SDK's body parser unwraps ``frame_b64`` into the
     binary payload and lifts the remaining keys (``task``,
     ``threshold``) into the top-level payload the service sees.
+
+    Kept app-side (rather than swapping to the SDK ``KaiCClient``) to
+    preserve this app's historical wire body — ``task`` + ``threshold``
+    with no ``camera_id`` field.
     """
 
     def __init__(
@@ -243,8 +316,16 @@ class KaicRecognitionClient:
 # ── The orchestrator ───────────────────────────────────────────────
 
 
-class SmartDoorbell:
-    """Polls all configured cameras, runs recognition, dispatches."""
+class SmartDoorbell(FrameApp):
+    """Polls all configured cameras (via the SDK FrameApp loop), runs
+    recognition, dispatches.
+
+    Alerts are dispatched *inside* the rule rather than returned to the
+    base, because the dedup ledger gates them — a suppressed repeat
+    visitor must not reach the dispatcher at all.
+    """
+
+    manifest = MANIFEST
 
     # Sentinel object used to bucket unknown-person dedup keys. We use
     # an object() rather than a string so a hostile / unlikely
@@ -262,77 +343,62 @@ class SmartDoorbell:
         self.config = config
         self.pipeline = pipeline
         self.dispatcher = dispatcher
-        # Key is (camera_id, person_id_or_sentinel). When the face is
-        # recognised we use the person_id (a str); when it isn't we
-        # use the ``_UNKNOWN_BUCKET`` sentinel object so a hostile
-        # person_id can't collide with the stranger bucket.
-        self._last_fired: dict[tuple[str, Any], float] = {}
-        self._stop = False
         self._frame_sources: dict[str, FrameSource] = {}
         for cam in config.cameras:
             self._frame_sources[cam.camera_id] = build_frame_source(
                 camera_id=cam.camera_id, url=cam.frame_url,
             )
 
-    def request_stop(self) -> None:
-        self._stop = True
-
-    def run(self) -> None:
-        if not self.config.cameras:
-            raise SystemExit(
-                "config: at least one camera is required for the daemon"
-            )
-        logger.info(
-            "smart-doorbell started: %d cameras, poll=%ss, threshold=%.2f",
-            len(self.config.cameras),
-            self.config.poll_interval_seconds,
-            self.config.recognition_threshold,
+        super().__init__(
+            config,
+            dispatcher,
+            # By-reference bridge: swapping an entry in
+            # ``self._frame_sources`` (test stubs, camera reconfig) is
+            # picked up on the next tick.
+            frame_source=DictFrameSource(self._frame_sources),
+            cameras=[cam.camera_id for cam in config.cameras],
+            poll_interval_seconds=(
+                config.poll_interval_seconds
+                if config.poll_interval_seconds > 0
+                else _MIN_POLL_INTERVAL_SECONDS
+            ),
         )
-        try:
-            while not self._stop:
-                cycle_started = time.monotonic()
-                for cam in self.config.cameras:
-                    if self._stop:
-                        break
-                    try:
-                        self._process_camera(cam)
-                    except Exception:
-                        logger.exception(
-                            "camera=%s: unexpected error in cycle",
-                            cam.camera_id,
-                        )
-                if self._stop:
-                    break
-                elapsed = time.monotonic() - cycle_started
-                time.sleep(max(0.0, self.config.poll_interval_seconds - elapsed))
-        finally:
-            try:
-                self.dispatcher.close()
-            except Exception:
-                logger.exception("dispatcher.close() failed")
+
+    def setup(self) -> None:
+        self._cameras_by_id: dict[str, CameraConfig] = {
+            cam.camera_id: cam for cam in self.config.cameras
+        }
+        # Key is (camera_id, person_id_or_sentinel). When the face is
+        # recognised we use the person_id (a str); when it isn't we
+        # use the ``_UNKNOWN_BUCKET`` sentinel object so a hostile
+        # person_id can't collide with the stranger bucket. A plain
+        # dict on purpose (not the SDK keyed_state): dedup reads
+        # "last actually-fired", never refreshes on suppression, and
+        # its shape is pinned by this app's test suite.
+        self._last_fired: dict[tuple[str, Any], float] = {}
+
+    def request_stop(self) -> None:
+        """Historical name — the SDK base spells it ``stop()``."""
+        self.stop()
 
     def step(self) -> None:
         """Single pass over every camera. Used by --once and tests."""
-        for cam in self.config.cameras:
-            self._process_camera(cam)
+        self.handle_tick()
 
-    def _process_camera(self, cam: CameraConfig) -> None:
+    # ── The rule (one camera × one fetched frame) ──────────────────
+
+    def on_frame(
+        self, camera_id: str, frame_bytes: bytes
+    ) -> Iterable[Alert] | None:
+        cam = self._cameras_by_id[camera_id]
         correlation_id = uuid.uuid4().hex
-        try:
-            frame = self._frame_sources[cam.camera_id].fetch()
-        except FrameSourceError as exc:
-            logger.warning(
-                "camera=%s: frame fetch failed: %s correlation_id=%s",
-                cam.camera_id, exc, correlation_id,
-            )
-            return
 
-        read = self.pipeline.process_frame(frame, correlation_id=correlation_id)
+        read = self.pipeline.process_frame(frame_bytes, correlation_id=correlation_id)
         if read is None or not read.face_detected:
             # No face → nothing to alert. (We could fire a "movement,
             # no recognisable face" event but that's a different
             # example app — keep this one focused on the doorbell.)
-            return
+            return None
 
         bucket = read.person_id or self._UNKNOWN_BUCKET
         plate_key = (cam.camera_id, bucket)
@@ -340,7 +406,7 @@ class SmartDoorbell:
         if self.config.dedup_window_seconds > 0:
             last = self._last_fired.get(plate_key)
             if last is not None and (now - last) < self.config.dedup_window_seconds:
-                return
+                return None
             self._last_fired[plate_key] = now
 
         attach_snapshot = (
@@ -349,16 +415,28 @@ class SmartDoorbell:
         snapshot_bytes: bytes | None = None
         if attach_snapshot:
             cap = max(0, int(self.config.snapshot_max_bytes))
-            if cap == 0 or len(frame) <= cap:
-                snapshot_bytes = frame
+            if cap == 0 or len(frame_bytes) <= cap:
+                snapshot_bytes = frame_bytes
             else:
                 logger.warning(
                     "camera=%s: snapshot %d bytes exceeds snapshot_max_bytes=%d; "
                     "dropping from alert envelope correlation_id=%s",
-                    cam.camera_id, len(frame), cap, read.correlation_id,
+                    cam.camera_id, len(frame_bytes), cap, read.correlation_id,
                 )
         alert = self._build_alert(cam, read, snapshot_bytes)
         self.dispatcher.dispatch(alert)
+        # Wire the app-dispatched alert into the SDK contract counters
+        # (/health's alerts_fired) — the base loop can't see it because
+        # on_frame returns None.
+        self._contract_note_alerts(1)
+        return None
+
+    def state_snapshot(self) -> dict[str, Any]:
+        """``GET /state`` — the dedup ledger size per camera."""
+        return {
+            "cameras": [cam.camera_id for cam in self.config.cameras],
+            "deduped_visitors_tracked": len(self._last_fired),
+        }
 
     def _build_alert(
         self,
@@ -582,13 +660,29 @@ def _cmd_daemon(config: AppConfig, args: argparse.Namespace) -> int:
             dispatcher.close()
         return 0
 
+    if not config.cameras:
+        raise SystemExit(
+            "config: at least one camera is required for the daemon"
+        )
+
+    # The SDK FrameApp loop is async; drive it the same way the SDK
+    # AppRunner drives a Detector. SIGINT / SIGTERM trigger a clean exit.
+    loop = asyncio.new_event_loop()
+
     def _handle_signal(signum, _frame):
         logger.info("received signal %s; stopping", signum)
-        doorbell.request_stop()
+        loop.call_soon_threadsafe(doorbell.stop)
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
-    doorbell.run()
+    try:
+        loop.run_until_complete(doorbell.run())
+    finally:
+        try:
+            dispatcher.close()
+        except Exception:
+            logger.exception("dispatcher.close() failed")
+        loop.close()
     return 0
 
 

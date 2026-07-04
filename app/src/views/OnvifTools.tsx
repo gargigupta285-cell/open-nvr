@@ -33,6 +33,8 @@ export function OnvifTools() {
   const [profileToken, setProfileToken] = useState('')
   const [streamUri, setStreamUri] = useState('')
   const [err, setErr] = useState<string>('')
+  const [scanCidr, setScanCidr] = useState<string>('')
+  const [cameraTime, setCameraTime] = useState<string>('')
 
   const canAuth = selectedIp && username && password
 
@@ -40,10 +42,13 @@ export function OnvifTools() {
     setLoading(true)
     setErr('')
     try {
-      const res = await apiService.onvifDiscover()
+      const params = scanCidr ? { cidr: scanCidr } : undefined
+      const res = await apiService.onvifDiscover(params)
       setDevices(res.data.devices || [])
+      // Back-fill the CIDR field with the configured Camera LAN subnet on first run
+      if (!scanCidr && res.data.scan_cidrs?.[0]) setScanCidr(res.data.scan_cidrs[0])
       // Select first ONVIF-looking device automatically
-      const first = (res.data.devices || []).find((d: Device) => (d.service_urls || []).some((u) => u.toLowerCase().includes('/onvif')))
+      const first = (res.data.devices || []).find((d: Device) => (d.service_urls || []).some((u: string) => u.toLowerCase().includes('/onvif')))
       if (first?.ip) setSelectedIp(first.ip)
     } catch (e: any) {
       setErr(e?.data?.detail || e.message || 'Discovery failed')
@@ -197,6 +202,34 @@ export function OnvifTools() {
     }
   }
 
+  const getTime = async () => {
+    if (!selectedIp) return
+    setLoading(true)
+    setErr('')
+    try {
+      const res = await apiService.onvifGetTime(selectedIp, { port })
+      setCameraTime(res.data.utc_datetime || 'No time returned')
+    } catch (e: any) {
+      setErr(e?.data?.detail || e.message || 'GetSystemDateAndTime failed')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const syncTime = async () => {
+    if (!canAuth) return
+    setLoading(true)
+    setErr('')
+    try {
+      const res = await apiService.onvifSyncTime(selectedIp, { username, password, port })
+      setCameraTime(res.data.synced_utc || '')
+    } catch (e: any) {
+      setErr(e?.data?.detail || e.message || 'SetSystemDateAndTime failed')
+    } finally {
+      setLoading(false)
+    }
+  }
+
   useEffect(() => {
     // auto discover on load
     discover()
@@ -213,6 +246,12 @@ export function OnvifTools() {
             <h2 className="font-medium">Discovery</h2>
             <button className="text-sm px-2 py-1 bg-[var(--panel)] rounded" onClick={discover} disabled={loading}>Refresh</button>
           </div>
+          <input
+            className="w-full mt-2 px-2 py-1 bg-[var(--panel)] border border-[var(--border)] rounded text-xs font-mono"
+            placeholder="Scan CIDR (e.g. 192.168.1.0/24) — auto-filled from Camera LAN settings"
+            value={scanCidr}
+            onChange={(e) => setScanCidr(e.target.value)}
+          />
           <div className="mt-2 space-y-2 max-h-60 overflow-auto">
             {devices.map((d, i) => (
               <div key={i} className={`p-2 rounded cursor-pointer ${selectedIp===d.ip ? 'bg-[var(--panel-2)]' : 'hover:bg-[var(--panel-2)]'}`} onClick={() => d.ip && setSelectedIp(d.ip)}>
@@ -273,6 +312,16 @@ export function OnvifTools() {
           <button className="text-sm px-2 py-1 bg-[var(--panel)] rounded" onClick={getPresets}>Get Presets</button>
           <button className="text-sm px-2 py-1 bg-[var(--panel)] rounded" onClick={setPreset}>Set Preset</button>
           <button className="text-sm px-2 py-1 bg-[var(--panel)] rounded" onClick={gotoPreset}>Goto Preset</button>
+        </div>
+      </div>
+
+      <div className="bg-[var(--bg-2)] border border-[var(--border)] p-3 rounded">
+        <h2 className="font-medium">Camera Clock</h2>
+        <div className="text-xs text-[var(--text-dim)] mb-2">Read or sync the camera's internal clock. Sync requires credentials and pushes the NVR's current UTC time.</div>
+        <div className="flex gap-2 items-center flex-wrap">
+          <button className="text-sm px-2 py-1 bg-[var(--panel)] rounded" onClick={getTime} disabled={loading || !selectedIp}>Get Time</button>
+          <button className="text-sm px-2 py-1 bg-[var(--panel)] rounded" onClick={syncTime} disabled={loading || !canAuth}>Sync Clock</button>
+          {cameraTime && <code className="text-xs text-[var(--text-dim)]">{cameraTime}</code>}
         </div>
       </div>
     </div>

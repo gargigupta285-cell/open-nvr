@@ -106,7 +106,11 @@ export function NetworkView() {
               </label>
               <label className="flex flex-col gap-1">
                 <span className="text-[var(--text-dim)]">Subnet CIDR</span>
-                <input className="input" placeholder="e.g., 192.168.10.0/24" defaultValue={lan?.subnet_cidr||''} onBlur={(e)=> setLan((s:any)=>({...s, subnet_cidr:e.target.value}))} />
+                <input className="input" placeholder="e.g., 192.168.1.0/24" defaultValue={lan?.subnet_cidr||''} onBlur={(e)=> setLan((s:any)=>({...s, subnet_cidr:e.target.value}))} />
+              </label>
+              <label className="flex flex-col gap-1 md:col-span-2">
+                <span className="text-[var(--text-dim)]">Additional Scan Subnets <span className="text-xs">(comma-separated, e.g. 10.0.0.0/24,172.16.0.0/24)</span></span>
+                <input className="input" placeholder="e.g., 10.0.0.0/24,172.16.1.0/24" defaultValue={(lan?.scan_subnets||[]).join(',')} onBlur={(e)=> setLan((s:any)=>({...s, scan_subnets: e.target.value.split(',').map((v:string)=>v.trim()).filter(Boolean)}))} />
               </label>
               <label className="flex flex-col gap-1 md:col-span-3">
                 <span className="text-[var(--text-dim)]">Description</span>

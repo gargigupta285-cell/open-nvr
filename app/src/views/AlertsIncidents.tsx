@@ -16,8 +16,9 @@
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { apiService } from '../lib/apiService'
 
 type EveAlert = any
@@ -153,47 +154,69 @@ export function AlertsIncidents() {
         {(severity || category) && <span>Active filters: {severity ? `severity=${severity}` : ''} {category ? `category=${category}` : ''}</span>}
       </div>
 
-      <div className="overflow-auto border border-neutral-700 bg-[var(--panel-2)] rounded">
-        <table className="w-full text-xs table-fixed">
-          <thead className="bg-[var(--panel-2)] text-left sticky top-0">
-            <tr>
-              <th className="p-2 w-[180px]">Time</th>
-              <th className="p-2 w-[120px]">Severity</th>
-              <th className="p-2 w-[200px]">Category</th>
-              <th className="p-2">Signature</th>
-              <th className="p-2 w-[160px]">Source</th>
-              <th className="p-2 w-[160px]">Destination</th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.length === 0 && !loading && (
-              <tr>
-                <td colSpan={6} className="text-center text-[var(--text-dim)] py-3">No alerts found for current filters.</td>
-              </tr>
-            )}
-            {items.map((e: any, i: number) => (
-              <tr key={i} className={i % 2 === 0 ? "bg-[var(--bg-2)]" : "bg-[var(--panel)]"}>
-                <td className="p-2 whitespace-nowrap">{e?.timestamp ? new Date(String(e.timestamp).replace('+0000', '+00:00')).toLocaleString() : '-'}</td>
-                <td className="p-2">
-                  {typeof e?.alert?.severity !== 'undefined' ? (
-                    e.alert.severity === 1 ? 'High' : e.alert.severity === 2 ? 'Medium' : e.alert.severity === 3 ? 'Low' : String(e.alert.severity)
-                  ) : '-'}
-                </td>
-                <td className="p-2 truncate" title={e?.alert?.category || ''}>
-                  <button
-                    className="underline hover:opacity-80"
-                    onClick={() => e?.alert?.category && setParam('category', e.alert.category)}
-                  >
-                    {e?.alert?.category || '-'}
-                  </button>
-                </td>
-                <td className="p-2 truncate" title={e?.alert?.signature || ''}>{e?.alert?.signature || '-'}</td>
-                <td className="p-2 truncate" title={`${e?.src_ip || ''}${e?.src_port ? ':' + e.src_port : ''}`}>{e?.src_ip}{e?.src_port ? `:${e.src_port}` : ''}</td>
-                <td className="p-2 truncate" title={`${e?.dest_ip || e?.dst_ip || ''}${e?.dest_port ? ':' + e.dest_port : (e?.dst_port ? ':' + e.dst_port : '')}`}>{e?.dest_ip || e?.dst_ip}{e?.dest_port ? `:${e.dest_port}` : (e?.dst_port ? `:${e.dst_port}` : '')}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <VirtualAlertTable items={items} loading={loading} onCategoryClick={(c) => setParam('category', c)} />
+    </div>
+  )
+}
+
+// Suricata can return thousands of rows; render only the visible window.
+const GRID_COLS = 'grid grid-cols-[170px_90px_200px_minmax(240px,1fr)_160px_160px]'
+const ROW_HEIGHT = 33
+
+function VirtualAlertTable({ items, loading, onCategoryClick }: { items: EveAlert[]; loading: boolean; onCategoryClick: (category: string) => void }) {
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const rowVirtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => ROW_HEIGHT,
+    overscan: 12,
+  })
+
+  return (
+    <div ref={scrollRef} className="overflow-auto border border-[var(--border)] bg-[var(--panel-2)] rounded max-h-[calc(100vh-19rem)] min-h-48">
+      <div className="min-w-[1020px] text-xs">
+        <div className={`${GRID_COLS} sticky top-0 z-10 bg-[var(--bg-2)] text-[var(--text-dim)] border-b border-[var(--border)]`}>
+          <div className="p-2 font-medium">Time</div>
+          <div className="p-2 font-medium">Severity</div>
+          <div className="p-2 font-medium">Category</div>
+          <div className="p-2 font-medium">Signature</div>
+          <div className="p-2 font-medium">Source</div>
+          <div className="p-2 font-medium">Destination</div>
+        </div>
+        {items.length === 0 && !loading ? (
+          <div className="text-center text-[var(--text-dim)] py-6">No alerts found for current filters.</div>
+        ) : (
+          <div style={{ height: rowVirtualizer.getTotalSize(), position: 'relative' }}>
+            {rowVirtualizer.getVirtualItems().map((vRow) => {
+              const e: any = items[vRow.index]
+              return (
+                <div
+                  key={vRow.key}
+                  className={`${GRID_COLS} ${vRow.index % 2 === 0 ? 'bg-[var(--bg-2)]' : 'bg-[var(--panel)]'}`}
+                  style={{ position: 'absolute', top: 0, left: 0, right: 0, height: vRow.size, transform: `translateY(${vRow.start}px)` }}
+                >
+                  <div className="p-2 whitespace-nowrap truncate">{e?.timestamp ? new Date(String(e.timestamp).replace('+0000', '+00:00')).toLocaleString() : '-'}</div>
+                  <div className="p-2">
+                    {typeof e?.alert?.severity !== 'undefined' ? (
+                      e.alert.severity === 1 ? 'High' : e.alert.severity === 2 ? 'Medium' : e.alert.severity === 3 ? 'Low' : String(e.alert.severity)
+                    ) : '-'}
+                  </div>
+                  <div className="p-2 truncate" title={e?.alert?.category || ''}>
+                    <button
+                      className="underline hover:opacity-80"
+                      onClick={() => e?.alert?.category && onCategoryClick(e.alert.category)}
+                    >
+                      {e?.alert?.category || '-'}
+                    </button>
+                  </div>
+                  <div className="p-2 truncate" title={e?.alert?.signature || ''}>{e?.alert?.signature || '-'}</div>
+                  <div className="p-2 truncate" title={`${e?.src_ip || ''}${e?.src_port ? ':' + e.src_port : ''}`}>{e?.src_ip}{e?.src_port ? `:${e.src_port}` : ''}</div>
+                  <div className="p-2 truncate" title={`${e?.dest_ip || e?.dst_ip || ''}${e?.dest_port ? ':' + e.dest_port : (e?.dst_port ? ':' + e.dst_port : '')}`}>{e?.dest_ip || e?.dst_ip}{e?.dest_port ? `:${e.dest_port}` : (e?.dst_port ? `:${e.dst_port}` : '')}</div>
+                </div>
+              )
+            })}
+          </div>
+        )}
       </div>
     </div>
   )

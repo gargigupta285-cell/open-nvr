@@ -704,3 +704,30 @@ class TenantQuota(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "provider", name="uq_user_provider_quota"),
     )
+
+
+class InstalledApp(Base):
+    """One registered vertical-detector app (App SDK spec §05).
+
+    Apps self-register on boot via ``POST /api/v1/apps/register`` —
+    the same shape adapters use against KAI-C. ``manifest_json`` is the
+    ``AppManifest.to_dict()`` snapshot; ``config_json`` is operator
+    config validated against ``manifest_json["params"]``.
+    """
+
+    __tablename__ = "installed_apps"
+
+    # The manifest id, e.g. "loitering-detection" — apps upsert by it.
+    id = Column(String(100), primary_key=True, index=True)
+    name = Column(String(200), nullable=False)
+    category = Column(String(100), nullable=True)
+    version = Column(String(50), nullable=False)
+    url = Column(String(500), nullable=False)  # e.g. http://loitering:9200
+    manifest_json = Column(JSON, nullable=False)
+    config_json = Column(JSON, nullable=False, default=dict)
+    enabled = Column(Boolean, default=False, nullable=False)
+    # registered | ok | unreachable
+    status = Column(String(20), nullable=False, default="registered")
+    last_seen = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())

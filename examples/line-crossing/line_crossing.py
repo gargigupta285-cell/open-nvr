@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 """
-Line-crossing (tripwire) example app.
+Line-crossing (tripwire) example app — now on the ``opennvr-app-sdk``.
 
 Fires an alert when a *tracked* entity crosses an operator-defined
 oriented line in a counted direction — the canonical "perimeter
@@ -10,8 +10,23 @@ tripwire" / "directional people-counter" primitive. Use it for
 perimeter intrusion (someone crosses the fence line inward), entrance
 in/out counts, one-way corridors, or loading-dock gate traffic.
 
-Architecture
-------------
+What lives where after the migration
+------------------------------------
+
+The SDK's :class:`~opennvr_app_sdk.Detector` base owns the NATS
+subscribe loop, per-message JSON decoding + exception isolation, the
+``camera_id`` / ``result.detections`` payload walk, ``completed_at``
+timestamp parsing with a clock fallback, alert dispatch, the CLI, and
+signal handling. The tripwire geometry moved to
+``opennvr_app_sdk.geometry`` and the §11.5 alert stack to
+``opennvr_app_sdk.alerts`` (thin shims remain at ``line.py`` /
+``alerts.py`` for import compatibility).
+
+What's left here is the rule — the per-(camera, track) crossing test —
+plus this app's config parsing and its declarative MANIFEST.
+
+Architecture (unchanged)
+------------------------
 
 Subscribes to KAI-C's NATS inference broadcast surface like
 ``loitering-detection`` and ``occupancy-counting`` — zero adapter cost
@@ -27,12 +42,18 @@ well-defined.
 How a crossing is decided
 -------------------------
 
-Per (camera, tripwire, track_id) we remember the previous center point.
+Per (camera, tripwire, track_id) we remember the previous center point
+(the SDK's ``keyed_state`` holds it, TTL = ``track_ttl_seconds``).
 When the next center arrives, we test whether the segment
 ``previous → current`` crosses the tripwire AND flips to the other side
-(see ``line.py``). If it does and the direction matches the tripwire's
-``count_direction``, we fire once for that crossing. Tracks idle longer
-than ``track_ttl_seconds`` are forgotten so memory stays bounded.
+(see ``opennvr_app_sdk.geometry.Tripwire``). If it does and the
+direction matches the tripwire's ``count_direction``, we fire once for
+that crossing. Tracks idle longer than ``track_ttl_seconds`` are
+forgotten so memory stays bounded — the GC is driven manually
+(``auto_gc=False``) at the top of each event, matching the historical
+semantics: a track that went stale is pruned even on the very event
+that re-sights it, so its next sighting starts a fresh episode with no
+segment to test.
 
 Run::
 
@@ -41,23 +62,46 @@ Run::
 """
 from __future__ import annotations
 
-import argparse
-import asyncio
-import datetime as _dt
-import json
 import logging
-import signal
-import sys
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
-import yaml
-
-from alerts import Alert, AlertDispatcher, build_dispatcher
-from line import Point, Tripwire, bbox_center
+from opennvr_app_sdk import (
+    Alert,
+    AlertType,
+    AppManifest,
+    Detector,
+    Param,
+    app,
+)
+from opennvr_app_sdk.config import load_yaml
+from opennvr_app_sdk.geometry import Point, Tripwire, bbox_center
+from opennvr_app_sdk.state import keyed_state
 
 logger = logging.getLogger("line-crossing")
+
+
+MANIFEST = AppManifest(
+    id="line-crossing",
+    name="Line Crossing",
+    version="1.0.0",
+    category="perimeter",
+    summary=(
+        "Alerts when a tracked object crosses an oriented tripwire in a "
+        "counted direction."
+    ),
+    # Needs per-object identity on top of detection — chain a tracking
+    # adapter (e.g. bytetrack) so detections carry ``track_id``.
+    requires_tasks=["object_detection", "object_tracking"],
+    subscribes="opennvr.inference.>",
+    params=[
+        Param("watch_labels", list, default=["person"]),
+        Param("track_ttl_seconds", float, default=30.0,
+              description="Idle time after which a track's last position is forgotten."),
+        Param("line", "geometry.tripwire", per_camera=True),  # drawn in the catalog UI
+    ],
+    emits=[AlertType("line-crossing", severity="high")],
+)
 
 
 # ── Config ─────────────────────────────────────────────────────────
@@ -88,9 +132,7 @@ class AppConfig:
 
 
 def load_config(path: str) -> AppConfig:
-    raw = yaml.safe_load(Path(path).read_text())
-    if not isinstance(raw, dict):
-        raise ValueError(f"config {path!r}: root must be a mapping")
+    raw = load_yaml(path)
 
     nats_url = str(raw.get("nats_url") or "").strip()
     if not nats_url:
@@ -181,64 +223,57 @@ def load_config(path: str) -> AppConfig:
     )
 
 
-# ── Per-track memory ───────────────────────────────────────────────
+# ── The rule ───────────────────────────────────────────────────────
 
 
-@dataclass
-class _TrackMemory:
-    """Last-seen center + timestamp for one (camera, track_id)."""
+class LineCrossingDetector(Detector):
+    """Consumes inference events (via the SDK's Detector loop),
+    remembers each track's last center, and fires when a track crosses
+    a tripwire in a counted direction.
 
-    last_point: Point
-    last_seen: float
+    State is per (camera_id, track_id) — one SDK ``keyed_state`` record
+    whose ``data["last_point"]`` carries the previous bbox center —
+    and bounded by ``track_ttl_seconds``: idle tracks are garbage-
+    collected so a busy scene doesn't grow the map without limit.
+    """
 
+    manifest = MANIFEST
 
-# ── Detector loop ──────────────────────────────────────────────────
-
-
-class LineCrossingDetector:
-    """Consumes inference events, remembers each track's last center,
-    and fires when a track crosses a tripwire in a counted direction.
-
-    State is per (camera_id, track_id) and bounded by ``track_ttl`` —
-    idle tracks are garbage-collected so a busy scene doesn't grow the
-    map without limit."""
-
-    def __init__(self, config: AppConfig, dispatcher: AlertDispatcher, *, clock: Any = None) -> None:
-        self._config = config
-        self._dispatcher = dispatcher
-        self._clock = clock or (lambda: _dt.datetime.now(_dt.timezone.utc))
-        self._tracks: dict[tuple[str, str], _TrackMemory] = {}
+    def setup(self) -> None:
+        # auto_gc off: the historical GC ran unconditionally at the top
+        # of each event (before the touch), so a track that went stale
+        # is pruned even on the event that re-sights it — its next
+        # sighting is a fresh first sighting with no segment to test.
+        # ``touch`` with auto_gc would instead spare the touched key.
+        self._tracks = keyed_state(
+            ttl=self.cfg.track_ttl_seconds,
+            auto_gc=False,
+        )
         self._warned_missing_track = False
-        self._stop_event = asyncio.Event()
-        self._nc: Any = None
 
-    def stop(self) -> None:
-        self._stop_event.set()
-
-    # ── Pure handler (testable without NATS) ──────────────────────
-
-    def handle_event(self, event: dict[str, Any]) -> list[Alert]:
-        if not isinstance(event, dict):
-            return []
-        camera_id = event.get("camera_id")
-        if not camera_id or camera_id not in self._config.cameras:
-            return []
-        camera = self._config.cameras[camera_id]
-
-        event_ts = self._parse_ts(event.get("completed_at"))
-        result = event.get("result") or {}
-        detections = result.get("detections") if isinstance(result, dict) else None
-        if not isinstance(detections, list):
+    def on_detections(
+        self,
+        camera_id: str,
+        detections: list[dict[str, Any]],
+        event: dict[str, Any],
+    ) -> list[Alert]:
+        """The crossing rule for one event. Returns the alerts to fire
+        (the SDK base dispatches them). The existing tests drive it
+        through ``handle_event`` without spinning up NATS."""
+        camera = self.cfg.cameras.get(camera_id)
+        if camera is None:
+            # Another monitoring app may be watching this camera; we're not.
             return []
 
-        self._gc_stale_tracks(event_ts)
+        event_ts = self.parse_event_ts(event.get("completed_at"))
+        self._tracks.gc(event_ts)
 
         fired: list[Alert] = []
         for det in detections:
             if not isinstance(det, dict):
                 continue
             label = str(det.get("label", "")).lower()
-            if label not in self._config.watch_labels:
+            if label not in self.cfg.watch_labels:
                 continue
             track_id = det.get("track_id")
             if track_id is None:
@@ -257,36 +292,19 @@ class LineCrossingDetector:
                 continue
             curr = bbox_center(bbox, camera.frame_width, camera.frame_height)
             key = (camera_id, str(track_id))
-            prev_mem = self._tracks.get(key)
-            self._tracks[key] = _TrackMemory(last_point=curr, last_seen=event_ts)
-            if prev_mem is None:
+            record = self._tracks.get(key)
+            prev_point: Point | None = record.data.get("last_point") if record else None
+            state = self._tracks.touch(key, at=event_ts)
+            state.data["last_point"] = curr
+            if prev_point is None:
                 continue  # first sighting — no segment to test yet
-            direction = camera.wire.crossing(prev_mem.last_point, curr)
+            direction = camera.wire.crossing(prev_point, curr)
             if direction is not None:
-                alert = self._build_alert(
+                fired.append(self._build_alert(
                     camera=camera, label=label, track_id=str(track_id),
                     direction=direction, event=event,
-                )
-                self._dispatcher.fire(alert)
-                fired.append(alert)
+                ))
         return fired
-
-    def _gc_stale_tracks(self, now_ts: float) -> None:
-        cutoff = now_ts - self._config.track_ttl_seconds
-        stale = [k for k, m in self._tracks.items() if m.last_seen < cutoff]
-        for k in stale:
-            del self._tracks[k]
-
-    def _parse_ts(self, raw: Any) -> float:
-        if isinstance(raw, str):
-            try:
-                ts = _dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=_dt.timezone.utc)
-                return ts.timestamp()
-            except ValueError:
-                pass
-        return self._clock().timestamp()
 
     def _build_alert(
         self,
@@ -320,99 +338,19 @@ class LineCrossingDetector:
             tags=["line-crossing", camera.wire.name, direction, label],
         )
 
-    # ── NATS loop ─────────────────────────────────────────────────
 
-    async def run(self, *, once: bool = False) -> None:
-        import nats
-
-        connect_kwargs: dict[str, Any] = {
-            "servers": [self._config.nats_url],
-            "connect_timeout": 5.0,
-            "reconnect_time_wait": 1.0,
-            "max_reconnect_attempts": -1,
-        }
-        if self._config.nats_token:
-            connect_kwargs["token"] = self._config.nats_token
-        self._nc = await nats.connect(**connect_kwargs)
-        logger.info(
-            "line-crossing started: %d cameras, watch=%s, track_ttl=%.1fs, subject=%r",
-            len(self._config.cameras), self._config.watch_labels,
-            self._config.track_ttl_seconds, self._config.subject_pattern,
-        )
-        try:
-            sub = await self._nc.subscribe(self._config.subject_pattern)
-            async for msg in sub.messages:
-                try:
-                    payload = json.loads(msg.data)
-                except json.JSONDecodeError as exc:
-                    logger.warning("skipping non-JSON message on %r: %s", msg.subject, exc)
-                    continue
-                try:
-                    self.handle_event(payload)
-                except Exception:
-                    logger.exception("handle_event failed for subject=%s", msg.subject)
-                if once:
-                    self.stop()
-                if self._stop_event.is_set():
-                    break
-        finally:
-            try:
-                await self._nc.drain()
-            except Exception:
-                try:
-                    await self._nc.close()
-                except Exception:
-                    pass
+# Spec-preferred short name; ``LineCrossingDetector`` is the historical
+# one the tests (and README snippets) import.
+LineCrossing = LineCrossingDetector
 
 
 # ── CLI ────────────────────────────────────────────────────────────
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="line-crossing",
-        description="Subscribe to KAI-C inference events; alert on directional tripwire crossings.",
-    )
-    parser.add_argument("--config", required=True, help="Path to config.yml")
-    parser.add_argument("--once", action="store_true", help="Process one event then exit.")
-    parser.add_argument(
-        "--log-level", default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-    )
-    args = parser.parse_args(argv)
-
-    logging.basicConfig(
-        level=args.log_level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    try:
-        config = load_config(args.config)
-    except (ValueError, OSError) as exc:
-        print(f"config error: {exc}", file=sys.stderr)
-        return 2
-
-    dispatcher = build_dispatcher(
-        webhook_url=config.webhook_url,
-        nats_alerts_url=config.nats_alerts_url,
-        nats_alerts_token=config.nats_alerts_token,
-        nats_alerts_subject_prefix=config.nats_alerts_subject_prefix,
-    )
-    detector = LineCrossingDetector(config, dispatcher)
-
-    loop = asyncio.new_event_loop()
-
-    def _handle_signal(_signum, _frame):
-        logger.info("signal received, stopping…")
-        loop.call_soon_threadsafe(detector.stop)
-
-    signal.signal(signal.SIGINT, _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
-    try:
-        loop.run_until_complete(detector.run(once=args.once))
-    finally:
-        dispatcher.close()
-        loop.close()
-    return 0
+    """Console-script entry point (``[project.scripts]``). The SDK
+    runner owns argparse, logging, signals, and the dispatcher."""
+    return app(LineCrossingDetector, load_config=load_config).run(argv)
 
 
 if __name__ == "__main__":  # pragma: no cover
