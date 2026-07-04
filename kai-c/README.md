@@ -64,7 +64,7 @@ The A2.4b operator approval flow is implemented, **fail-closed**:
   (blip, insightface, bytetrack, fast-plate-ocr, whisper, piper) auto-approve.
   yolov8 currently declares `gpu` + a weights path, so it meets the gate —
   covered by the startup-config auto-grant (config-as-consent, audited as
-  actor `system:startup-config`) landing in this PR series, plus a
+  actor `system:startup-config` — shipped, contract §8.5), plus a
   build-accurate declaration fix in ai-adapter (the CPU build should declare
   `gpu: false`). The gate binds exactly where risk enters: third-party /
   cloud / elevated-scope adapters added at runtime.

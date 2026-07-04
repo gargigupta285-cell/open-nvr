@@ -294,7 +294,7 @@ async def lifespan(app: FastAPI):
     )
     for name, url in ADAPTER_REGISTRY.items():
         try:
-            await _registry.register(name, url)
+            adapter = await _registry.register(name, url)
         except SovereigntyViolation as exc:
             logger.warning("sovereignty refused %s@%s: %s", name, url, exc)
             _audit.emit(
@@ -309,6 +309,20 @@ async def lifespan(app: FastAPI):
             # continue. Operators can re-register via the v2 endpoint
             # once the adapter is up.
             logger.info("registration deferred for %s@%s: %s", name, url, exc)
+        else:
+            # Contract §8.5 — config-as-consent. This adapter came from
+            # the operator's OWN startup configuration (compose overlay /
+            # ADAPTER_REGISTRY env), and writing it there IS the consent
+            # act — so its declared permission keys are granted here
+            # rather than parked in ``pending`` awaiting a UI click. The
+            # grant is a first-class audit event (adapter_grant_id +
+            # actor "system:startup-config"), keeping the receipt chain
+            # intact. Only THIS seed loop auto-grants: adapters added at
+            # runtime via POST /api/v1/adapters/register keep the human
+            # gate, and permission DRIFT on a later poll still flips a
+            # seeded adapter back to pending (see registry.refresh()).
+            if adapter.pending_keys():
+                _registry.approve_all(name, actor="system:startup-config")
     await _registry.start_polling()
 
     # NATS publisher for the event-bus broadcast surface. Starts AFTER

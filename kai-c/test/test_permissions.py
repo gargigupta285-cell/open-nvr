@@ -360,7 +360,10 @@ def kaic_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(kaic_main.AdapterRegistry, "__init__", patched_init)
 
     with TestClient(kaic_main.app) as client:
-        # startup registers "default" → 127.0.0.1:9100 (mocked) as pending.
+        # startup registers "default" → 127.0.0.1:9100 (mocked); §8.5
+        # config-as-consent auto-grants it (actor system:startup-config),
+        # so it comes up APPROVED. Tests that need a PENDING adapter
+        # register one at runtime via the API, which keeps the human gate.
         yield client
 
 
@@ -381,11 +384,31 @@ def test_endpoints_401_without_key(kaic_client):
 
 
 def test_get_permissions_json_shape(kaic_client):
+    # The startup-seeded "default" is §8.5 auto-granted → approved.
     resp = kaic_client.get("/api/v1/adapters/default/permissions", headers=_AUTH)
     assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body == {
+    assert resp.json() == {
         "adapter": "default",
+        "approval_status": "approved",
+        "declared": [
+            {"key": "gpu", "label": "GPU access", "kind": "gpu",
+             "sovereignty_conflict": False},
+        ],
+        "granted": ["gpu"],
+        "pending": [],
+    }
+
+    # A runtime-registered adapter keeps the human gate → pending shape.
+    reg = kaic_client.post(
+        "/api/v1/adapters/register",
+        json={"name": "gated", "url": "http://127.0.0.1:9100"},
+        headers=_AUTH,
+    )
+    assert reg.status_code == 200, reg.text
+    resp2 = kaic_client.get("/api/v1/adapters/gated/permissions", headers=_AUTH)
+    assert resp2.status_code == 200, resp2.text
+    assert resp2.json() == {
+        "adapter": "gated",
         "approval_status": "pending",
         "declared": [
             {"key": "gpu", "label": "GPU access", "kind": "gpu",
@@ -420,15 +443,21 @@ def test_permissions_unknown_adapter_404(kaic_client):
 
 
 def test_serving_refused_via_http_while_pending(kaic_client):
-    # default is pending (declares gpu, nothing granted) → /infer 403.
+    # A runtime-registered adapter (human gate, unlike the §8.5
+    # auto-granted startup seed) is pending → /infer 403.
+    kaic_client.post(
+        "/api/v1/adapters/register",
+        json={"name": "gated", "url": "http://127.0.0.1:9100"},
+        headers=_AUTH,
+    )
     resp = kaic_client.post(
-        "/api/v1/infer/default", json={"camera_id": "cam-1"}, headers=_AUTH,
+        "/api/v1/infer/gated", json={"camera_id": "cam-1"}, headers=_AUTH,
     )
     assert resp.status_code == 403, resp.text
     # After approve-all, serving is allowed.
-    kaic_client.post("/api/v1/adapters/default/permissions/approve-all", headers=_AUTH)
+    kaic_client.post("/api/v1/adapters/gated/permissions/approve-all", headers=_AUTH)
     resp2 = kaic_client.post(
-        "/api/v1/infer/default", json={"camera_id": "cam-1"}, headers=_AUTH,
+        "/api/v1/infer/gated", json={"camera_id": "cam-1"}, headers=_AUTH,
     )
     assert resp2.status_code == 200, resp2.text
 
@@ -469,9 +498,19 @@ def test_stream_refused_while_pending(tmp_path: Path, monkeypatch: pytest.Monkey
     from fastapi.testclient import TestClient
 
     with TestClient(kaic_main.app) as client:
+        # The startup-seeded "default" is §8.5 auto-granted, so use a
+        # runtime-registered adapter — that path keeps the human gate
+        # and stays pending.
+        reg = client.post(
+            "/api/v1/adapters/register",
+            json={"name": "gated", "url": "http://127.0.0.1:9100"},
+            headers={"X-Internal-Api-Key": "sekret"},
+        )
+        assert reg.status_code == 200, reg.text
+
         with pytest.raises(WebSocketDisconnect) as exc_info:
             with client.websocket_connect(
-                "/api/v1/infer/default/stream",
+                "/api/v1/infer/gated/stream",
                 headers={"X-Internal-Api-Key": "sekret"},
             ) as ws:
                 ws.receive_json()
@@ -483,7 +522,7 @@ def test_stream_refused_while_pending(tmp_path: Path, monkeypatch: pytest.Monkey
             headers={"X-Internal-Api-Key": "sekret"},
         ).json()
         assert audit["events"], "expected inference.refused_permission audit event"
-        assert audit["events"][-1]["adapter"] == "default"
+        assert audit["events"][-1]["adapter"] == "gated"
         assert "gpu" in audit["events"][-1]["pending_permissions"]
 
 
