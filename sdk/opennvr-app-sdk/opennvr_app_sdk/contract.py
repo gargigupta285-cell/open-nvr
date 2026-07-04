@@ -43,13 +43,19 @@ Config keys read (all via ``getattr``, all optional):
     ``{opennvr_url}/api/v1/apps/register`` on boot — best-effort: a
     down/refusing registry logs a warning and the app keeps running.
 ``opennvr_token``
-    Optional bearer token for the registration call (the registry
-    routes are auth-gated).
+    Optional token for the registration call (the registry routes are
+    auth-gated). Sent BOTH as a bearer ``Authorization`` header (for
+    user-JWT tokens) and as ``X-Internal-Api-Key`` (the deployment's
+    ``INTERNAL_API_KEY``, which the register route accepts as a
+    service credential). Falls back to the
+    ``OPENNVR_INTERNAL_API_KEY`` environment variable when the config
+    key is absent — the natural fit for compose deployments.
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 import socket
 import threading
 import time
@@ -300,9 +306,16 @@ class ContractMixin:
             "manifest": self.manifest_snapshot(),
         }
         headers: dict[str, str] = {}
-        token = getattr(self.cfg, "opennvr_token", None)
+        token = getattr(self.cfg, "opennvr_token", None) or os.environ.get(
+            "OPENNVR_INTERNAL_API_KEY"
+        )
         if token:
+            # Both header shapes: the registry's register route accepts
+            # a user JWT (Authorization: Bearer) or the deployment's
+            # INTERNAL_API_KEY (X-Internal-Api-Key) — sending both lets
+            # one config key work against either credential kind.
             headers["Authorization"] = f"Bearer {token}"
+            headers["X-Internal-Api-Key"] = str(token)
         endpoint = f"{str(opennvr_url).rstrip('/')}/api/v1/apps/register"
         try:
             response = httpx.post(

@@ -2,21 +2,29 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 """
-Inference-listener example app.
+Inference-listener example app — the "hello world" of the
+``opennvr-app-sdk``.
 
-The canonical subscriber-side template for KAI-C's NATS event bus.
-Connects to NATS, subscribes to a configurable
-``opennvr.inference.*`` subject pattern, and prints each
-``InferenceCompletedEvent`` to stdout. Every alert in the published
-stream is correlation-id-traceable back through KAI-C's audit log.
+Connects to NATS, subscribes to a configurable ``opennvr.inference.*``
+subject pattern, and prints each ``InferenceCompletedEvent`` to stdout.
+Every event in the stream is correlation-id-traceable back through
+KAI-C's audit log.
 
-This is the simplest possible consumer — community contributors copy
-it as a template for monitoring apps that prefer "subscribe to
-inference results" over "drive inference via /infer". The key
-difference from intrusion-detection: this app does NOT need its own
-camera or its own KAI-C call. It receives results that some OTHER
-component (intrusion-detection, a dashboard, etc.) already drove.
-One adapter inference fans out to N subscribers.
+This is the simplest possible :class:`~opennvr_app_sdk.Detector`
+(App SDK spec §02): the SDK base owns the NATS connect / subscribe /
+drain loop, per-message JSON decoding + exception isolation, the §03
+contract endpoints, and the CLI / signal lifecycle behind
+``app(InferenceListener).run()``. What's left here is the sink —
+``handle_event`` — plus config parsing and the MANIFEST.
+
+One deliberate twist: a stock Detector filters events down to
+``on_detections(camera_id, detections, event)``, dropping anything
+without a camera or a detections list. This listener prints EVERY
+event on the bus — ASR transcripts, captions, whatever — so it plugs
+in one hook lower, overriding ``_handle_raw`` and keeping its
+historical ``handle_event(subject, payload)`` extension point.
+Copy-as-template rule of thumb: if your app reacts to detections,
+implement ``on_detections``; if it wants the raw firehose, do this.
 
 Run:
     python inference_listener.py --config config.yml          # daemon
@@ -24,19 +32,33 @@ Run:
 """
 from __future__ import annotations
 
-import argparse
-import asyncio
 import json
 import logging
-import signal
-import sys
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
-import yaml
+from opennvr_app_sdk import AppManifest, Detector, Param, app
+from opennvr_app_sdk.config import load_yaml
 
 logger = logging.getLogger("inference-listener")
+
+
+MANIFEST = AppManifest(
+    id="inference-listener",
+    name="Inference Listener",
+    version="1.0.0",
+    category="observability",
+    summary=(
+        "Prints every InferenceCompletedEvent on the opennvr.inference.* "
+        "bus — the copy-as-template subscriber example."
+    ),
+    requires_tasks=[],  # listens to whatever is already flowing
+    subscribes="opennvr.inference.>",
+    params=[
+        Param("subject_pattern", str, default="opennvr.inference.>"),
+    ],
+    emits=[],  # prints to stdout; fires no alerts
+)
 
 
 # ── Config ─────────────────────────────────────────────────────────
@@ -54,9 +76,7 @@ def load_config(path: str) -> AppConfig:
     """Parse a YAML config file into a typed AppConfig. Raises
     ``ValueError`` on malformed input — caller's job to surface a
     useful operator message and exit non-zero."""
-    raw = yaml.safe_load(Path(path).read_text())
-    if not isinstance(raw, dict):
-        raise ValueError(f"config {path!r}: root must be a mapping")
+    raw = load_yaml(path)
     nats_url = str(raw.get("nats_url") or "").strip()
     if not nats_url:
         raise ValueError("config: 'nats_url' is required")
@@ -78,77 +98,47 @@ def load_config(path: str) -> AppConfig:
 # ── Subscriber ─────────────────────────────────────────────────────
 
 
-class InferenceListener:
-    """Holds the NATS connection + the subject subscription. The
-    main loop runs in an asyncio event loop; ``stop()`` (or SIGINT /
-    SIGTERM) cleanly drains and exits.
+class InferenceListener(Detector):
+    """The SDK base owns the NATS loop; ``stop()`` (or SIGINT /
+    SIGTERM via the runner) cleanly drains and exits.
 
-    Override ``handle_event(event_dict)`` in a subclass to plug your
-    own logic in — that's the extension point for community apps
+    Override ``handle_event(subject, payload)`` in a subclass to plug
+    your own logic in — that's the extension point for community apps
     (route to Slack, count detections, update a dashboard, etc.).
     The default implementation prints the event to stdout in a
     one-line-per-event format suitable for ``tail -f``.
     """
 
-    def __init__(self, config: AppConfig) -> None:
-        self._config = config
-        self._stop_event = asyncio.Event()
-        self._nc: Any = None
+    manifest = MANIFEST
+
+    def __init__(self, config: AppConfig, dispatcher: Any = None) -> None:
+        # ``dispatcher`` is unused (this app fires no alerts) but the
+        # SDK runner passes one; tests construct with config alone.
+        super().__init__(config, dispatcher)
         self._received_count: int = 0
 
-    def stop(self) -> None:
-        self._stop_event.set()
-
-    async def run(self) -> None:
-        """Connect, subscribe, loop until stop_event. Always cleans
-        up the NATS connection."""
-        # Lazy import — operators on the disabled path don't pay it.
-        import nats
-
-        connect_kwargs: dict[str, Any] = {
-            "servers": [self._config.nats_url],
-            "connect_timeout": 5.0,
-            "reconnect_time_wait": 1.0,
-            "max_reconnect_attempts": -1,  # keep retrying forever
-        }
-        if self._config.nats_token:
-            connect_kwargs["token"] = self._config.nats_token
-        self._nc = await nats.connect(**connect_kwargs)
-        logger.info(
-            "connected to %s, subscribing to %r",
-            self._config.nats_url, self._config.subject_pattern,
-        )
+    def _handle_raw(self, data: bytes, *, subject: str = "") -> list:
+        """Raw-firehose hook (see module docstring): decode + isolate,
+        then print — no camera_id / detections filtering."""
         try:
-            sub = await self._nc.subscribe(self._config.subject_pattern)
-            async for msg in sub.messages:
-                try:
-                    payload = json.loads(msg.data)
-                except json.JSONDecodeError as exc:
-                    logger.warning(
-                        "skipping non-JSON message on %r: %s",
-                        msg.subject, exc,
-                    )
-                    continue
-                self._received_count += 1
-                try:
-                    self.handle_event(msg.subject, payload)
-                except Exception:
-                    # No single event handler failure should kill the
-                    # subscriber. Operators will see the traceback in
-                    # the log and the next event is still processed.
-                    logger.exception("handler failed for subject=%s", msg.subject)
-                if self._config.once:
-                    self.stop()
-                if self._stop_event.is_set():
-                    break
-        finally:
-            try:
-                await self._nc.drain()
-            except Exception:
-                try:
-                    await self._nc.close()
-                except Exception:
-                    pass
+            payload = json.loads(data)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            logger.warning("skipping non-JSON message on %r: %s", subject, exc)
+            return []
+        self._contract_note_event()
+        self._received_count += 1
+        try:
+            self.handle_event(subject, payload)
+        except Exception:
+            # No single event handler failure should kill the
+            # subscriber. Operators will see the traceback in
+            # the log and the next event is still processed.
+            logger.exception("handler failed for subject=%s", subject)
+        return []
+
+    def state_snapshot(self) -> dict[str, Any]:
+        """``GET /state`` — the running receive counter."""
+        return {"received": self._received_count}
 
     # ── Extension point ───────────────────────────────────────────
 
@@ -186,50 +176,9 @@ class InferenceListener:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="inference-listener",
-        description="Subscribe to KAI-C's NATS inference broadcast surface.",
-    )
-    parser.add_argument("--config", required=True, help="Path to config.yml")
-    parser.add_argument(
-        "--once",
-        action="store_true",
-        help="Process one event and exit (smoke testing).",
-    )
-    parser.add_argument(
-        "--log-level",
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-    )
-    args = parser.parse_args(argv)
-
-    logging.basicConfig(
-        level=args.log_level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    try:
-        config = load_config(args.config)
-    except (ValueError, OSError) as exc:
-        print(f"config error: {exc}", file=sys.stderr)
-        return 2
-    config.once = args.once
-
-    listener = InferenceListener(config)
-
-    # SIGINT / SIGTERM → graceful drain.
-    loop = asyncio.new_event_loop()
-
-    def _handle_signal(_signum, _frame):
-        logger.info("signal received, stopping…")
-        loop.call_soon_threadsafe(listener.stop)
-
-    signal.signal(signal.SIGINT, _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
-    try:
-        loop.run_until_complete(listener.run())
-    finally:
-        loop.close()
-    return 0
+    """Console-script entry point (``[project.scripts]``). The SDK
+    runner owns argparse, logging, signals, and the loop lifecycle."""
+    return app(InferenceListener, load_config=load_config).run(argv)
 
 
 if __name__ == "__main__":  # pragma: no cover

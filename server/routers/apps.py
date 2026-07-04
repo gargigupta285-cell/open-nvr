@@ -35,16 +35,18 @@ Routes (mounted under ``/api/v1``):
 """
 
 import ipaddress
+import secrets
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from core.auth import get_current_active_user
+from core.auth import get_current_active_user, verify_token
 from core.database import get_db
 from models import InstalledApp, User
 from services.audit_service import write_audit_log
@@ -208,6 +210,83 @@ def validate_app_url(url: str) -> str | None:
     )
 
 
+# ── Registration auth (user JWT or service key) ────────────────────
+
+# Registration is a service-to-service call: SDK apps boot with only
+# the deployment's INTERNAL_API_KEY (the same secret adapters use
+# against KAI-C), not a user JWT. ``POST /apps/register`` therefore
+# accepts EITHER a normal user bearer token OR an ``X-Internal-Api-Key``
+# header matching ``settings.internal_api_key``. Every other route
+# (enable/disable/config/status) is an operator action and stays
+# strictly user-authenticated via ``get_current_active_user``.
+
+# auto_error=False: a missing Authorization header must fall through to
+# the service-key check instead of short-circuiting with a 403.
+_optional_bearer = HTTPBearer(auto_error=False)
+
+
+def _internal_api_key() -> str:
+    """The shared secret SDK apps send in ``X-Internal-Api-Key``. Read
+    lazily from settings (same pattern as
+    ``services.kai_c_service.KaiCService._internal_api_key``) so tests
+    and dev setups that mutate the environment late still see it."""
+    try:
+        from core.config import settings
+
+        return settings.internal_api_key or ""
+    except Exception:
+        import os
+
+        return os.environ.get("INTERNAL_API_KEY", "")
+
+
+def get_register_principal(
+    x_internal_api_key: str | None = Header(default=None, alias="X-Internal-Api-Key"),
+    credentials: HTTPAuthorizationCredentials | None = Depends(_optional_bearer),
+    db: Session = Depends(get_db),
+) -> User | None:
+    """Authenticate a registration call.
+
+    Returns the ``User`` for the JWT path, or ``None`` for the
+    service-key path (audit-logged as the ``app-sdk`` service
+    identity). Raises 401 when neither credential is valid.
+    """
+    if x_internal_api_key is not None:
+        expected = _internal_api_key()
+        if expected and secrets.compare_digest(x_internal_api_key, expected):
+            return None  # service identity
+        # The SDK sends its one token as BOTH headers (it can't know
+        # which kind the operator provisioned) — a non-matching key
+        # only fails the request when there's no bearer to fall back to.
+        if credentials is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid internal API key",
+            )
+
+    if credentials is not None:
+        token_data = verify_token(credentials.credentials)
+        if token_data is not None:
+            user = (
+                db.query(User)
+                .filter(User.username == token_data.username)
+                .first()
+            )
+            if user is not None and user.is_active:
+                return user
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Provide a bearer token or X-Internal-Api-Key",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
 # ── Request schemas / serialization ────────────────────────────────
 
 
@@ -268,7 +347,7 @@ async def list_apps(
 @router.post("/register")
 async def register_app(
     request: AppRegisterRequest,
-    current_user: User = Depends(get_current_active_user),
+    principal: User | None = Depends(get_register_principal),
     db: Session = Depends(get_db),
 ):
     """
@@ -281,7 +360,9 @@ async def register_app(
     The app URL must pass :func:`validate_app_url` — /status later
     server-side fetches it, so off-box URLs are refused here (SSRF).
 
-    Requires authenticated user.
+    Requires an authenticated user OR the deployment's internal API
+    key (``X-Internal-Api-Key``) — registration is service-to-service;
+    see :func:`get_register_principal`.
     """
     manifest = request.manifest
     missing = [key for key in ("id", "name", "version") if not manifest.get(key)]
@@ -318,13 +399,20 @@ async def register_app(
     write_audit_log(
         db,
         action="app.register",
-        user_id=current_user.id,
+        # Service-key registrations have no user row; the actor is
+        # recorded in details instead so the audit trail stays whole.
+        user_id=principal.id if principal is not None else None,
         entity_type="app",
         entity_id=app_id,
         details={
             "created": created,
             "url": row.url,
             "version": row.version,
+            "registered_by": (
+                f"user:{principal.username}"
+                if principal is not None
+                else "service:internal-api-key"
+            ),
         },
     )
     return _serialize_app(row)

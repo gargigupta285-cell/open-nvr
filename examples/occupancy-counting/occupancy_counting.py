@@ -148,6 +148,15 @@ class AppConfig:
     nats_alerts_token: str | None = None
     nats_alerts_subject_prefix: str = "opennvr.alerts"
 
+    # App contract (spec §03) — all optional; see the SDK's contract
+    # module. ``contract_port`` serves /health /manifest /state;
+    # ``opennvr_url`` triggers registry self-registration on boot.
+    contract_port: int | None = None
+    contract_bind_host: str | None = None
+    contract_host: str | None = None
+    opennvr_url: str | None = None
+    opennvr_token: str | None = None
+
 
 def load_config(path: str) -> AppConfig:
     """Parse a YAML config file into a typed AppConfig.
@@ -273,6 +282,13 @@ def load_config(path: str) -> AppConfig:
         nats_alerts_url=nats_alerts_url,
         nats_alerts_token=nats_alerts_token,
         nats_alerts_subject_prefix=nats_prefix,
+        contract_port=(
+            int(raw["contract_port"]) if raw.get("contract_port") is not None else None
+        ),
+        contract_bind_host=raw.get("contract_bind_host"),
+        contract_host=raw.get("contract_host"),
+        opennvr_url=raw.get("opennvr_url"),
+        opennvr_token=raw.get("opennvr_token"),
     )
 
 

@@ -6,15 +6,25 @@ requires-python = ">=3.11"
 license = { text = "AGPL-3.0" }
 
 # Deliberately minimal — meant as a clean copy-as-template for
-# community contributors building subscriber apps. The whole story
-# is `await nats.connect → subscribe → handle_event`, so the dep
-# list is just the NATS client + PyYAML for config.
+# community contributors building subscriber apps. The SDK owns the
+# whole runtime stack (nats-py subscribe loop, PyYAML config); the
+# whole story is `handle_event` plus a MANIFEST.
 dependencies = [
-    "nats-py>=2.6",
-    "PyYAML>=6.0,<7.0",
+    "opennvr-app-sdk",
 ]
 
+[tool.uv.sources]
+opennvr-app-sdk = { path = "../../sdk/opennvr-app-sdk", editable = true }
+
 [project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+]
+
+# Mirrors the optional-dependencies group so a plain ``uv sync`` gets a
+# test-ready environment (uv installs the ``dev`` group by default).
+[dependency-groups]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23",
