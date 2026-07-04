@@ -37,6 +37,30 @@ The thirteen shipped examples cover two orthogonal axes of the OpenNVR pipeline:
 
 ---
 
+## 🐳 Run the detector apps against the stack
+
+The migrated SDK detector apps ship a compose overlay
+([`docker-compose.apps.yml`](../docker-compose.apps.yml) at the repo
+root). On boot each app subscribes to the stack's NATS inference
+stream, serves the SDK contract endpoints (`/health` `/manifest`
+`/state`), **self-registers with the app registry** using the
+deployment's `INTERNAL_API_KEY`, and appears in the **App Catalog**
+(Settings → App Catalog) with a live status dot and an auto-generated
+config form:
+
+```bash
+# From the repo root, on top of the standard stack:
+docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d
+```
+
+Currently in the overlay: `loitering-detection` (contract port 9200)
+and `occupancy-counting` (9201). Each app's runtime config is
+generated at `up` time from its `config.docker.yml` template (secrets
+come from `.env`) — edit the template's cameras/zones for your scene
+and re-run `up`.
+
+---
+
 ## ✅ Shipped — runnable today
 
 ### [`intrusion-detection/`](intrusion-detection)
