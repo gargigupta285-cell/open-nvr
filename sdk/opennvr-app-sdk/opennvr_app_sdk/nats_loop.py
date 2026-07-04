@@ -25,6 +25,7 @@ Host requirements (duck-typed, set by the archetype ``__init__``):
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from typing import Any
 
@@ -70,7 +71,14 @@ class NatsSubscriberMixin:
         try:
             sub = await self._nc.subscribe(self.cfg.subject_pattern)
             async for msg in sub.messages:
-                self._handle_raw(msg.data, subject=msg.subject)
+                # ``_handle_raw`` is sync on the stock archetypes, but
+                # apps with async sinks (the home-assistant-relay's
+                # publishers are awaitable) may override it as a
+                # coroutine — await it so per-message ordering and
+                # backpressure are preserved either way.
+                result = self._handle_raw(msg.data, subject=msg.subject)
+                if inspect.isawaitable(result):
+                    await result
                 if once:
                     self.stop()
                 if self._stop_event.is_set():

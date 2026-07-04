@@ -3,7 +3,7 @@
 
 """
 Footage-search example app — natural-language search over recorded
-inference history.
+inference history, now on the ``opennvr-app-sdk``.
 
     $ python footage_search.py search "red truck at the dock yesterday"
 
@@ -29,6 +29,29 @@ Two subcommands:
   match carries the ``correlation_id`` that ties it to the exact
   recorded segment in OpenNVR.
 
+What lives where after the migration
+------------------------------------
+
+The :class:`Indexer` is a :class:`~opennvr_app_sdk.Detector` (App SDK
+spec §02): the SDK base owns the NATS connect / subscribe / drain
+loop, per-message JSON decoding + exception isolation, and the §03
+contract endpoints. Because the indexer also stores caption-only
+events (no ``result.detections``), it hooks ``handle_event`` — the
+whole-event stage above the base's detections walk — rather than
+``on_detections``.
+
+Deliberately app-side (the "don't force it" clause):
+
+* ``store.py`` — the SQLite keyframe schema + FTS-ish search query,
+  and ``keyframe_from_event`` (which result shapes are indexable is
+  this app's business);
+* ``query.py`` — the natural-language → structured-filter parsers
+  (heuristic + optional Ollama);
+* the two-subcommand CLI (``index`` / ``search``): the SDK's
+  ``app(...)`` runner models single-loop daemons, so ``main`` keeps
+  its own argparse and drives ``Indexer.run()`` itself for the
+  ``index`` path.
+
 Why this works without a special model: object *classes* come from the
 detector's labels; *attributes* like "red" come from the captioner's
 scene text. Searching across both is what lets "red truck" resolve. For
@@ -46,20 +69,44 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime as _dt
-import json
 import logging
 import signal
 import sys
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
-import yaml
+from opennvr_app_sdk import Alert, AppManifest, Detector, Param
+from opennvr_app_sdk.config import load_yaml
 
 from query import DEFAULT_LABELS, parse_heuristic, parse_with_ollama
 from store import FootageStore, SearchResult, keyframe_from_event
 
 logger = logging.getLogger("footage-search")
+
+
+MANIFEST = AppManifest(
+    id="footage-search",
+    name="Footage Search",
+    version="1.0.0",
+    category="forensics",
+    summary=(
+        "Indexes inference events (labels + captions) into SQLite and "
+        "answers natural-language footage queries like 'red truck at "
+        "the dock yesterday'."
+    ),
+    requires_tasks=[],  # indexes whatever detector/captioner streams exist
+    subscribes="opennvr.inference.>",
+    params=[
+        Param("db_path", str, default="footage_index.sqlite3"),
+        Param("subject_pattern", str, default="opennvr.inference.>"),
+        Param("extra_labels", list, default=[],
+              description="Extra label vocabulary for the query parser."),
+        Param("camera_aliases", dict, default={},
+              description="word -> camera_id aliases ('dock' -> 'cam-dock')."),
+        Param("result_limit", int, default=25),
+    ],
+    emits=[],  # writes an index; fires no alerts
+)
 
 
 # ── Config ─────────────────────────────────────────────────────────
@@ -85,9 +132,7 @@ class AppConfig:
 
 
 def load_config(path: str) -> AppConfig:
-    raw = yaml.safe_load(Path(path).read_text())
-    if not isinstance(raw, dict):
-        raise ValueError(f"config {path!r}: root must be a mapping")
+    raw = load_yaml(path)
 
     db_path = str(raw.get("db_path") or "footage_index.sqlite3").strip()
     if not db_path:
@@ -134,19 +179,29 @@ def load_config(path: str) -> AppConfig:
 # ── Indexer ────────────────────────────────────────────────────────
 
 
-class Indexer:
-    """Subscribes to NATS inference events and writes searchable
-    keyframes into the store."""
+class Indexer(Detector):
+    """Subscribes to NATS inference events (via the SDK's Detector
+    loop) and writes searchable keyframes into the store.
 
-    def __init__(self, config: AppConfig, store: FootageStore) -> None:
-        self._config = config
+    Hooks :meth:`handle_event` instead of ``on_detections`` because
+    caption-only events (a BLIP result has ``result.caption`` and no
+    detections list) are exactly as indexable as detection events —
+    the base's detections walk would drop them.
+    """
+
+    manifest = MANIFEST
+
+    def __init__(
+        self,
+        config: AppConfig,
+        store: FootageStore,
+        dispatcher: Any = None,
+    ) -> None:
+        # ``dispatcher`` is unused (this app fires no alerts); the
+        # historical constructor is ``Indexer(config, store)``.
         self._store = store
-        self._stop_event = asyncio.Event()
-        self._nc: Any = None
+        super().__init__(config, dispatcher)
         self._indexed = 0
-
-    def stop(self) -> None:
-        self._stop_event.set()
 
     def ingest(self, event: dict[str, Any]) -> bool:
         """Index one event. Returns True if a keyframe was stored."""
@@ -157,47 +212,31 @@ class Indexer:
         self._indexed += 1
         return True
 
-    async def run(self, *, once: bool = False) -> None:
-        import nats
+    def handle_event(self, event: Any) -> list[Alert]:
+        """Whole-event hook (decode + isolation live in the SDK's
+        ``_handle_raw`` above this)."""
+        self._contract_note_event()
+        if isinstance(event, dict):
+            self.ingest(event)
+            if self._indexed and self._indexed % 100 == 0:
+                logger.info("indexed %d keyframes", self._indexed)
+        return []
 
-        connect_kwargs: dict[str, Any] = {
-            "servers": [self._config.nats_url],
-            "connect_timeout": 5.0,
-            "reconnect_time_wait": 1.0,
-            "max_reconnect_attempts": -1,
+    def state_snapshot(self) -> dict[str, Any]:
+        """``GET /state`` — session + total index counters."""
+        return {
+            "indexed_this_session": self._indexed,
+            "rows_total": self._store.count(),
         }
-        if self._config.nats_token:
-            connect_kwargs["token"] = self._config.nats_token
-        self._nc = await nats.connect(**connect_kwargs)
+
+    async def run(self, *, once: bool = False) -> None:
         logger.info(
             "footage-search indexer started: db=%s, subject=%r (%d rows already indexed)",
-            self._config.db_path, self._config.subject_pattern, self._store.count(),
+            self.cfg.db_path, self.cfg.subject_pattern, self._store.count(),
         )
         try:
-            sub = await self._nc.subscribe(self._config.subject_pattern)
-            async for msg in sub.messages:
-                try:
-                    payload = json.loads(msg.data)
-                except json.JSONDecodeError:
-                    continue
-                try:
-                    self.ingest(payload)
-                except Exception:
-                    logger.exception("ingest failed for subject=%s", msg.subject)
-                if self._indexed and self._indexed % 100 == 0:
-                    logger.info("indexed %d keyframes", self._indexed)
-                if once:
-                    self.stop()
-                if self._stop_event.is_set():
-                    break
+            await super().run(once=once)
         finally:
-            try:
-                await self._nc.drain()
-            except Exception:
-                try:
-                    await self._nc.close()
-                except Exception:
-                    pass
             logger.info("indexer stopped; %d keyframes this session", self._indexed)
 
 
@@ -249,6 +288,8 @@ def format_results(results: list[SearchResult]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Two-subcommand CLI — kept app-side (the SDK's ``app(...)``
+    # runner models single-loop daemons; ``search`` is a one-shot).
     parser = argparse.ArgumentParser(
         prog="footage-search",
         description="Index inference events and search recorded footage in natural language.",
