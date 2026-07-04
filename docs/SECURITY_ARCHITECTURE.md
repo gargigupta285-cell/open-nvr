@@ -348,3 +348,37 @@ OpenNVR's `firmware_health` job (V-014) consumes:
 * CVE-2025-1316 (Edimax; CISA ICSA-25-063-08)
 * CVE-2019-11219 / CVE-2019-11220 (iLnkP2P)
 * CVE-2021-28372 (ThroughTek Kalay SDK; CISA ICSA-21-229-01)
+
+
+## Addendum (Jul 2026) — Adapter permission approval & model-tamper containment
+
+Shipped with the A2.4b operator gate; this is the enforcement half of the
+§8 permission model and, to our knowledge, unique among IP-camera / NVR
+platforms — a candidate highlight for the paper's sovereignty section.
+
+**The claim:** on OpenNVR, an AI model service cannot touch an elevated
+host scope — GPU, a network egress host, a filesystem path, shared memory,
+host metadata — unless a named operator granted that exact scope, and the
+grant has a receipt.
+
+**Mechanism (all fail-closed):**
+1. Adapters self-declare permissions in `/capabilities`; declarations are
+   re-polled every 60s and diffed.
+2. Any declared permission puts the adapter in `pending` — registered and
+   visible, but refused on **every** inference path (governed, streaming,
+   legacy) until granted. Bundled adapters declare nothing and auto-approve,
+   so the default deployment has zero added friction.
+3. Grants are per-scope keys (one per egress host / path), each with a
+   unique `adapter_grant_id`, actor, and timestamp in the append-only audit
+   log; revocation immediately stops serving.
+4. **Model-tamper containment:** a running adapter that *newly* declares a
+   permission — the signature of a swapped or compromised model service,
+   complementing fingerprint-drift detection — flips back to `pending` and
+   stops serving on the next poll, with audit + alert events. Removed
+   permissions prune their stale grants so re-added scopes need fresh
+   approval.
+
+**Residual risk (documented):** the gate governs *declared* scopes; an
+adapter that silently uses undeclared resources is contained by the
+container sandbox layer (declared-scope nftables / mount enforcement,
+roadmap) and by `local_only` refusing declared egress at registration.
