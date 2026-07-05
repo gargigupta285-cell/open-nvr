@@ -642,7 +642,10 @@ class Monitor:
     line: list[float] | None = None   # crossing: [x1,y1,x2,y2] normalized
     current: dict[str, int] = field(default_factory=dict)
     peak: dict[str, int] = field(default_factory=dict)
-    counters: dict = field(default_factory=dict)  # per-camera LineCounter (crossing)
+    # Per-camera LineCounter — LEGACY-loop crossing monitors only. Converged
+    # crossing monitors (kind in _CONVERGED) tally in MonitorHost's
+    # HostedMonitor.tallies instead; this stays {} for them. Never serialized.
+    counters: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         d = {
