@@ -671,9 +671,22 @@
     // (× to remove); + opens a browse/search to add ones whose backend is
     // configured. Toggling calls the server, which reconfigures the live toolset.
     let _skills=[];
-    async function loadSkills(){ try{ _skills=(await (await fetch("/skills")).json()).skills||[]; }
-      catch{ const c=$("skillsCard"); if(c) c.style.display="none"; return; }
-      renderSkills(); }
+    async function loadSkills(){
+      // Never hide the whole card on a hiccup — a transient /skills failure
+      // must not make the panel (and its + button) vanish, which reads as
+      // "the feature doesn't exist". Degrade to an inline retry instead.
+      try{
+        const r=await fetch("/skills");
+        if(!r.ok) throw new Error("HTTP "+r.status);
+        _skills=(await r.json()).skills||[];
+        renderSkills();
+      }catch(e){
+        const el=$("skillsList");
+        if(el) el.innerHTML='<div class="empty-note">Couldn’t load skills ('+
+          (e&&e.message?e.message:"error")+'). <a href="#" id="skillRetry">Retry</a></div>';
+        const rt=$("skillRetry"); if(rt) rt.addEventListener("click",ev=>{ev.preventDefault();loadSkills();});
+      }
+    }
     // Only show a rail card when its skill is enabled — don't offer actions the
     // agent can't currently do (alarm→Alarms, watch→Watching, task→Background
     // tasks, report→Scheduled reports).
