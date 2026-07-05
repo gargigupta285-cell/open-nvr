@@ -988,17 +988,20 @@ function MenuItem({ item, onClose }: { item: { icon: React.ReactNode; label: str
   )
 }
 
-// Add Camera Dialog Component
-function AddCameraDialog({ 
-  onClose, 
+// Add Camera Dialog Component. Shared by Live View (with the "Existing" tab for
+// tile assignment) and the Cameras tab (add-only, no "Existing" tab).
+export function AddCameraDialog({
+  onClose,
   onCameraAdded,
   onCameraSelected,
-  existingCameras 
-}: { 
+  existingCameras = [],
+  title = 'Add Camera to Tile',
+}: {
   onClose: () => void
   onCameraAdded: (cameraId?: number) => void
   onCameraSelected?: (cameraId: number) => void
-  existingCameras: Array<{id: number, name: string}>
+  existingCameras?: Array<{id: number, name: string}>
+  title?: string
 }) {
   const [mode, setMode] = useState<'discover' | 'select' | 'manual'>('discover')
   const [loading, setLoading] = useState(false)
@@ -1214,22 +1217,20 @@ function AddCameraDialog({
       setError('Name and IP address are required')
       return
     }
-    if (!form.rtsp_url.trim()) {
-      setError('RTSP URL is required')
-      return
-    }
 
     setLoading(true)
     setError(null)
-    
+
     try {
+      // rtsp_url is optional: when blank, the server derives it from the IP +
+      // credentials (ONVIF, then vendor RTSP templates) and back-fills identity.
       const response = await apiService.createCamera({
         name: form.name,
         ip_address: form.ip_address,
         port: form.port,
         username: form.username || undefined,
         password: form.password || undefined,
-        rtsp_url: form.rtsp_url,
+        rtsp_url: form.rtsp_url || undefined,
       })
       const newCameraId = response?.data?.id
       
@@ -1267,7 +1268,7 @@ function AddCameraDialog({
         <div className="flex items-center justify-between p-4 border-b border-neutral-700">
           <h3 className="font-semibold flex items-center gap-2">
             <Video size={18} />
-            Add Camera to Tile
+            {title}
           </h3>
           <button 
             className="p-1 hover:bg-[var(--panel-2)] rounded"
@@ -1293,13 +1294,15 @@ function AddCameraDialog({
             <Plus size={12} className="inline mr-1" />
             Manual
           </button>
-          <button
-            className={`flex-1 px-3 py-2 text-xs ${mode === 'select' ? 'bg-[var(--accent)]/20 text-[var(--accent)] border-b-2 border-[var(--accent)]' : 'text-[var(--text-dim)] hover:bg-[var(--panel-2)]'}`}
-            onClick={() => setMode('select')}
-          >
-            <Camera size={12} className="inline mr-1" />
-            Existing
-          </button>
+          {existingCameras.length > 0 && (
+            <button
+              className={`flex-1 px-3 py-2 text-xs ${mode === 'select' ? 'bg-[var(--accent)]/20 text-[var(--accent)] border-b-2 border-[var(--accent)]' : 'text-[var(--text-dim)] hover:bg-[var(--panel-2)]'}`}
+              onClick={() => setMode('select')}
+            >
+              <Camera size={12} className="inline mr-1" />
+              Existing
+            </button>
+          )}
         </div>
 
         {/* Content */}

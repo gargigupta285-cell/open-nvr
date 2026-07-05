@@ -1,16 +1,16 @@
 # Copyright (c) 2026 OpenNVR
 # This file is part of OpenNVR.
-# 
+#
 # OpenNVR is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
-# 
+#
 # OpenNVR is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
-# 
+#
 # You should have received a copy of the GNU Affero General Public License
 # along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
 
@@ -126,8 +126,54 @@ async def create_camera(
     current_user: User = Depends(get_current_active_user),
     request: Request = None,
 ):
-    """Create a new camera."""
+    """Create a new camera.
+
+    When no RTSP URL is supplied but credentials are, the server derives it
+    from the IP + credentials (ONVIF direct-connect, then vendor RTSP
+    templates) and back-fills the camera's identity — so operators normally
+    only need IP + username + password.
+    """
     _log_camera_creation_start(current_user.id, camera_create, request)
+
+    # On connect, when credentials are supplied: derive the RTSP URL + identity
+    # (if no URL was given) and sync the camera's clock to correct time. Both
+    # are best-effort — a failure here never blocks camera creation.
+    if camera_create.username and camera_create.password:
+        from services.camera_source_resolver import resolve_source, sync_camera_time
+
+        onvif_port = None
+        if not camera_create.rtsp_url:
+            try:
+                derived = await resolve_source(
+                    camera_create.ip_address,
+                    camera_create.username,
+                    camera_create.password,
+                    camera_create.port or 554,
+                )
+            except Exception:
+                derived = None
+            if derived and derived.get("rtsp_url"):
+                onvif_port = derived.get("onvif_port")
+                camera_create = camera_create.model_copy(
+                    update={
+                        "rtsp_url": derived["rtsp_url"],
+                        "manufacturer": camera_create.manufacturer or derived.get("manufacturer"),
+                        "model": camera_create.model or derived.get("model"),
+                        "firmware_version": camera_create.firmware_version
+                        or derived.get("firmware_version"),
+                        "serial_number": camera_create.serial_number
+                        or derived.get("serial_number"),
+                        "hardware_id": camera_create.hardware_id or derived.get("hardware_id"),
+                    }
+                )
+        # Correct the camera clock (fixes the timestamp burned into the video).
+        # sync_camera_time is self-guarding — it returns False rather than raising.
+        await sync_camera_time(
+            camera_create.ip_address,
+            camera_create.username,
+            camera_create.password,
+            onvif_port,
+        )
 
     try:
         cam = await CameraService.create_camera(
