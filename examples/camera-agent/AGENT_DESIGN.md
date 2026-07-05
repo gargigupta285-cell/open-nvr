@@ -3,7 +3,7 @@ Copyright (c) 2026 OpenNVR
 SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 
-# Camera-agent design: tools vs prompt vs flows, and how to keep it good
+# OpenNVR Agent (formerly Camera Agent) design: tools vs prompt vs flows, and how to keep it good
 
 A practical guide to *where* each capability should live and *how* to measure
 "better". The rule of thumb:

@@ -21,7 +21,7 @@ than 3 cars in the driveway", "hard hat missing" — as an SDK
 `Detector` class. That single class is reachable through **two front
 doors**: the **App Catalog** (an operator enables it from a card,
 fills in an auto-generated config form, and it runs as a 24/7
-daemon) and the **camera agent** (a user *says* "keep watching the
+daemon) and the **OpenNVR Agent** (formerly the Camera Agent — a user *says* "keep watching the
 driveway and tell me if more than 3 cars show up", and the agent
 spins up the same class as a session monitor). Zero agent code on
 your side. Whether either door can actually *do* the thing is decided
@@ -33,7 +33,7 @@ adapters advertise (`tasks_advertised` from `GET /capabilities`).
 
 Before the convergence, the same rules existed twice: the standalone
 examples (`loitering-detection`, `occupancy-counting`,
-`line-crossing`, …) each ran a bespoke loop, and the camera agent
+`line-crossing`, …) each ran a bespoke loop, and the OpenNVR Agent
 shipped its own `monitor` primitives — notify, count, crossing — that
 reimplemented the same logic, down to sharing ByteTrack. Two
 implementations of "count people in a zone" is one too many.

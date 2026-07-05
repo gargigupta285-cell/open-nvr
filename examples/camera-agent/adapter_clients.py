@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -128,6 +129,78 @@ class KaicAdapterClient(_ReusableClientMixin):
                     await asyncio.sleep(self._retry_backoff_s)
         assert last_exc is not None
         raise last_exc
+
+
+class KaicCapabilitiesClient(_ReusableClientMixin):
+    """Cached view of KAI-C's aggregated capabilities — which task strings
+    (``tasks_advertised``) the registered adapters currently provide.
+
+    ``GET {kaic_url}/api/v1/ai/capabilities`` with the same
+    ``X-Internal-Api-Key`` the infer path uses (KAI-C's dev-mode bypass
+    means an empty key is fine on loopback deployments). Results are
+    cached for ``ttl_seconds`` (default 60) so the demo UI's skills
+    polling never hammers KAI-C.
+
+    This is ADVISORY display data for the skills panel: ``refresh()``
+    never raises, and an unreachable KAI-C (or a fetch that hasn't
+    happened yet) leaves :attr:`tasks_advertised` as ``None`` =
+    "unknown" — callers fall back to config-based availability instead
+    of greying anything out. Failures are negative-cached for the same
+    TTL so a down KAI-C costs at most one short timeout per minute.
+    """
+
+    def __init__(
+        self,
+        *,
+        kaic_url: str,
+        api_key: str = "",
+        ttl_seconds: float = 60.0,
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        self._url = f"{kaic_url.rstrip('/')}/api/v1/ai/capabilities"
+        self._api_key = api_key
+        self._ttl = ttl_seconds
+        self._timeout = timeout_seconds
+        self._fetched_at: float | None = None
+        self._tasks: set[str] | None = None   # None = unknown / unreachable
+
+    @property
+    def tasks_advertised(self) -> set[str] | None:
+        """Last-known union of adapter task strings (``None`` = unknown)."""
+        return self._tasks
+
+    async def refresh(self) -> set[str] | None:
+        """Fetch (at most once per TTL) and return the advertised-task set.
+
+        Never raises — on any error the cached value becomes ``None``
+        ("unknown") until the next TTL window.
+        """
+        now = time.monotonic()
+        if self._fetched_at is not None and now - self._fetched_at < self._ttl:
+            return self._tasks
+        # Stamp BEFORE the call so an unreachable KAI-C is also rate-limited
+        # to one attempt per TTL (negative caching).
+        self._fetched_at = now
+        try:
+            headers = {}
+            if self._api_key:
+                headers["X-Internal-Api-Key"] = self._api_key
+            resp = await self._client().get(self._url, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            tasks: set[str] = set()
+            adapters = data.get("adapters") or {}
+            for cap in adapters.values():
+                for task in (cap or {}).get("tasks_advertised") or []:
+                    tasks.add(str(task))
+            self._tasks = tasks
+        except Exception as exc:
+            logger.debug(
+                "KAI-C capabilities fetch failed (%s); skills fall back to "
+                "config-based availability", exc,
+            )
+            self._tasks = None
+        return self._tasks
 
 
 class SyntheticDetectionClient:

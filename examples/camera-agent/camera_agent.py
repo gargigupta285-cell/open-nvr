@@ -47,6 +47,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from adapter_clients import (
     KaicAdapterClient,
+    KaicCapabilitiesClient,
     OllamaClient,
     OpenAILLMClient,
     PiperClient,
@@ -163,8 +164,9 @@ class AppConfig:
     emergency_contacts: dict[str, str] | None = None
 
     # Identity used for the optional wake word ("Hey <agent_name>") and event
-    # metadata. The demo presents the agent as "the OpenNVR camera agent" (chat
-    # label: "agent") and never uses this as a persona name. If you turn on a
+    # metadata. The demo presents the agent as "the OpenNVR Agent" (chat
+    # label: "agent") and never uses this as a persona name. The default value
+    # stays "Camera Agent" for infra/wake-word compat. If you turn on a
     # named wake word, pick a name STT transcribes reliably and register its
     # spellings in wake_words (an unusual name is often mis-heard).
     agent_name: str = "Camera Agent"
@@ -235,9 +237,10 @@ _DEFAULT_SYSTEM_PROMPT = (
 # The agent's persona name follows the configured voice gender. The actual
 # spoken voice is whichever Piper voice the ai-adapter serves; ``voice_gender``
 # here selects the matching pronouns the agent uses.
-# The agent has no persona name: it presents as "the OpenNVR camera agent" (chat
+# The agent has no persona name: it presents as "the OpenNVR Agent" (chat
 # label "agent"). ``agent_name`` below is a technical default used only for event
-# metadata and the OPTIONAL wake word. The voice is a separate choice.
+# metadata and the OPTIONAL wake word — it keeps the legacy "Camera Agent"
+# value for infra/wake-word compat. The voice is a separate choice.
 DEFAULT_AGENT_NAME = "Camera Agent"
 DEFAULT_VOICE_GENDER = "neutral"
 
@@ -280,6 +283,21 @@ _SKILL_META: list[tuple[str, str, str, str, str]] = [
     ("task", "⚙", "Run longer searches in the background",
      "Check every camera for anyone in a red shirt.", ""),
 ]
+# Which KAI-C task strings (``tasks_advertised``, aggregated live from
+# GET /api/v1/ai/capabilities) back each skill. Advisory display data
+# only: ``skill_requirement_met`` stays the enable gate, so a briefly
+# unreachable KAI-C never disables a working tool — the UI just loses
+# the live "is an adapter for this actually registered?" signal.
+# ``see`` is satisfied by EITHER a captioning or a VQA adapter; the
+# converged watch monitors (count/crossing → occupancy/line_crossing
+# SDK rules) ride on object detection. Skills not listed here (events,
+# footage, alarm, report, task) don't consume KAI-C inference.
+_SKILL_BACKING_TASKS: dict[str, list[str]] = {
+    "see": ["image_captioning", "vqa"],
+    "count": ["object_detection"],
+    "faces": ["face_recognition"],
+    "watch": ["object_detection"],
+}
 
 
 # Phrases Whisper commonly hallucinates from silence / background noise / the
@@ -523,10 +541,11 @@ def _frames_for(runtime, max_frames: int = 3) -> list[dict]:
 
 
 def greeting_for(name: str | None = None) -> str:
-    # Nameless by design — the agent introduces itself as "the OpenNVR camera
-    # agent", not by a persona name. (``name`` is accepted for call-site compat.)
+    # No persona name by design — the agent introduces itself by the product
+    # name, "the OpenNVR Agent" (formerly "Camera Agent"), described as your
+    # camera agent. (``name`` is accepted for call-site compat.)
     return (
-        "Hi, I'm your OpenNVR camera agent. I keep an eye on all your "
+        "Hi, I'm the OpenNVR Agent — your camera agent. I keep an eye on all your "
         "cameras and run the checks you ask for. I can tell you what's "
         "happening right now, look back at what happened earlier, set up "
         "alarms and watches, and take on longer searches in the background "
@@ -1944,6 +1963,12 @@ class CameraAgentRuntime:
             api_key=cfg.kaic_api_key,
             adapter_name=cfg.recognition_adapter,
         )
+        # Live "skills as capabilities" signal: which tasks KAI-C's registered
+        # adapters currently advertise (60s TTL, advisory — see skills_payload).
+        self.kaic_capabilities = KaicCapabilitiesClient(
+            kaic_url=cfg.kaic_url,
+            api_key=cfg.kaic_api_key,
+        )
 
         # Optional read-only footage-search index → enables search_footage.
         self.footage_index = None
@@ -2047,7 +2072,17 @@ class CameraAgentRuntime:
 
     def skills_payload(self) -> list[dict[str, Any]]:
         """Catalogue for the UI: what each skill is, what it uses, and whether
-        it's enabled / can be enabled."""
+        it's enabled / can be enabled.
+
+        Each entry also carries the LIVE KAI-C view: ``backing_tasks`` (the
+        task strings that would serve the skill) and ``tasks_available``
+        (whether the last capabilities fetch saw an adapter advertising one
+        of them) — so the UI can grey a skill out with a reason. Advisory
+        only: ``skill_requirement_met`` remains the enable gate, and when
+        KAI-C is unreachable (last fetch failed / not yet fetched) every
+        skill reports ``tasks_available: true`` — i.e. exactly the previous
+        config-based behavior, never a spuriously greyed-out tool."""
+        live_tasks = self.kaic_capabilities.tasks_advertised   # None = unknown
         advertised = {t["function"]["name"] for t in self.tool_definitions}
         allow = None if self.cfg.enabled_tools is None else set(self.cfg.enabled_tools)
         uses = {
@@ -2072,12 +2107,25 @@ class CameraAgentRuntime:
             # (Vision tools are always advertised and degrade at call time, so a
             # missing backend must still read as not-enabled in the panel.)
             enabled = (primary in advertised) and req_met
-            out.append({
+            backing = _SKILL_BACKING_TASKS.get(sid, [])
+            # Live availability from the tasks_advertised intersection. Unknown
+            # (KAI-C unreachable) or nothing to back → don't grey anything out.
+            tasks_available = (
+                live_tasks is None or not backing
+                or bool(set(backing) & live_tasks)
+            )
+            entry = {
                 "id": sid, "icon": icon, "name": name, "example": example,
                 "uses": uses.get(sid, f"agent app + {self.cfg.llm_model}"),
                 "enabled": enabled, "available": available,
                 "hint": "" if available else (hints.get(req, "Not enabled in config.")),
-            })
+                "backing_tasks": backing, "tasks_available": tasks_available,
+            }
+            if sid == "watch":
+                # The converged monitors: which SDK rule classes back the
+                # count/crossing kinds (spec §07 "one rule library, two doors").
+                entry["rules"] = sorted(MonitorManager._CONVERGED.values())
+            out.append(entry)
         return out
 
     def set_skill_enabled(self, skill_id: str, enabled: bool) -> bool:
@@ -2493,9 +2541,9 @@ class CameraAgentRuntime:
             f"- {cam.camera_id}: {cam.role}" for cam in self.cfg.cameras
         )
         prompt = (
-            f"You are the OpenNVR camera agent. Speak in the FIRST person — "
-            f"say 'I see…', 'I'm watching…', not in the third person. If asked "
-            f"your name, say you're the OpenNVR camera agent.\n\n"
+            f"You are the OpenNVR Agent, this system's camera agent. Speak in "
+            f"the FIRST person — say 'I see…', 'I'm watching…', not in the "
+            f"third person. If asked your name, say you're the OpenNVR Agent.\n\n"
             f"{self.cfg.system_prompt.strip()}\n\n"
             f"Cameras available to you:\n{roster}\n\n"
             f"Always pass one of the camera_id values exactly as listed "
@@ -2690,7 +2738,10 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         """The agent's capabilities for the UI's Skills panel. Each entry reports
         what it ``uses`` (model/adapter/app), whether it's ``enabled`` now, and
         whether it's ``available`` to enable (its backend is configured) — with a
-        ``hint`` otherwise, so the panel never promises something it can't do."""
+        ``hint`` otherwise, so the panel never promises something it can't do.
+        Also refreshes (60s TTL, never raises) the live KAI-C capabilities view
+        behind each entry's ``backing_tasks`` / ``tasks_available`` fields."""
+        await runtime.kaic_capabilities.refresh()
         return {"skills": runtime.skills_payload()}
 
     @app.post("/skills/{skill_id}/{action}")
@@ -2700,6 +2751,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         if action not in ("enable", "disable"):
             return JSONResponse({"error": "action must be enable or disable"},
                                 status_code=400)
+        await runtime.kaic_capabilities.refresh()   # 60s TTL; never raises
         ok = runtime.set_skill_enabled(skill_id, action == "enable")
         if not ok:
             # Unknown skill, or its backend isn't configured yet.
@@ -2713,6 +2765,15 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         logger.info("skill %r %sd — tools reconfigured (%d advertised)",
                     skill_id, action, len(runtime.tool_definitions))
         return JSONResponse({"skills": runtime.skills_payload()})
+
+    @app.get("/demo/opennvr-logo.svg")
+    async def _demo_logo() -> Response:
+        """The OpenNVR logo shown in the demo header (bundled, offline)."""
+        from fastapi.responses import FileResponse
+        path = Path(__file__).parent / "demo" / "opennvr-logo.svg"
+        if not path.is_file():
+            return Response(status_code=404)
+        return FileResponse(path, media_type="image/svg+xml")
 
     @app.get("/demo/avatar/{name}")
     async def _demo_avatar(name: str) -> Response:

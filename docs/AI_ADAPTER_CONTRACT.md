@@ -1019,7 +1019,7 @@ What the operator experiences:
 
 ### 8.5 Startup-seeded adapters — config-as-consent
 
-> **Status: landing in this PR series.**
+> **Status: shipped** (KAI-C startup seed loop).
 
 Adapters seeded from the operator's own startup configuration (the
 compose overlay / adapter registry the operator wrote by hand) receive

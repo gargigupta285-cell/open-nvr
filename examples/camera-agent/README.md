@@ -1,4 +1,10 @@
-# camera-agent example app
+# OpenNVR Agent (formerly Camera Agent) — example app
+
+> **Naming note:** "OpenNVR Agent" is the official product name; only
+> user-facing strings were renamed. The directory
+> (`examples/camera-agent/`), compose service names, Python modules,
+> config keys, and compose profile names deliberately keep the
+> `camera-agent` naming for infra compatibility.
 
 **Ask your cameras.** An agent that grounds its answers in live camera
 feeds via tool calling (YOLOv8 / InsightFace / BLIP) — running on CPU,
