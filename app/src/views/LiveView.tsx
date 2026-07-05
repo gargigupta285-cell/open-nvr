@@ -1036,6 +1036,7 @@ export function AddCameraDialog({
     port: 554,
     username: '',
     password: '',
+    rtsp_url: '',
   })
 
   // Discover cameras on network via ONVIF
@@ -1221,16 +1222,17 @@ export function AddCameraDialog({
     setError(null)
 
     try {
-      // No rtsp_url is sent: the server derives it from the IP + credentials
-      // (ONVIF, then vendor RTSP templates), embeds the (URL-encoded) password,
-      // and back-fills identity. Passwords with special chars like "@" are
-      // handled server-side.
+      // rtsp_url is optional. If provided, the server embeds the username/password
+      // into it (URL-encoding specials like "@") when they aren't already there.
+      // If left blank, the server derives the URL from the IP + credentials.
+      // Either way it back-fills device identity.
       const response = await apiService.createCamera({
         name: form.name,
         ip_address: form.ip_address,
         port: form.port,
         username: form.username || undefined,
         password: form.password || undefined,
+        rtsp_url: form.rtsp_url || undefined,
       })
       const newCameraId = response?.data?.id
       
@@ -1556,10 +1558,21 @@ export function AddCameraDialog({
                 </label>
               </div>
 
-              <div className="text-xs text-[var(--text-dim)] bg-[var(--bg-2)] border border-neutral-700 px-3 py-2">
-                The RTSP stream URL is built automatically from the IP and
-                credentials — no need to enter it.
-              </div>
+              <label className="flex flex-col gap-1">
+                <span className="text-xs text-[var(--text-dim)]">RTSP URL</span>
+                <input
+                  type="text"
+                  className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm font-mono text-xs"
+                  placeholder="rtsp://192.168.1.100:554/stream1"
+                  value={form.rtsp_url}
+                  onChange={(e) => setForm(f => ({ ...f, rtsp_url: e.target.value }))}
+                />
+                <span className="text-[10px] text-[var(--text-dim)]">
+                  Optional. No need to put credentials in the URL — the
+                  Username/Password above are added automatically. Leave blank to
+                  build the URL from the IP + credentials.
+                </span>
+              </label>
             </div>
           )}
 
