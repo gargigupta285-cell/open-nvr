@@ -24,7 +24,9 @@ Also provides an endpoint to create a firewall rule to isolate the Camera LAN
 from the internet (DB-only rule; OS-level enforcement depends on an external agent).
 """
 
+import ipaddress
 import json
+import socket
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -61,6 +63,53 @@ def get_camera_lan_subnets(db: Session) -> list[str]:
     for extra in cfg.get("scan_subnets") or []:
         if extra and extra not in subnets:
             subnets.append(extra)
+    return subnets
+
+
+def detect_local_subnets() -> list[str]:
+    """Best-effort auto-detection of the host's own IPv4 /24 subnet(s), so ONVIF
+    discovery can run without the operator manually configuring a Camera LAN
+    subnet. Standard library only.
+
+    Enumerates *every* local IPv4 interface (a multi-NIC NVR typically has a
+    separate camera-LAN interface distinct from its default/uplink route), plus
+    the default-route address, then keeps only private (RFC 1918) /24s — never a
+    loopback, link-local (169.254.x), or public range. Returns [] if nothing
+    usable is found (e.g. a locked-down container)."""
+    ips: set[str] = set()
+
+    # Default-route interface — reliable even where the hostname doesn't resolve
+    # to every address (some containers). A UDP "connect" selects the egress
+    # interface without sending packets, so it works offline too.
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ips.add(s.getsockname()[0])
+        finally:
+            s.close()
+    except OSError:
+        pass
+
+    # Every address the host's own name resolves to — covers extra NICs such as
+    # a dedicated camera LAN that isn't on the default route.
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ips.add(info[4][0])
+    except OSError:
+        pass
+
+    subnets: list[str] = []
+    for ip in ips:
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        if not addr.is_private or addr.is_loopback or addr.is_link_local:
+            continue
+        cidr = str(ipaddress.ip_network(f"{ip}/24", strict=False))
+        if cidr not in subnets:
+            subnets.append(cidr)
     return subnets
 
 

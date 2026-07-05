@@ -135,14 +135,24 @@ async def create_camera(
     """
     _log_camera_creation_start(current_user.id, camera_create, request)
 
-    # On connect, when credentials are supplied: derive the RTSP URL + identity
-    # (if no URL was given) and sync the camera's clock to correct time. Both
-    # are best-effort — a failure here never blocks camera creation.
+    # On connect, when credentials are supplied: derive the RTSP URL (if none was
+    # given), always back-fill device identity (manufacturer/model/firmware/serial),
+    # and sync the camera's clock to correct time.
     if camera_create.username and camera_create.password:
-        from services.camera_source_resolver import resolve_source, sync_camera_time
+        from services.camera_source_resolver import (
+            fetch_identity,
+            inject_credentials,
+            resolve_source,
+            sync_camera_time,
+        )
 
         onvif_port = None
+        # Any identity fields the resolver returns; back-filled below without
+        # ever overwriting values the caller (e.g. ONVIF discovery) already set.
+        identity: dict | None = None
+
         if not camera_create.rtsp_url:
+            # No URL provided — derive it (ONVIF, then vendor RTSP templates).
             try:
                 derived = await resolve_source(
                     camera_create.ip_address,
@@ -152,20 +162,55 @@ async def create_camera(
                 )
             except Exception:
                 derived = None
-            if derived and derived.get("rtsp_url"):
-                onvif_port = derived.get("onvif_port")
-                camera_create = camera_create.model_copy(
-                    update={
-                        "rtsp_url": derived["rtsp_url"],
-                        "manufacturer": camera_create.manufacturer or derived.get("manufacturer"),
-                        "model": camera_create.model or derived.get("model"),
-                        "firmware_version": camera_create.firmware_version
-                        or derived.get("firmware_version"),
-                        "serial_number": camera_create.serial_number
-                        or derived.get("serial_number"),
-                        "hardware_id": camera_create.hardware_id or derived.get("hardware_id"),
-                    }
+            if not (derived and derived.get("rtsp_url")):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "Couldn't automatically determine the RTSP stream for this "
+                        "camera. Check the IP address and credentials, and that the "
+                        "camera is reachable on the network."
+                    ),
                 )
+            onvif_port = derived.get("onvif_port")
+            identity = derived
+            camera_create = camera_create.model_copy(update={"rtsp_url": derived["rtsp_url"]})
+        else:
+            # URL supplied — embed the credentials into it when they aren't already
+            # part of the URL. MediaMTX authenticates using the userinfo in the RTSP
+            # URL, so a bare "rtsp://host/path" plus separate user/pass would fail to
+            # stream. inject_credentials is a no-op if the URL already has userinfo,
+            # and URL-encodes special characters (e.g. "@") in the password.
+            url_with_creds = inject_credentials(
+                camera_create.rtsp_url,
+                camera_create.username,
+                camera_create.password,
+            )
+            if url_with_creds and url_with_creds != camera_create.rtsp_url:
+                camera_create = camera_create.model_copy(
+                    update={"rtsp_url": url_with_creds}
+                )
+            # Still enrich identity + locate the ONVIF port (for time-sync).
+            identity = await fetch_identity(
+                camera_create.ip_address,
+                camera_create.username,
+                camera_create.password,
+            )
+            if identity:
+                onvif_port = identity.get("onvif_port")
+
+        if identity:
+            camera_create = camera_create.model_copy(
+                update={
+                    "manufacturer": camera_create.manufacturer or identity.get("manufacturer"),
+                    "model": camera_create.model or identity.get("model"),
+                    "firmware_version": camera_create.firmware_version
+                    or identity.get("firmware_version"),
+                    "serial_number": camera_create.serial_number
+                    or identity.get("serial_number"),
+                    "hardware_id": camera_create.hardware_id or identity.get("hardware_id"),
+                }
+            )
+
         # Correct the camera clock (fixes the timestamp burned into the video).
         # sync_camera_time is self-guarding — it returns False rather than raising.
         await sync_camera_time(

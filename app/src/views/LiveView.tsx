@@ -1036,7 +1036,6 @@ export function AddCameraDialog({
     port: 554,
     username: '',
     password: '',
-    rtsp_url: '',
   })
 
   // Discover cameras on network via ONVIF
@@ -1222,15 +1221,16 @@ export function AddCameraDialog({
     setError(null)
 
     try {
-      // rtsp_url is optional: when blank, the server derives it from the IP +
-      // credentials (ONVIF, then vendor RTSP templates) and back-fills identity.
+      // No rtsp_url is sent: the server derives it from the IP + credentials
+      // (ONVIF, then vendor RTSP templates), embeds the (URL-encoded) password,
+      // and back-fills identity. Passwords with special chars like "@" are
+      // handled server-side.
       const response = await apiService.createCamera({
         name: form.name,
         ip_address: form.ip_address,
         port: form.port,
         username: form.username || undefined,
         password: form.password || undefined,
-        rtsp_url: form.rtsp_url || undefined,
       })
       const newCameraId = response?.data?.id
       
@@ -1282,14 +1282,14 @@ export function AddCameraDialog({
         <div className="flex border-b border-neutral-700">
           <button
             className={`flex-1 px-3 py-2 text-xs ${mode === 'discover' ? 'bg-[var(--accent)]/20 text-[var(--accent)] border-b-2 border-[var(--accent)]' : 'text-[var(--text-dim)] hover:bg-[var(--panel-2)]'}`}
-            onClick={() => { setMode('discover'); setAuthStep(false); setSelectedCamera(null); }}
+            onClick={() => { setMode('discover'); setAuthStep(false); setSelectedCamera(null); setError(null); }}
           >
             <Search size={12} className="inline mr-1" />
             Discover
           </button>
           <button
             className={`flex-1 px-3 py-2 text-xs ${mode === 'manual' ? 'bg-[var(--accent)]/20 text-[var(--accent)] border-b-2 border-[var(--accent)]' : 'text-[var(--text-dim)] hover:bg-[var(--panel-2)]'}`}
-            onClick={() => setMode('manual')}
+            onClick={() => { setMode('manual'); setError(null); }}
           >
             <Plus size={12} className="inline mr-1" />
             Manual
@@ -1297,7 +1297,7 @@ export function AddCameraDialog({
           {existingCameras.length > 0 && (
             <button
               className={`flex-1 px-3 py-2 text-xs ${mode === 'select' ? 'bg-[var(--accent)]/20 text-[var(--accent)] border-b-2 border-[var(--accent)]' : 'text-[var(--text-dim)] hover:bg-[var(--panel-2)]'}`}
-              onClick={() => setMode('select')}
+              onClick={() => { setMode('select'); setError(null); }}
             >
               <Camera size={12} className="inline mr-1" />
               Existing
@@ -1556,19 +1556,10 @@ export function AddCameraDialog({
                 </label>
               </div>
 
-              <label className="flex flex-col gap-1">
-                <span className="text-xs text-[var(--text-dim)]">RTSP URL *</span>
-                <input
-                  type="text"
-                  className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm font-mono text-xs"
-                  placeholder="rtsp://admin:password@192.168.1.100:554/stream1"
-                  value={form.rtsp_url}
-                  onChange={(e) => setForm(f => ({ ...f, rtsp_url: e.target.value }))}
-                />
-                <span className="text-[10px] text-[var(--text-dim)]">
-                  Hikvision NVR: rtsp://user:pass@ip:554/Streaming/Channels/101
-                </span>
-              </label>
+              <div className="text-xs text-[var(--text-dim)] bg-[var(--bg-2)] border border-neutral-700 px-3 py-2">
+                The RTSP stream URL is built automatically from the IP and
+                credentials — no need to enter it.
+              </div>
             </div>
           )}
 
@@ -1636,7 +1627,7 @@ export function AddCameraDialog({
             <button
               className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50"
               onClick={handleAddManualCamera}
-              disabled={loading || !form.name.trim() || !form.ip_address.trim() || !form.rtsp_url.trim()}
+              disabled={loading || !form.name.trim() || !form.ip_address.trim()}
             >
               {loading ? 'Adding...' : 'Add Camera'}
             </button>

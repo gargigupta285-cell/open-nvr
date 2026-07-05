@@ -29,7 +29,11 @@ from sqlalchemy.orm import Session
 
 from core.auth import get_current_superuser
 from core.database import get_db
-from routers.network import get_camera_lan_subnet, get_camera_lan_subnets
+from routers.network import (
+    detect_local_subnets,
+    get_camera_lan_subnet,
+    get_camera_lan_subnets,
+)
 from services.onvif_digest_service import (
     connect_and_get_profiles,
     fetch_profiles_digest,
@@ -94,14 +98,17 @@ async def discover(
     elif configured_subnets:
         scan_cidrs = configured_subnets
     else:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "No Camera LAN subnet configured and no cidr parameter provided. "
-                "Either set subnet_cidr under Network → Camera LAN settings, "
-                "or pass a cidr query parameter (e.g. cidr=192.168.1.0/24)."
-            ),
-        )
+        # Nothing configured — auto-detect the host's own subnet so discovery
+        # "just works" on a flat LAN without any manual Camera LAN setup.
+        scan_cidrs = detect_local_subnets()
+        if not scan_cidrs:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Couldn't auto-detect your network. Add the camera manually, "
+                    "or set the Camera LAN subnet under Network settings."
+                ),
+            )
 
     # Scan all subnets in parallel, deduplicate by IP
     try:

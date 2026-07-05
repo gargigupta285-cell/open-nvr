@@ -163,6 +163,40 @@ async def _rtsp_path_works(host: str, port: int, path: str, user: str, pw: str,
 # --- resolver --------------------------------------------------------------
 
 
+def _identity_from_device_info(dev: dict[str, Any], onvif_port: int) -> dict[str, Any]:
+    """Map an ONVIF GetDeviceInformation dict to our camera identity fields."""
+    return {
+        "manufacturer": dev.get("manufacturer"),
+        "model": dev.get("model"),
+        "firmware_version": dev.get("firmwareversion"),
+        "serial_number": dev.get("serialnumber"),
+        "hardware_id": dev.get("hardwareid"),
+        "onvif_port": onvif_port,
+    }
+
+
+async def fetch_identity(
+    ip: str, username: str | None, password: str | None
+) -> dict[str, Any] | None:
+    """Best-effort ONVIF GetDeviceInformation → identity dict (manufacturer, model,
+    firmware_version, serial_number, hardware_id) + the working ``onvif_port``.
+
+    Used to enrich a camera's metadata even when its RTSP URL was supplied
+    manually (so identity back-fill isn't coupled to URL derivation). Returns
+    None if no ONVIF port answered. Never raises."""
+    username = username or ""
+    password = password or ""
+    for onvif_port in _ONVIF_PORTS:
+        try:
+            info = await ods.connect_and_get_profiles(ip, username, password, onvif_port)
+        except Exception:
+            continue
+        dev = info.get("device_info") or {}
+        if dev:
+            return _identity_from_device_info(dev, onvif_port)
+    return None
+
+
 async def resolve_source(
     ip: str, username: str | None, password: str | None, rtsp_port: int = 554
 ) -> dict[str, Any] | None:
@@ -189,12 +223,7 @@ async def resolve_source(
         dev = info.get("device_info", {}) or {}
         return {
             "rtsp_url": inject_credentials(stream_uri, username, password),
-            "manufacturer": dev.get("manufacturer"),
-            "model": dev.get("model"),
-            "firmware_version": dev.get("firmwareversion"),
-            "serial_number": dev.get("serialnumber"),
-            "hardware_id": dev.get("hardwareid"),
-            "onvif_port": onvif_port,
+            **_identity_from_device_info(dev, onvif_port),
             "source": "onvif",
         }
 
