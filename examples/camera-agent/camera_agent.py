@@ -55,6 +55,7 @@ from adapter_clients import (
 )
 from context import CameraContext, CameraSpec, run_event_subscriber
 from frame_sources import build_frame_source, discover_local_cameras
+from monitor_host import MonitorHost
 from tools import CameraTools, build_tool_definitions
 
 logger = logging.getLogger("camera-agent")
@@ -700,10 +701,20 @@ class LineCounter:
 
 
 class MonitorManager:
-    """Runs the agent's standing watches: every ``interval_s`` it grabs a frame
-    from each watched camera, runs detection, and counts the target. Notify
-    monitors raise a (cooldown-limited) notification when the target is
-    present; count monitors track live + peak counts. In-memory only."""
+    """Runs the agent's standing watches. The registry (ids, list,
+    persistence, notifications) is unchanged, but the RULES are converged
+    onto the App SDK (app-sdk-spec §07 "one rule library, two front doors"):
+
+    * kind="count" / kind="crossing" → SDK detectors hosted in-process by
+      :class:`monitor_host.MonitorHost` (the occupancy-counting and
+      line-crossing example rule classes, driven by the agent's frame
+      source + detection client).
+    * kind="notify" → the legacy poll loop below (cooldown-refire presence
+      has no SDK archetype yet; see monitor_host.py's module docstring).
+    """
+
+    # kind → MonitorHost rule for the SDK-converged monitor kinds.
+    _CONVERGED = {"count": "occupancy", "crossing": "line_crossing"}
 
     def __init__(self, runtime: "CameraAgentRuntime", *, default_interval: float = 8.0,
                  notify_cooldown: float = 30.0, max_monitors: int = 20) -> None:
@@ -718,6 +729,18 @@ class MonitorManager:
         self._last_notified: dict[tuple[int, str], float] = {}
         self._notifications: list[dict[str, Any]] = []
         self._next_note_id = 1
+        # SDK front door. Everything is late-bound through ``runtime`` so
+        # tests that monkeypatch ``context.get_frame`` / ``detection_client
+        # .infer`` after construction are honored, exactly like the legacy
+        # loop's attribute lookups per poll.
+        self.host = MonitorHost(
+            get_frame=lambda cam: runtime.context.get_frame(cam),
+            infer=lambda **kw: runtime.detection_client.infer(**kw),
+            notify=self._hosted_notify,
+            dedup=lambda dets: runtime.tools._dedup_detections(dets),
+            stop_check=lambda: runtime._stop_event.is_set(),
+            default_interval_s=default_interval,
+        )
 
     def create(self, *, kind: str, camera_ids: list[str], target: str,
                description: str = "", interval_s: float | None = None,
@@ -730,9 +753,26 @@ class MonitorManager:
             interval_s=float(interval_s or self._default_interval),
             created_at=time.time(), line=line,
         )
-        if kind == "crossing" and line and len(line) == 4:
-            ln = ((line[0], line[1]), (line[2], line[3]))
-            mon.counters = {cam: LineCounter(ln) for cam in camera_ids}
+        if kind in self._CONVERGED:
+            # SDK front door (§07): instantiate the example app's rule
+            # class via MonitorHost instead of the bespoke loop. May raise
+            # ValueError on bad params — BEFORE the monitor is registered,
+            # so a rejected request leaves no orphan row or task.
+            params: dict[str, Any] = {
+                "target": mon.target, "interval_s": mon.interval_s,
+            }
+            if kind == "crossing":
+                params["line"] = list(line or [])
+
+            def _sink(cam: str, current: int, peak_candidate: int,
+                      _mon: Monitor = mon) -> None:
+                _mon.current[cam] = current
+                _mon.peak[cam] = max(_mon.peak.get(cam, 0), peak_candidate)
+
+            self.host.create(
+                self._CONVERGED[kind], list(camera_ids), params,
+                monitor_id=mon.id, counts_sink=_sink,
+            )
         self._next_id += 1
         self._monitors[mon.id] = mon
         self._order.append(mon.id)
@@ -740,7 +780,9 @@ class MonitorManager:
             old = self._order.pop(0)
             self.stop(old)
             self._monitors.pop(old, None)
-        self._tasks[mon.id] = asyncio.create_task(self._loop(mon), name=f"monitor-{mon.id}")
+        if kind not in self._CONVERGED:
+            # Legacy poll loop — only kind="notify" lands here now.
+            self._tasks[mon.id] = asyncio.create_task(self._loop(mon), name=f"monitor-{mon.id}")
         logger.info("monitor #%d (%s %r on %s) started", mon.id, kind, target, camera_ids)
         return mon
 
@@ -749,10 +791,33 @@ class MonitorManager:
         if not mon:
             return False
         mon.active = False
+        self.host.stop(monitor_id)  # no-op for legacy (notify) monitors
         t = self._tasks.pop(monitor_id, None)
         if t:
             t.cancel()
         return True
+
+    def _hosted_notify(self, monitor_id: int, alert: Any) -> None:
+        """Alert bridge target: a hosted (SDK) monitor fired. Routes into
+        the same notify machinery the legacy loop used — the in-memory
+        notification feed the UI polls plus the webhook fan-out. Called
+        synchronously from the detector's dispatch; never blocks (list
+        append + fire-and-forget task)."""
+        import time
+
+        now = time.time()
+        self._notifications.append({
+            "id": self._next_note_id,
+            "monitor_id": monitor_id,
+            "text": f"{alert.title} — {alert.description}",
+            "ts": now,
+        })
+        self._next_note_id += 1
+        logger.info("monitor #%d alerted: %s", monitor_id, alert.title)
+        self._runtime.notifier.fire({
+            "type": "notify", "title": alert.title, "text": alert.description,
+            "camera": alert.camera_id, "severity": alert.severity, "ts": now,
+        })
 
     def stop_all(self) -> None:
         for mid in list(self._monitors):
@@ -773,7 +838,21 @@ class MonitorManager:
                 logger.exception("monitor restore failed for %r", s)
 
     def list(self) -> list[dict[str, Any]]:
-        return [self._monitors[i].to_dict() for i in self._order if i in self._monitors]
+        out: list[dict[str, Any]] = []
+        for i in self._order:
+            mon = self._monitors.get(i)
+            if mon is None:
+                continue
+            d = mon.to_dict()
+            hosted = self.host.get(i)
+            if hosted is not None and hosted.error is not None:
+                # The hosted poll task died (see MonitorHost._loop) —
+                # surface that in /monitors instead of listing a zombie
+                # as active.
+                d["active"] = False
+                d["status"] = f"error: {hosted.error}"
+            out.append(d)
+        return out
 
     def notifications(self) -> list[dict[str, Any]]:
         return list(self._notifications[-50:])
@@ -817,6 +896,10 @@ class MonitorManager:
             out.append({"id": tid, "x": x, "y": y})
         return out
 
+    # Legacy poll loop. Only kind="notify" monitors run it — "count" and
+    # "crossing" are hosted SDK detectors now (see ``self.host``), so the
+    # count/crossing branches in ``_poll`` below are kept only as the
+    # reference semantics the convergence was tested against.
     async def _loop(self, mon: Monitor) -> None:
         try:
             while mon.active and not self._runtime._stop_event.is_set():
@@ -2183,11 +2266,27 @@ class CameraAgentRuntime:
                 return ("For crossing counts I need a line as [x1,y1,x2,y2] in "
                         "0-1 frame coordinates — where should the line go?")
             line = [float(v) for v in line]
-        mon = self.monitors.create(
-            kind=kind, camera_ids=cams, target=target,
-            description=str(args.get("description") or "").strip(),
-            line=line if kind == "crossing" else None,
-        )
+        try:
+            mon = self.monitors.create(
+                kind=kind, camera_ids=cams, target=target,
+                description=str(args.get("description") or "").strip(),
+                line=line if kind == "crossing" else None,
+            )
+        except ValueError as exc:
+            # The SDK rule rejected the params (e.g. a degenerate line
+            # whose two points coincide). Relay the reason so the LLM can
+            # ask the user to fix it. ERROR: prefix → HTTP 400 on /monitors.
+            return f"ERROR: I couldn't set that watch up — {exc}"
+        except RuntimeError:
+            # The converged rule library module isn't shipped with this
+            # build (monitor_host loads occupancy_counting.py /
+            # line_crossing.py by file path from the sibling examples/
+            # tree). Same relayable ERROR: shape as the ValueError path
+            # so the conversation degrades gracefully instead of dying.
+            rule = self.monitors._CONVERGED.get(kind, kind)
+            logger.exception("create_monitor: rule library for %r unavailable", kind)
+            return (f"ERROR: I couldn't set that watch up — this build "
+                    f"doesn't include the '{rule}' rule library.")
         self.persist()
         where = "all cameras" if set(cams) == {c.camera_id for c in self.cfg.cameras} else ", ".join(cams)
         if kind == "notify":

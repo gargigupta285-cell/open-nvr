@@ -37,7 +37,7 @@ A practical guide to *where* each capability should live and *how* to measure
 | Detect / count objects | tool | **stay a tool** | single-shot, well-scoped |
 | Describe / VQA a frame | tool | **stay a tool** | single-shot |
 | Recent-events lookup | tool | **stay a tool** | single query |
-| Standing monitor (notify/count) | tool | stay a tool (simple) | one call sets it up |
+| Standing monitor (notify/count) | tool | **stay a tool** — count/crossing kinds now run the App SDK rule classes in-process via `monitor_host.MonitorHost` (spec §07 "one rule library, two front doors"); notify keeps the legacy cooldown-refire loop | one call sets it up |
 | **Alarm setup** (target + time window + actions) | tool | **→ a FLOW** | multi-slot: target, window, camera(s), emergency contact — a guided dialogue is clearer than one big tool call |
 | **Footage search** (NL over the past) | tool/example | **→ a FLOW** | iterative: clarify time range → search → refine → present; benefits from back-and-forth |
 | **Watchlist / face enrollment** | tools | **→ a FLOW/skill** | multi-step (capture → name → confirm → store), reusable across agents, easy to get wrong without structure |
