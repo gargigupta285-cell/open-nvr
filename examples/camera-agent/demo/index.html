@@ -21,10 +21,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>OpenNVR Agent</title>
   <style>
-    /* OpenNVR product palette (app/src/index.css dark theme). */
+    /* OpenNVR product palette (app/src/index.css dark theme). The accent is
+       the wordmark cyan from app/public/opennvr-logo.svg so the whole UI
+       matches the brand's white + cyan combination. */
     :root {
       --bg:#0b1220; --bg2:#111827; --panel:#0f172a; --panel2:#1f2937; --text:#e5e7eb; --muted:#9ca3af;
-      --accent:#3b82f6; --accent-strong:#2563eb; --danger:#e53e3e;
+      --wordmark:#ffffff; --accent:#5eb3f6; --accent-strong:#3d9df3; --danger:#e53e3e;
       --user:#9ae6b4; --agent:#90cdf4; --border:#293241;
     }
     * { box-sizing:border-box; }
@@ -43,9 +45,11 @@
     @media (max-width:760px) { .app { grid-template-columns:1fr; } }
     .card { background:var(--panel); border-radius:0.75rem; padding:1.25rem; }
     .head { display:flex; align-items:center; gap:1rem; margin-bottom:1rem; }
-    h1 { margin:0; font-size:1.35rem; }
+    /* Wordmark header: "Open" white + "NVR" cyan (the logo's two tones),
+       bold like the svg, then " Agent" in the white tone. */
+    h1 { margin:0; font-size:1.35rem; font-weight:700; color:var(--wordmark); }
+    h1 .wm-nvr { color:var(--accent); }
     .titlerow { display:flex; align-items:center; gap:0.55rem; }
-    .logo { height:1.35rem; width:auto; flex:0 0 auto; display:block; }
     p.lede { margin:0.15rem 0 0 0; color:var(--muted); font-size:0.88rem; }
 
     .ram { width:68px; height:68px; flex:0 0 auto; position:relative; }
@@ -89,7 +93,7 @@
     .row { display:flex; gap:0.5rem; align-items:center; margin:0.6rem 0 0; }
     .status { padding:0.5rem 0.7rem; border-radius:0.375rem; background:rgba(255,255,255,0.04); color:var(--muted); font-size:0.83rem; flex:1; }
     .status.active{color:var(--accent);} .status.error{color:var(--danger);}
-    .chip { font-size:0.72rem; padding:0.22rem 0.5rem; border-radius:999px; background:rgba(59,130,246,0.15); color:var(--accent); white-space:nowrap; }
+    .chip { font-size:0.72rem; padding:0.22rem 0.5rem; border-radius:999px; background:rgba(94,179,246,0.15); color:var(--accent); white-space:nowrap; }
     .ghost { background:transparent; color:var(--muted); border:1px solid var(--border); padding:0.45rem 0.7rem; border-radius:0.375rem; cursor:pointer; font-size:0.8rem; }
     .ghost:hover{color:var(--text);}
     .log { margin-top:1rem; background:rgba(0,0,0,0.25); border-radius:0.5rem; padding:0.75rem; height:18rem; overflow-y:auto; font-size:0.9rem; line-height:1.45; display:flex; flex-direction:column; gap:0.3rem; }
@@ -139,9 +143,14 @@
     .brow{display:flex;align-items:center;gap:.5rem;padding:.4rem .5rem;border-radius:8px;margin:.25rem 0;font-size:0.8rem;background:var(--panel2);}
     .brow .b-ic{width:18px;text-align:center;flex:0 0 auto;}
     .brow .b-nm{flex:1;min-width:0;}.brow .b-nm small{display:block;color:var(--muted);font-size:.66rem;}
-    .brow .b-add{background:var(--accent);color:#fff;border:none;border-radius:6px;font-weight:700;font-size:.72rem;padding:.28rem .55rem;cursor:pointer;}
+    .brow .b-add{background:var(--accent);color:#fff;border:none;border-radius:6px;font-weight:700;font-size:.72rem;padding:.28rem .55rem;pointer-events:none;}
     .brow .b-need{font-size:.66rem;color:var(--muted);text-align:right;max-width:52%;}
-    .brow.have{opacity:.55;}
+    /* Add-list rows: the whole row is clickable when the skill can be enabled;
+       greyed (with the reason on the right) when it can't be yet. */
+    .brow.addable{cursor:pointer;}
+    .brow.addable:hover{outline:1px solid var(--accent);}
+    .brow.addable:hover .b-add{background:var(--accent-strong);}
+    .brow.off{opacity:.55;}
     .addform{margin:.3rem 0 .5rem;}
     .addform-lbl{display:flex;align-items:center;gap:.4rem;font-size:.72rem;color:var(--muted);margin-bottom:.4rem;}
     .addform-lbl input{width:auto;flex:1;margin:0;}
@@ -175,7 +184,7 @@
               <video class="avatar-video" id="avatarVideo" muted loop playsinline preload="auto" aria-hidden="true"></video>
             </div>
             <div>
-              <div class="titlerow"><img class="logo" src="/demo/opennvr-logo.svg" alt="OpenNVR logo"><h1 id="title">OpenNVR Agent</h1></div>
+              <div class="titlerow"><h1 id="title"><span class="wm-open">Open</span><span class="wm-nvr">NVR</span> Agent</h1></div>
               <p class="lede" id="lede">Tap <strong>Talk</strong> and speak — it listens and answers aloud, tap Stop when done.</p>
               <div class="micdot" id="micdot" hidden>mic live</div>
             </div>
@@ -260,7 +269,7 @@
     const camboxEl=$("cambox"), ramEl=$("ram"), workingEl=$("working");
     const alarmbarEl=$("alarmbar"), alarmTextEl=$("alarmText"), silenceBtn=$("silence");
     const alarmListEl=$("alarmList"), monitorListEl=$("monitorList"), taskListEl=$("taskList"), reportListEl=$("reportList");
-    const titleEl=$("title"), ledeEl=$("lede");
+    const ledeEl=$("lede");
     const mouthEl=$("mouth"), micdotEl=$("micdot");
     // Inline SVG icons (no webfont, no external assets — works fully offline).
     const IC={
@@ -430,7 +439,6 @@
 
     async function loadAgent(){ try{ const a=await (await fetch("/agent")).json();
       if(a.avatar_video===false) disableAvatarVideo();   // operator turned the video avatar off
-      titleEl.textContent="OpenNVR Agent";
       if(a.text_mode){
         // Text/chat profile: lead with typing; the voice controls don't apply.
         document.getElementById("talk").style.display="none";
@@ -687,13 +695,21 @@
       const q=(($("skillSearch")||{}).value||"").toLowerCase();
       const add=_skills.filter(s=>!s.enabled && (s.name.toLowerCase().includes(q)||s.id.includes(q)));
       el.innerHTML = add.length?"":'<div class="empty-note">No matching skills.</div>';
-      for(const s of add){ const d=document.createElement("div"); d.className="brow"+(s.available?"":" have");
+      for(const s of add){
+        // Grey the row with a reason when the skill can't be enabled yet:
+        // either its backend requirement is unmet (server hint), or no adapter
+        // currently advertises a task that could back it (live KAI-C view).
+        let reason="";
+        if(!s.available) reason=s.hint||"needs setup";
+        else if(s.tasks_available===false)
+          reason="needs an adapter advertising "+((s.backing_tasks&&s.backing_tasks.length)?s.backing_tasks.join(" / "):"a backing task");
+        const d=document.createElement("div"); d.className="brow"+(reason?" off":" addable");
         d.innerHTML=`<span class="b-ic">${s.icon}</span><span class="b-nm"><span></span><small></small></span>`+
-          (s.available?'<button class="b-add" type="button">Add</button>':'<span class="b-need"></span>');
+          (reason?'<span class="b-need"></span>':'<span class="b-add">Add</span>');
         d.querySelector(".b-nm span").textContent=s.name;
         d.querySelector(".b-nm small").textContent="uses "+s.uses;
-        if(s.available) d.querySelector(".b-add").addEventListener("click",()=>toggleSkill(s.id,"enable"));
-        else d.querySelector(".b-need").textContent=s.hint||"needs setup";
+        if(reason){ d.querySelector(".b-need").textContent=reason; d.title=reason; }
+        else { d.title="Enable "+s.name; d.addEventListener("click",()=>toggleSkill(s.id,"enable")); }
         el.appendChild(d); } }
     async function toggleSkill(id,action){
       try{ const r=await fetch("/skills/"+encodeURIComponent(id)+"/"+action,{method:"POST"});
