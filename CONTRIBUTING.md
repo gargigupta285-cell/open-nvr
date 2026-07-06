@@ -258,6 +258,17 @@ the others.
 
 If yours lands as a first-party example, your name goes on it.
 
+## Getting your app into the App Store
+
+An example folder teaches the pattern; the **App Store index** is how an app
+becomes browsable and one-click installable in every deployment's App
+Catalog. Publishing an image and adding one reviewed entry to
+`server/config/apps_index.yml` is a documented, validated, PR-based flow
+(the Homebrew-tap / Home-Assistant-add-on model). Full walkthrough —
+build on the SDK, publish + pin your image digest, add the entry, run
+`make validate-apps-index`, open the PR — in
+[`docs/CONTRIBUTING_APPS.md`](docs/CONTRIBUTING_APPS.md).
+
 ## Running tests
 
 Every subsystem has its own `pytest` suite. Run them where they live:

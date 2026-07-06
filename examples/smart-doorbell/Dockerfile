@@ -9,7 +9,10 @@
 #     --network host \
 #     -v $(pwd)/config.yml:/app/config.yml:ro \
 #     opennvr/smart-doorbell:1.0.0 \
-#     daemon --config /app/config.yml
+#     --config /app/config.yml daemon
+#
+# NOTE the argument order: ``--config`` is a global option of the CLI
+# and argparse requires it BEFORE the ``daemon`` subcommand.
 
 FROM python:3.11-slim AS runtime
 
@@ -43,5 +46,9 @@ ENV PYTHONUNBUFFERED=1
 # No HEALTHCHECK — the daemon loop never exposes an HTTP surface.
 # Docker's "process is alive" liveness is what matters here.
 
+# Global options first, subcommand last — ``daemon --config …`` is
+# rejected by argparse (the subparser doesn't know --config), so the
+# default CMD and any compose ``command`` override must spell it
+# ``--config <path> daemon``.
 ENTRYPOINT ["python", "smart_doorbell.py"]
-CMD ["daemon", "--config", "config.yml"]
+CMD ["--config", "config.yml", "daemon"]

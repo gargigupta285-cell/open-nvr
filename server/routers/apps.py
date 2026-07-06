@@ -35,26 +35,113 @@ Routes (mounted under ``/api/v1``):
 """
 
 import ipaddress
+import logging
 import secrets
 from datetime import UTC, datetime
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+import yaml
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user, verify_token
 from core.database import get_db
-from models import InstalledApp, User
+from core.permissions import RequirePermission
+from models import AppInstallIntent, InstalledApp, User
 from services.audit_service import write_audit_log
+
+# The one-click install/uninstall endpoints require this RBAC permission
+# (in addition to the APPS_INSTALL_ENABLED opt-in). Reused as a FastAPI
+# dependency on each mutating route below.
+require_apps_install = RequirePermission("apps.install")
 
 router = APIRouter(prefix="/apps", tags=["apps"])
 
+logger = logging.getLogger(__name__)
+
 # Seconds allowed for each proxied call to the app's /health and /state.
 STATUS_PROBE_TIMEOUT_S = 3.0
+
+
+# ── App Store index (the "discover" half of the catalog) ───────────
+#
+# GET /apps/index reads a curated, product-owned YAML of installable
+# apps (server/config/apps_index.yml) — the browse-and-install door,
+# distinct from the installed_apps registry that /apps lists. The
+# loader mirrors ai_models._load_use_case_map exactly: curated yaml →
+# lru_cache → validated pydantic. Cross-referencing against
+# installed_apps happens per request in the route, not in the cache.
+
+APPS_INDEX_PATH = Path(__file__).resolve().parent.parent / "config" / "apps_index.yml"
+
+
+class InstallSpec(BaseModel):
+    """The exact copy-paste an operator runs to install one app: a
+    docker-compose service block and the ``docker compose ... up``
+    command that brings it up. No secrets — compose references
+    ``${INTERNAL_API_KEY}`` from the operator's .env."""
+
+    compose: str
+    command: str
+
+
+class IndexEntry(BaseModel):
+    """One installable app in the store index — seeded from a shipped
+    example's AppManifest (id/name/summary/category/version/
+    requires_tasks/emits) plus store-only fields (image, docs_url,
+    install). ``build_context`` is present while app images aren't yet
+    published to GHCR (see apps_index.yml header) and is optional so it
+    can drop out once they are; it is intentionally NOT part of the
+    frontend response contract below."""
+
+    id: str
+    name: str
+    summary: str
+    category: str
+    version: str
+    image: str
+    requires_tasks: list[str] = []
+    emits: list[str] = []
+    docs_url: str
+    install: InstallSpec
+    build_context: str | None = None
+    # Optional sha256 digest the reconciler pins the image to. When
+    # present, the one-click installer deploys ``image@sha256:...`` for
+    # supply-chain integrity; when absent, the reconciler logs a loud
+    # "UNPINNED — dev only" warning. Not for production without a digest.
+    image_digest: str | None = None
+
+
+@lru_cache(maxsize=1)
+def _load_apps_index() -> list[IndexEntry]:
+    """Load the curated index, skipping invalid ENTRIES.
+
+    One malformed entry (a bad community merge that slipped past
+    scripts/validate_apps_index.py) must degrade to "that card is
+    missing + an error log" — not 500 the whole store page AND every
+    install endpoint. A missing/unparseable FILE still raises: that's a
+    broken deploy, not a broken entry."""
+    raw = yaml.safe_load(APPS_INDEX_PATH.read_text()) or []
+    entries: list[IndexEntry] = []
+    for item in raw:
+        try:
+            entries.append(IndexEntry(**item))
+        except Exception:
+            bad_id = item.get("id") if isinstance(item, dict) else None
+            logger.error(
+                "apps_index.yml: skipping invalid entry %r — run "
+                "scripts/validate_apps_index.py",
+                bad_id,
+                exc_info=True,
+            )
+    return entries
 
 
 # ── Config validation (pure, reusable by the SDK conformance kit) ──
@@ -405,6 +492,63 @@ async def list_apps(
     return [_serialize_app(row) for row in rows]
 
 
+@router.get("/index")
+async def get_apps_index(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """
+    The App Store "discover" listing — the browse-and-install catalog.
+
+    Loads the curated ``apps_index.yml`` (product-owned editorial, one
+    entry per shipped example) and cross-references the ``installed_apps``
+    registry so each entry carries ``installed`` (an installed_apps row
+    with that id exists) and ``enabled`` (that row's flag, or ``null``
+    when not installed). The UI shows "installed" vs "available to
+    install" from this alone.
+
+    Never 404s — an entry that isn't installed simply has
+    ``installed=false, enabled=null``. The index yaml ships with the
+    server, so a load/validation failure is a 500 (a broken deploy),
+    not an empty list.
+
+    Requires authenticated user.
+    """
+    try:
+        entries = _load_apps_index()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load apps index: {e!s}",
+        )
+
+    installed = {row.id: row for row in db.query(InstalledApp).all()}
+
+    apps: list[dict[str, Any]] = []
+    for entry in entries:
+        row = installed.get(entry.id)
+        apps.append(
+            {
+                "id": entry.id,
+                "name": entry.name,
+                "summary": entry.summary,
+                "category": entry.category,
+                "version": entry.version,
+                "image": entry.image,
+                "requires_tasks": entry.requires_tasks,
+                "emits": entry.emits,
+                "docs_url": entry.docs_url,
+                "install": {
+                    "compose": entry.install.compose,
+                    "command": entry.install.command,
+                },
+                "installed": row is not None,
+                "enabled": bool(row.enabled) if row is not None else None,
+            }
+        )
+    return {"apps": apps}
+
+
 @router.post("/register")
 async def register_app(
     request: AppRegisterRequest,
@@ -644,3 +788,252 @@ async def get_app_status(
     db.commit()
 
     return {"health": health, "state": state}
+
+
+# ── One-click install: desired-state writes only (NO docker here) ──────
+#
+# SECURITY INVARIANT: the web app process never runs Docker, never holds
+# the docker socket, and never spawns a subprocess for installs. These
+# endpoints do exactly three things — (a) gate on the APPS_INSTALL_ENABLED
+# opt-in + the apps.install RBAC permission, (b) validate the id against
+# the curated index and copy image/digest FROM the index (never from user
+# input), and (c) upsert one desired-state row in app_install_intents and
+# audit it. A separate, minimally-privileged reconciler
+# (scripts/app-installer) is the only component that applies the intent.
+# See docs/APPS_INSTALL.md.
+
+
+def _require_install_enabled() -> None:
+    """403 unless the operator has opted into one-click install.
+
+    Reads ``settings.apps_install_enabled`` directly. That setting has a
+    hard default of ``False`` in ``core/config.py`` (the sovereign /
+    air-gapped posture), so this gate is fail-closed by construction: a
+    missing or unparsed value never lands here as "enabled". We import
+    settings inside the function (not at module load) so tests toggling
+    the flag late still see it, but we do NOT wrap the read in a broad
+    ``except`` — a genuinely broken settings object should surface as an
+    error, not be silently masked into an env-var fallback that could
+    read as enabled. When off, the copy-paste command path
+    (GET /apps/index) stays available; only server-side
+    install/uninstall is disabled.
+    """
+    from core.config import settings
+
+    if not bool(settings.apps_install_enabled):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "one-click install disabled; use the copy-paste command "
+                "(set APPS_INSTALL_ENABLED=true to opt in)"
+            ),
+        )
+
+
+def _index_entry_or_404(app_id: str) -> IndexEntry:
+    """Return the curated index entry for ``app_id`` or 404.
+
+    INDEX-ONLY guard: only an app present in apps_index.yml is
+    installable. An id that isn't in the curated index is rejected here,
+    so no arbitrary image / user input can ever reach the reconciler.
+    """
+    try:
+        entries = _load_apps_index()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load apps index: {e!s}",
+        )
+    for entry in entries:
+        if entry.id == app_id:
+            return entry
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"App '{app_id}' is not in the curated App Store index",
+    )
+
+
+def _serialize_intent(row: AppInstallIntent) -> dict[str, Any]:
+    """Wire shape of one desired-state install intent."""
+    return {
+        "id": row.id,
+        "image": row.image,
+        "image_digest": row.image_digest,
+        "desired": row.desired,
+        "status": row.status,
+        "message": row.message,
+        "requested_by": row.requested_by,
+        "requested_at": row.requested_at,
+        "updated_at": row.updated_at,
+    }
+
+
+def _write_intent(
+    db: Session,
+    entry: IndexEntry,
+    *,
+    desired: str,
+    actor: str,
+) -> AppInstallIntent:
+    """Upsert the desired-state row for ``entry`` and reset it to
+    ``pending`` so the reconciler re-evaluates. image/image_digest are
+    always taken from the curated index entry, never from the request."""
+    def _apply(row: AppInstallIntent) -> AppInstallIntent:
+        row.image = entry.image
+        row.image_digest = entry.image_digest
+        row.desired = desired
+        row.status = "pending"
+        row.message = None
+        row.requested_by = actor
+        row.requested_at = datetime.now(UTC)
+        db.commit()
+        db.refresh(row)
+        return row
+
+    row = (
+        db.query(AppInstallIntent)
+        .filter(AppInstallIntent.id == entry.id)
+        .first()
+    )
+    if row is not None:
+        return _apply(row)
+    row = AppInstallIntent(id=entry.id)
+    db.add(row)
+    try:
+        return _apply(row)
+    except IntegrityError:
+        # Two concurrent FIRST-TIME requests both saw "no row" and both
+        # INSERTed; the PK rejects the loser. State is already correct
+        # (the winner wrote the same desired data) — recover by updating
+        # the winner's row instead of 500ing the losing click.
+        db.rollback()
+        row = (
+            db.query(AppInstallIntent)
+            .filter(AppInstallIntent.id == entry.id)
+            .one()
+        )
+        return _apply(row)
+
+
+@router.post("/index/{app_id}/install")
+async def install_app(
+    app_id: str,
+    current_user: User = Depends(require_apps_install),
+    db: Session = Depends(get_db),
+):
+    """
+    Opt-in one-click install — write a DESIRED-STATE record only.
+
+    Gated by BOTH ``APPS_INSTALL_ENABLED`` (403 when off — the sovereign
+    default) AND the ``apps.install`` RBAC permission (via the dependency
+    above). The app id must be in the curated ``apps_index.yml`` (404
+    otherwise) — no arbitrary images. image/digest are copied from the
+    index, never from the caller.
+
+    This endpoint does NOT run Docker: it upserts one
+    ``app_install_intents`` row with ``desired="installed"``,
+    ``status="pending"`` and audits it. The ``scripts/app-installer``
+    reconciler applies it.
+    """
+    _require_install_enabled()
+    entry = _index_entry_or_404(app_id)
+
+    row = _write_intent(
+        db, entry, desired="installed", actor=current_user.username
+    )
+
+    write_audit_log(
+        db,
+        action="app.install.request",
+        user_id=current_user.id,
+        entity_type="app",
+        entity_id=app_id,
+        details={
+            "actor": current_user.username,
+            "image": entry.image,
+            "image_digest": entry.image_digest,
+            "desired": "installed",
+        },
+    )
+    return _serialize_intent(row)
+
+
+@router.post("/index/{app_id}/uninstall")
+async def uninstall_app(
+    app_id: str,
+    current_user: User = Depends(require_apps_install),
+    db: Session = Depends(get_db),
+):
+    """
+    Opt-in one-click uninstall — flip the desired state to ``absent``.
+
+    Same gates as install (opt-in flag + apps.install + index-only).
+    Writes ``desired="absent"``, ``status="pending"`` on the intent row
+    and audits it; the reconciler brings the app's compose stack down.
+    """
+    _require_install_enabled()
+    entry = _index_entry_or_404(app_id)
+
+    row = _write_intent(
+        db, entry, desired="absent", actor=current_user.username
+    )
+
+    # Drop the registration row now (best-effort) so the catalog moves
+    # the card back to "Available to install" immediately instead of
+    # showing an immortal zombie "installed" card drifting to
+    # unreachable — nothing else ever deletes installed_apps rows on
+    # uninstall (the reconciler only stops the container). If the
+    # teardown fails and the app restarts, its boot-time re-register
+    # simply recreates the row.
+    reg = db.query(InstalledApp).filter(InstalledApp.id == app_id).first()
+    if reg is not None:
+        db.delete(reg)
+        db.commit()
+
+    write_audit_log(
+        db,
+        action="app.uninstall.request",
+        user_id=current_user.id,
+        entity_type="app",
+        entity_id=app_id,
+        details={
+            "actor": current_user.username,
+            "image": entry.image,
+            "image_digest": entry.image_digest,
+            "desired": "absent",
+        },
+    )
+    return _serialize_intent(row)
+
+
+@router.get("/index/{app_id}/install-status")
+async def get_install_status(
+    app_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Report the desired-state + reconcile status for one curated app.
+
+    Readable by any authenticated user (it's status, not a mutation).
+    The id must be in the curated index (404 otherwise). When no intent
+    has ever been written, returns ``desired=null, status="none"`` so the
+    UI can distinguish "never requested" from "pending".
+    """
+    _index_entry_or_404(app_id)  # index-only, even for reads
+
+    row = (
+        db.query(AppInstallIntent)
+        .filter(AppInstallIntent.id == app_id)
+        .first()
+    )
+    if row is None:
+        return {
+            "id": app_id,
+            "desired": None,
+            "status": "none",
+            "image": None,
+            "image_digest": None,
+            "message": None,
+        }
+    return _serialize_intent(row)

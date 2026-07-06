@@ -156,6 +156,14 @@ def create_initial_data():
         p_ai_view = get_or_create_perm("ai.view", "View AI engine status")
         p_ai_manage = get_or_create_perm("ai.manage", "Configure AI models")
 
+        # Apps — one-click install of curated App Store apps. Deliberately
+        # NOT granted to operator/viewer: writing an install intent is a
+        # privileged, supply-chain-affecting action gated behind this
+        # permission AND the APPS_INSTALL_ENABLED opt-in setting.
+        p_apps_install = get_or_create_perm(
+            "apps.install", "Install/uninstall curated App Store apps"
+        )
+
         # Compliance
         p_compliance_view = get_or_create_perm(
             "compliance.view", "View compliance reports"

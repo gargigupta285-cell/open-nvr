@@ -4,6 +4,10 @@ Every example here is a **copy-as-template** starting point — minimal, readabl
 and opinionated. Pick one that's close to what you want to build, copy the
 folder, and edit the predicate.
 
+> **Building a brand-new app?** Skip the copy-and-delete. A generator
+> scaffolds a minimal, runnable Detector app and you fill in one method —
+> the rule. Follow **[Your first OpenNVR detector in 15 minutes](../docs/FIRST_DETECTOR.md)**.
+
 The thirteen shipped examples cover two orthogonal axes of the OpenNVR pipeline:
 *driving* inference vs *subscribing* to it, and *inference events* vs *alerts*.
 
@@ -65,6 +69,19 @@ and `occupancy-counting` (9201). Each app's runtime config is
 generated at `up` time from its `config.docker.yml` template (secrets
 come from `.env`) — edit the template's cameras/zones for your scene
 and re-run `up`.
+
+### One-click install (opt-in)
+
+The copy-paste command above is always available. There is also an
+**opt-in** one-click install path where an operator with the
+`apps.install` permission installs a curated app straight from the App
+Catalog — but the web app **never runs Docker**. It only writes a
+desired-state row; a separate, minimally-privileged reconciler
+(`scripts/app-installer`) is the single component that holds the Docker
+socket and applies it. It is **off by default** (`APPS_INSTALL_ENABLED`)
+— sovereign / air-gapped deployments leave it off and use the copy-paste
+command. See **[docs/APPS_INSTALL.md](../docs/APPS_INSTALL.md)** for the
+full design (desired-state + reconciler, RBAC, digest pinning, audit).
 
 ---
 
@@ -447,8 +464,10 @@ The fastest path to a first-party example slot:
 1. Open a [discussion](https://github.com/open-nvr/open-nvr/discussions) with
    your idea, the camera setup you'll demo on, and the adapter(s) you'll
    chain.
-2. Fork, branch, and copy one of the thirteen shipped examples as your starting
-   template.
+2. Scaffold a working app — `python3 scripts/create_opennvr_app.py my-app` —
+   or fork and copy one of the thirteen shipped examples as your starting
+   template. The generator gives you a runnable, test-green Detector to fill
+   in; see **[docs/FIRST_DETECTOR.md](../docs/FIRST_DETECTOR.md)**.
 3. Replace the predicate (`zone.contains?`, the dwell-time state machine,
    etc.) with your domain logic.
 4. Keep the file layout, the config shape, the alert dispatcher pattern, and
@@ -460,3 +479,14 @@ The fastest path to a first-party example slot:
 
 Examples are first-class community contribution surface. If yours gets in,
 your name goes on it.
+
+### Getting it into the App Store
+
+An example is a template; the **App Store index** makes an app browsable and
+one-click installable in every deployment's App Catalog. That's a separate,
+documented, validated PR flow — build on the App SDK, publish + digest-pin
+your image, add one reviewed entry to
+[`server/config/apps_index.yml`](../server/config/apps_index.yml), and run
+`make validate-apps-index`. Full walkthrough (and the trust model behind the
+curated index) in
+**[docs/CONTRIBUTING_APPS.md](../docs/CONTRIBUTING_APPS.md)**.

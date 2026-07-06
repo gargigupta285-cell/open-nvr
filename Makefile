@@ -7,18 +7,20 @@
 
 PY ?= python3
 
-.PHONY: help secrets secrets-env check-secrets sync-agent-tasks
+.PHONY: help secrets secrets-env check-secrets sync-agent-tasks validate-apps-index
 
 help:
 	@echo "OpenNVR Makefile targets:"
-	@echo "  make secrets           Print cryptographically random values for the"
-	@echo "                         required secret env vars. Pipe into your .env."
-	@echo "  make secrets-env       Write the random values directly to server/.env"
-	@echo "                         (refuses to clobber an existing file)."
-	@echo "  make check-secrets     Verify your server/.env has no placeholder"
-	@echo "                         values left for the required secrets."
-	@echo "  make sync-agent-tasks  Re-copy server/config/tasks.yml into the"
-	@echo "                         camera-agent bundle (keeps the parity test green)."
+	@echo "  make secrets             Print cryptographically random values for the"
+	@echo "                           required secret env vars. Pipe into your .env."
+	@echo "  make secrets-env         Write the random values directly to server/.env"
+	@echo "                           (refuses to clobber an existing file)."
+	@echo "  make check-secrets       Verify your server/.env has no placeholder"
+	@echo "                           values left for the required secrets."
+	@echo "  make sync-agent-tasks    Re-copy server/config/tasks.yml into the"
+	@echo "                           camera-agent bundle (keeps the parity test green)."
+	@echo "  make validate-apps-index Validate server/config/apps_index.yml (App"
+	@echo "                           Store submission gate — run before opening a PR)."
 
 # --------------------------------------------------------------------------
 # make sync-agent-tasks
@@ -87,3 +89,17 @@ errs=[]; \
 [errs.append(line.strip()) for line in env.read_text().splitlines() if line and not line.startswith('#') and '=' in line and any(f in line.split('=',1)[1].lower() for f in PLACEHOLDER_FRAGMENTS)]; \
 print('\n'.join('  - '+e for e in errs)) if errs else None; \
 sys.exit('server/.env still contains placeholder values:') if errs else print('server/.env: no placeholder values found.')"
+
+# --------------------------------------------------------------------------
+# make validate-apps-index
+# --------------------------------------------------------------------------
+# The App Store submission gate. Validates server/config/apps_index.yml
+# against the same shape the IndexEntry model requires: required fields,
+# unique kebab-case ids, well-formed image refs, sha256 digests, no
+# plaintext secrets, and non-empty install blocks. Stdlib + PyYAML only —
+# no server import, so a contributor can run it in a clean checkout. CI and
+# tests/test_validate_apps_index.py run this over the shipped index so a
+# malformed community submission is caught before merge.
+# See docs/CONTRIBUTING_APPS.md.
+validate-apps-index:
+	@$(PY) scripts/validate_apps_index.py

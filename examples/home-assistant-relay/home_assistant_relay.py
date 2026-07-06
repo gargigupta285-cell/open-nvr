@@ -130,6 +130,17 @@ class AppConfig:
     # Default auto-off window when an override doesn't specify one.
     default_auto_off_seconds: int = 30
 
+    # App contract (spec §03) — all optional; the SDK's ContractMixin
+    # reads these via ``getattr``. ``contract_port`` serves /health
+    # /manifest /state; ``opennvr_url`` triggers registry
+    # self-registration on boot (token from ``opennvr_token`` or the
+    # OPENNVR_INTERNAL_API_KEY env var).
+    contract_port: int | None = None
+    contract_bind_host: str | None = None
+    contract_host: str | None = None
+    opennvr_url: str | None = None
+    opennvr_token: str | None = None
+
 
 def load_config(path: str | Path) -> AppConfig:
     # Historical quirk kept on purpose: this app's validation raises
@@ -227,6 +238,25 @@ def load_config(path: str | Path) -> AppConfig:
     if nats_token == "":
         nats_token = None
 
+    # App contract keys (spec §03) — optional, mirroring the other
+    # overlay apps. Unset ⇒ no contract server, no self-registration.
+    contract_port: int | None = None
+    if raw.get("contract_port") is not None:
+        try:
+            contract_port = int(raw["contract_port"])
+        except (TypeError, ValueError):
+            raise SystemExit(
+                f"config: contract_port must be an integer; "
+                f"got {raw.get('contract_port')!r}"
+            )
+
+    def _opt_str(key: str) -> str | None:
+        val = raw.get(key)
+        if val is None:
+            return None
+        val = str(val).strip()
+        return val or None
+
     return AppConfig(
         nats_url=nats_url,
         nats_token=nats_token,
@@ -236,6 +266,11 @@ def load_config(path: str | Path) -> AppConfig:
         rest_config=rest_config,
         overrides=overrides,
         default_auto_off_seconds=default_auto_off,
+        contract_port=contract_port,
+        contract_bind_host=_opt_str("contract_bind_host"),
+        contract_host=_opt_str("contract_host"),
+        opennvr_url=_opt_str("opennvr_url"),
+        opennvr_token=_opt_str("opennvr_token"),
     )
 
 

@@ -1,0 +1,61 @@
+# ─────────────────────────────────────────────────────────────────────
+# App Store index entry — copy-paste template for a community submission.
+#
+# Append ONE block like this to server/config/apps_index.yml, fill every
+# field, then run `make validate-apps-index` before opening your PR.
+# Full walkthrough: docs/CONTRIBUTING_APPS.md.
+#
+# The shape must satisfy the IndexEntry model in server/routers/apps.py.
+# NO literal secrets — the compose block references ${VAR} from the
+# operator's .env, never a baked key.
+# ─────────────────────────────────────────────────────────────────────
+
+- id: my-app                       # REQUIRED. Unique, kebab-case ([a-z0-9-]).
+                                   #   Must match your AppManifest.id and your
+                                   #   examples/<id>/ folder name.
+  name: My App                     # REQUIRED. Human title shown on the catalog card.
+  summary: >-                      # REQUIRED. One sentence: what it detects / does.
+    Alerts when <the thing your app watches for> happens.
+  category: perimeter              # REQUIRED. Grouping in the catalog, e.g.
+                                   #   perimeter | analytics | vehicle | doorstep |
+                                   #   forensics | integration. Reuse an existing one.
+  version: 1.0.0                   # REQUIRED. Matches your AppManifest.version (semver).
+
+  image: ghcr.io/<you>/my-app:latest   # REQUIRED. Well-formed ref — ghcr.io/... or
+                                       #   opennvr/... . This is the canonical pull ref
+                                       #   the one-click installer deploys.
+  image_digest: sha256:<64-hex>    # STRONGLY RECOMMENDED. The exact bytes your `:latest`
+                                   #   tag resolved to (docker buildx imagetools inspect).
+                                   #   A pinned digest is what makes one-click install
+                                   #   trustworthy (supply-chain integrity). Omit only for
+                                   #   a local `build:`-overlay app; unpinned = dev only.
+
+  requires_tasks: [object_detection]   # REQUIRED (may be []). Adapter task types your app
+                                       #   depends on. Prefer canonical names from
+                                       #   server/config/use_case_map.yml (object_detection,
+                                       #   multi_object_tracking, face_recognition, ocr,
+                                       #   image_captioning, ...). Must match AppManifest.
+  emits: [my_alert]                # OPTIONAL. Alert names your app publishes; mirrors
+                                   #   AppManifest.emits. Drives catalog documentation.
+  docs_url: examples/my-app/README.md  # REQUIRED. Path (or URL) to your app's README.
+
+  # build_context is index-only and optional. Set it while your image is a
+  # local build overlay (no published digest yet); drop it once you publish.
+  # build_context: examples/my-app
+
+  install:                         # REQUIRED. The exact copy-paste an operator runs.
+    compose: |                     #   A docker-compose service block. Secrets via ${VAR}.
+      services:
+        my-app:
+          profiles: [apps]
+          image: ghcr.io/<you>/my-app:latest
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}   # from .env — never a literal
+            - NATS_URL=nats://nats:4222
+            - OPENNVR_URL=http://opennvr-core:8000
+          expose:
+            - "9210"               # your app's contract port
+          networks:
+            - opennvr_internal
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d my-app

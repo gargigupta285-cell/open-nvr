@@ -196,6 +196,38 @@ async def lifespan(app: FastAPI):
                         )
                         create_initial_data()
 
+            # Upgrade-path permission seeding: permissions introduced in
+            # later releases (e.g. ``apps.install``) never materialize on
+            # deployments whose Permission table predates them — the full
+            # seed above only runs on an EMPTY table. Idempotently ensure
+            # they exist so operators can grant them from the roles UI.
+            # Fail-closed either way: a missing row just means nobody but
+            # admin (full_access/superuser) can pass the check.
+            try:
+                from models import Permission as _Permission2
+
+                for _pname, _pdesc in (
+                    (
+                        "apps.install",
+                        "Install/uninstall curated App Store apps",
+                    ),
+                ):
+                    if (
+                        db.query(_Permission2)
+                        .filter(_Permission2.name == _pname)
+                        .first()
+                        is None
+                    ):
+                        db.add(_Permission2(name=_pname, description=_pdesc))
+                        db.commit()
+                        main_logger.info(
+                            "Seeded new permission %r (upgrade path)", _pname
+                        )
+            except Exception:
+                main_logger.warning(
+                    "Upgrade-path permission seeding failed", exc_info=True
+                )
+
             # M0 followup C-1: if any user is still in password_set=False
             # state after seeding, arm a one-time first-time-setup token and
             # print it to stdout. The token gates /auth/first-time-setup so

@@ -1,0 +1,69 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# abandoned-object config consumed by docker-compose.apps.yml.
+#
+# Variables of the form ${VAR} are substituted by the
+# abandoned-object-config-init container at compose-up time (busybox
+# sed, same pattern as the camera-agent overlay). Only the variables
+# listed in the init container are replaced — everything else is left
+# untouched.
+#
+# DO NOT edit the substituted values directly. To change the secret,
+# update .env and re-run ``docker compose up`` so the init container
+# re-templates the file.
+
+# ── NATS endpoint (KAI-C's event bus, compose service ``nats``) ────
+nats_url: "nats://nats:4222"
+# The standard stack runs NATS with ``--auth INTERNAL_API_KEY``.
+nats_token: "${INTERNAL_API_KEY}"
+
+# IMPORTANT: abandoned-object needs per-object identity — detections
+# must carry a ``track_id`` (chain the ``bytetrack`` adapter after
+# your detector, or use a detector that tracks natively).
+subject_pattern: "opennvr.inference.>"
+
+# ── What counts as an "object" vs a "person" — EDIT for your scene ──
+object_labels:
+  - "backpack"
+  - "handbag"
+  - "suitcase"
+person_label: "person"
+
+# ── Abandon predicate ───────────────────────────────────────────────
+dwell_seconds: 30
+move_tolerance_px: 40
+person_radius_px: 250
+owner_grace_seconds: 10
+track_ttl_seconds: 60
+
+# ── Alert delivery ─────────────────────────────────────────────────
+# Alerts always go to stdout (``docker compose logs abandoned-object``).
+webhook_url: null
+# Fan alerts back onto the bus so the operator-UI alerts inbox and any
+# other subscriber pick them up without per-app webhooks.
+nats_alerts_url: "nats://nats:4222"
+nats_alerts_token: "${INTERNAL_API_KEY}"
+
+# ── Cameras / zones — EDIT: camera_id must match KAI-C's event
+# subjects; objects are only candidates while their center is inside
+# the zone polygon. ─────────────────────────────────────────────────
+cameras:
+  - camera_id: "cam-1"
+    frame_width: 1920
+    frame_height: 1080
+    zone_name: "full-frame"
+    zone:
+      - [0, 0]
+      - [1920, 0]
+      - [1920, 1080]
+      - [0, 1080]
+
+# ── App contract (spec §03) ─────────────────────────────────────────
+# NOTE: unlike loitering-detection, this app's AppConfig does not parse
+# contract_port / contract_bind_host / contract_host / opennvr_url, so
+# no /health /manifest /state server is started and no registry
+# self-registration happens. The OPENNVR_INTERNAL_API_KEY / OPENNVR_URL
+# environment variables set by the overlay are therefore inert for this
+# app today; the overlay still sets them so the app picks them up the
+# moment contract support lands here.

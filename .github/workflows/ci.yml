@@ -91,13 +91,17 @@ jobs:
       fail-fast: false
       matrix:
         example:
+          - abandoned-object
           - alerts-subscriber
           - camera-agent
+          - footage-search
           - home-assistant-relay
           - inference-listener
           - intrusion-detection
           - license-plate-recognition
+          - line-crossing
           - loitering-detection
+          - occupancy-counting
           - package-delivery
           - smart-doorbell
     steps:

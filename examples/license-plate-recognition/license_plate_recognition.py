@@ -89,7 +89,7 @@ MANIFEST = AppManifest(
         "Reads license plates via a YOLOv8 → crop → fast-plate-ocr chain "
         "and routes severity through allow/deny watchlists."
     ),
-    requires_tasks=["object_detection", "ocr"],  # checked vs GET /api/v1/adapters
+    requires_tasks=["object_detection", "license_plate_recognition"],  # canonical per server/config/tasks.yml
     subscribes=None,  # FrameApp: drives inference itself via KAI-C
     params=[
         Param("vehicle_labels", list, default=["car", "truck", "bus", "motorcycle"]),

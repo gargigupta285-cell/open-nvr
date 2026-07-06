@@ -731,3 +731,50 @@ class InstalledApp(Base):
     last_seen = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class AppInstallIntent(Base):
+    """Desired-state record for the opt-in one-click app installer.
+
+    This is the seam that keeps the web app out of Docker. The
+    ``POST /apps/index/{id}/install`` and ``/uninstall`` endpoints do
+    exactly three things — validate the id against the curated index,
+    upsert one row here, and audit — and nothing else. They never spawn
+    a subprocess, hold the docker socket, or run compose.
+
+    A separate, minimally-privileged reconciler
+    (``scripts/app-installer``) is the ONLY component that touches
+    Docker: it polls this table, and for each row drives ``docker
+    compose`` up (``desired="installed"``) or down (``desired="absent"``),
+    then writes back ``status``/``message``. The primary key is the
+    curated app id (one intent per app, upsert on re-request), mirroring
+    ``installed_apps``.
+
+    Security notes:
+    * ``image`` / ``image_digest`` are copied from the curated index at
+      write time, never from user input — an id not in the index is
+      rejected before a row is ever created.
+    * ``image_digest`` is the sha256 the reconciler pins to. When NULL
+      the image is unpinned (dev only); the reconciler logs a loud
+      warning and the operator is told not to run it in production.
+    """
+
+    __tablename__ = "app_install_intents"
+
+    # The curated app id, e.g. "loitering-detection" (must exist in
+    # apps_index.yml). Upsert on re-request, same as installed_apps.
+    id = Column(String(100), primary_key=True, index=True)
+    # Canonical image ref + optional sha256 digest, both copied from the
+    # curated index entry at write time (never from the request body).
+    image = Column(String(500), nullable=False)
+    image_digest = Column(String(100), nullable=True)  # sha256:... or NULL
+    # What the operator wants: installed | absent.
+    desired = Column(String(20), nullable=False, default="installed")
+    # Where the reconciler is: pending | applied | failed.
+    status = Column(String(20), nullable=False, default="pending")
+    # Human-readable last-reconcile note (compose stderr on failure, etc).
+    message = Column(Text, nullable=True)
+    # Actor bookkeeping — who requested the current desired state.
+    requested_by = Column(String(100), nullable=True)
+    requested_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())

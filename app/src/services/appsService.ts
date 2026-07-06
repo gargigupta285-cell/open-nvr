@@ -22,9 +22,18 @@ import { api } from '../lib/api'
 // boot; the catalog enables/disables them and pushes manifest-driven config.
 export const appsService = {
   getApps: () => api.get('/api/v1/apps'),
+  getAppIndex: () => api.get('/api/v1/apps/index'),
   enableApp: (id: string) => api.post(`/api/v1/apps/${id}/enable`),
   disableApp: (id: string) => api.post(`/api/v1/apps/${id}/disable`),
   updateAppConfig: (id: string, config: Record<string, any>) =>
     api.put(`/api/v1/apps/${id}/config`, config),
   getAppStatus: (id: string) => api.get(`/api/v1/apps/${id}/status`),
+
+  // Opt-in one-click install: the agent GUIDES the operator, the backend
+  // enforces opt-in + RBAC. install/uninstall 403 when APPS_INSTALL_ENABLED is
+  // off OR the caller lacks apps.install — the UI degrades to command-display.
+  // install-status is readable by any authed user regardless of that gating.
+  installApp: (id: string) => api.post(`/api/v1/apps/index/${id}/install`),
+  uninstallApp: (id: string) => api.post(`/api/v1/apps/index/${id}/uninstall`),
+  getInstallStatus: (id: string) => api.get(`/api/v1/apps/index/${id}/install-status`),
 }

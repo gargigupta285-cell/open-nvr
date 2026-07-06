@@ -152,6 +152,13 @@ server/test_*.py
 # this the blanket ``test_*.py`` above silently untracked the whole
 # sdk/opennvr-app-sdk/tests/ suite.
 !sdk/opennvr-app-sdk/tests/test_*.py
+# App template smoke test: part of the shipped scaffold — the generator
+# copies it into every new app and FIRST_DETECTOR.md promises it passes
+# out of the box. Without this negation the blanket ``test_*.py`` above
+# silently untracked it (review finding: fresh clones got "no tests ran").
+!templates/opennvr-app/tests/test_*.py
+# App-installer pytest suite: same negation pattern.
+!scripts/app-installer/tests/test_*.py
 server/scripts/check_*.py
 server/scripts/get_*.py
 server/scripts/delete_*.py
