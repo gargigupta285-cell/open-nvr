@@ -38,6 +38,7 @@ from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user
 from core.database import get_db
+from core.logging_config import main_logger
 from models import AIDetectionResult, User
 from services.audit_service import write_audit_log
 from services.kai_c_service import get_kai_c_service
@@ -73,6 +74,174 @@ USE_CASE_MAP_PATH = Path(__file__).resolve().parent.parent / "config" / "use_cas
 def _load_use_case_map() -> list[UseCaseEntry]:
     raw = yaml.safe_load(USE_CASE_MAP_PATH.read_text()) or []
     return [UseCaseEntry(**entry) for entry in raw]
+
+
+class TaskEntry(BaseModel):
+    """One canonical task in the curated taxonomy (server/config/tasks.yml).
+
+    ``task`` is the canonical string an adapter SHOULD advertise in
+    ``tasks_advertised`` (contract §4). ``aliases`` are non-canonical
+    spellings that mean the same capability — the canonicalizer folds
+    them in, and the OpenNVR Agent's skill mapping treats an adapter
+    advertising an alias exactly like the canonical. ``agent_skill`` names
+    the Agent skill id (see/count/faces/watch) this task backs, or None.
+    ``suggested_adapters`` names the reference adapter(s) that provide this
+    task (editorial, consistent with ``use_case_map.yml``) — the OpenNVR
+    Agent surfaces these to guide an operator to enable one when a skill is
+    greyed out.
+    """
+
+    task: str
+    label: str
+    summary: str | None = None
+    categories: list[str] = []
+    tags: list[str] = []
+    agent_skill: str | None = None
+    aliases: list[str] = []
+    suggested_adapters: list[str] = []
+    suggested_apps: list[str] = []
+
+
+TASKS_REGISTRY_PATH = Path(__file__).resolve().parent.parent / "config" / "tasks.yml"
+
+
+@lru_cache(maxsize=1)
+def _load_tasks_registry() -> list[TaskEntry]:
+    raw = yaml.safe_load(TASKS_REGISTRY_PATH.read_text()) or []
+    entries = [TaskEntry(**entry) for entry in raw]
+    # Fail fast on collisions. tasks.yml is a hand-edited editorial file;
+    # without this, a duplicated name/alias would resolve SILENTLY and
+    # inconsistently — canonicalize_task iterates in file order (first entry
+    # wins) while lint_task_names builds dicts (last entry wins), so the
+    # canonicalizer and the advisory log would disagree about the same
+    # string. Better to refuse the file at load than map a task to the
+    # wrong skill with a contradictory log line.
+    canonical_by_key: dict[str, str] = {}
+    for e in entries:
+        key = e.task.lower()
+        if key in canonical_by_key:
+            raise ValueError(
+                f"tasks.yml: duplicate canonical task '{e.task}'"
+            )
+        canonical_by_key[key] = e.task
+    alias_owner: dict[str, str] = {}
+    for e in entries:
+        for a in e.aliases:
+            key = a.lower()
+            if key in canonical_by_key:
+                raise ValueError(
+                    f"tasks.yml: alias '{a}' of '{e.task}' collides with "
+                    f"canonical task '{canonical_by_key[key]}'"
+                )
+            if key in alias_owner:
+                raise ValueError(
+                    f"tasks.yml: alias '{a}' is claimed by both "
+                    f"'{alias_owner[key]}' and '{e.task}'"
+                )
+            alias_owner[key] = e.task
+    return entries
+
+
+def canonicalize_task(name: str, registry: list[TaskEntry]) -> str:
+    """Map an advertised task string to its canonical name.
+
+    Pure and reusable — no I/O. Returns the canonical ``task`` when
+    ``name`` matches a canonical name (case-insensitively) or any of its
+    ``aliases``; otherwise returns ``name`` unchanged (an unknown /
+    free-text task registers and stays as-is, §15.1). Canonical names
+    always win over aliases if the two ever collide.
+    """
+    key = (name or "").strip().lower()
+    if not key:
+        return name
+    for entry in registry:
+        if entry.task.lower() == key:
+            return entry.task
+    for entry in registry:
+        if any(a.lower() == key for a in entry.aliases):
+            return entry.task
+    return name
+
+
+def lint_task_names(advertised: list[str], registry: list[TaskEntry]) -> list[str]:
+    """Human-readable warnings for a list of advertised task strings.
+
+    Returns one message per string that is neither a canonical task nor a
+    canonical name itself:
+
+    * an alias → nudge toward the canonical spelling
+      ("'scene_caption' is an alias of 'image_captioning'; prefer the
+      canonical name")
+    * anything unknown → note it registers but stays uncategorized
+      ("'foo_bar' is not a known task — it will register but stay
+      uncategorized")
+
+    Canonical strings produce no warning. Purely advisory: nothing here
+    blocks registration — free-text tasks are first-class (§15.1).
+    """
+    canonical = {e.task.lower(): e.task for e in registry}
+    alias_to_task = {
+        a.lower(): e.task for e in registry for a in e.aliases
+    }
+
+    def _display(s: str) -> str:
+        # Adapter-supplied strings end up in server logs verbatim; bound the
+        # length and escape newlines so a misbehaving adapter can't forge log
+        # lines or inflate the log with a megabyte "task name".
+        out = (s or "")[:80].replace("\r", "\\r").replace("\n", "\\n")
+        return out + ("…" if s and len(s) > 80 else "")
+
+    warnings: list[str] = []
+    for raw in advertised or []:
+        key = (raw or "").strip().lower()
+        if not key or key in canonical:
+            continue
+        if key in alias_to_task:
+            warnings.append(
+                f"'{_display(raw)}' is an alias of '{alias_to_task[key]}'; "
+                "prefer the canonical name"
+            )
+        else:
+            warnings.append(
+                f"'{_display(raw)}' is not a known task — it will register "
+                "but stay uncategorized"
+            )
+    return warnings
+
+
+# One-time-per-(adapter, taskset) lint dedupe. The /capabilities poll
+# runs on a cadence; without this we'd re-emit the same advisory every
+# poll. Keyed by (adapter_name, frozenset(tasks_advertised)) so a genuine
+# taxonomy change (an adapter's task list drifting) re-lints, but a
+# steady-state advertisement warns exactly once per process.
+_lint_seen: set[tuple[str, frozenset[str]]] = set()
+
+
+def lint_and_log_adapter_tasks(
+    adapter_name: str,
+    tasks_advertised: list[str],
+    registry: list[TaskEntry],
+) -> None:
+    """Advisory-only: run ``lint_task_names`` over one adapter's
+    ``tasks_advertised`` and LOG a warning per non-canonical string,
+    prefixed with the adapter name so an operator can trace it back.
+    Deduped per (adapter, taskset) so it doesn't spam every poll.
+
+    Never raises, never blocks — an adapter advertising free-text or
+    alias tasks is fully valid (§15.1); this only nudges toward the
+    canonical spelling.
+    """
+    key = (adapter_name, frozenset(tasks_advertised or []))
+    if key in _lint_seen:
+        return
+    # Bound the dedupe set so a long-running server with churning adapter
+    # names / task sets can't grow it without limit. The set only suppresses
+    # duplicate log lines, so clearing it just re-warns once — harmless.
+    if len(_lint_seen) >= 512:
+        _lint_seen.clear()
+    _lint_seen.add(key)
+    for warning in lint_task_names(tasks_advertised, registry):
+        main_logger.warning("adapter %s advertises %s", adapter_name, warning)
 
 
 class InferenceRequest(BaseModel):
@@ -158,6 +327,21 @@ async def get_capabilities(
     try:
         kai_c_service = get_kai_c_service()
         capabilities = await kai_c_service.get_capabilities()
+
+        # Advisory taxonomy lint (contract §4): make the canonical task
+        # taxonomy earn its keep — when the server aggregates adapter
+        # capabilities, warn (once per adapter+taskset) about any task an
+        # adapter advertises under an alias or a free-text spelling.
+        # Purely a log nudge; never blocks or mutates the response.
+        try:
+            registry = _load_tasks_registry()
+            for adapter_name, entry in (capabilities.get("adapters") or {}).items():
+                caps = (entry or {}).get("capabilities") or {}
+                tasks = caps.get("tasks_advertised") or []
+                if tasks:
+                    lint_and_log_adapter_tasks(adapter_name, tasks, registry)
+        except Exception:
+            main_logger.debug("task-name lint skipped", exc_info=True)
 
         return CapabilitiesResponse(
             kai_c=capabilities.get("kai_c", {}),
@@ -376,6 +560,28 @@ async def get_use_cases(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to load use-case map: {e!s}",
+        )
+
+
+@router.get("/tasks", response_model=list[TaskEntry])
+async def get_tasks(
+    current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)
+):
+    """
+    The canonical task taxonomy: for each converged task, its canonical
+    string, label, categories/tags, which OpenNVR Agent skill it backs,
+    and the non-canonical aliases that mean the same thing (contract §4).
+
+    Curated + open: an adapter may still advertise any free-text task it
+    likes (§15.1); this registry adds canonical names, skill mapping, and
+    a lint. Product-owned editorial content, like the use-case map.
+    """
+    try:
+        return _load_tasks_registry()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load task registry: {e!s}",
         )
 
 

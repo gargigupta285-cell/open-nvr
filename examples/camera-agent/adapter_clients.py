@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -128,6 +129,192 @@ class KaicAdapterClient(_ReusableClientMixin):
                     await asyncio.sleep(self._retry_backoff_s)
         assert last_exc is not None
         raise last_exc
+
+
+class KaicCapabilitiesClient(_ReusableClientMixin):
+    """Cached view of KAI-C's aggregated capabilities — which task strings
+    (``tasks_advertised``) the registered adapters currently provide.
+
+    ``GET {kaic_url}/api/v1/ai/capabilities`` with the same
+    ``X-Internal-Api-Key`` the infer path uses (KAI-C's dev-mode bypass
+    means an empty key is fine on loopback deployments). Results are
+    cached for ``ttl_seconds`` (default 60) so the demo UI's skills
+    polling never hammers KAI-C.
+
+    This is ADVISORY display data for the skills panel: ``refresh()``
+    never raises, and an unreachable KAI-C (or a fetch that hasn't
+    happened yet) leaves :attr:`tasks_advertised` as ``None`` =
+    "unknown" — callers fall back to config-based availability instead
+    of greying anything out. Failures are negative-cached for the same
+    TTL so a down KAI-C costs at most one short timeout per minute.
+    """
+
+    def __init__(
+        self,
+        *,
+        kaic_url: str,
+        api_key: str = "",
+        ttl_seconds: float = 60.0,
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        self._url = f"{kaic_url.rstrip('/')}/api/v1/ai/capabilities"
+        self._api_key = api_key
+        self._ttl = ttl_seconds
+        self._timeout = timeout_seconds
+        self._fetched_at: float | None = None
+        self._tasks: set[str] | None = None   # None = unknown / unreachable
+
+    @property
+    def tasks_advertised(self) -> set[str] | None:
+        """Last-known union of adapter task strings (``None`` = unknown)."""
+        return self._tasks
+
+    async def refresh(self) -> set[str] | None:
+        """Fetch (at most once per TTL) and return the advertised-task set.
+
+        Never raises — on any error the cached value becomes ``None``
+        ("unknown") until the next TTL window.
+        """
+        now = time.monotonic()
+        if self._fetched_at is not None and now - self._fetched_at < self._ttl:
+            return self._tasks
+        # Stamp BEFORE the call so an unreachable KAI-C is also rate-limited
+        # to one attempt per TTL (negative caching).
+        self._fetched_at = now
+        try:
+            headers = {}
+            if self._api_key:
+                headers["X-Internal-Api-Key"] = self._api_key
+            resp = await self._client().get(self._url, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            tasks: set[str] = set()
+            adapters = data.get("adapters") or {}
+            for cap in adapters.values():
+                for task in (cap or {}).get("tasks_advertised") or []:
+                    tasks.add(str(task))
+            self._tasks = tasks
+        except Exception as exc:
+            logger.debug(
+                "KAI-C capabilities fetch failed (%s); skills fall back to "
+                "config-based availability", exc,
+            )
+            self._tasks = None
+        return self._tasks
+
+
+class AppRegistryClient(_ReusableClientMixin):
+    """Cached, read-only view of the OpenNVR app registry — the installed
+    catalog apps and their live state — for the agent's app door.
+
+    Two calls, both ``GET`` against the server's ``/api/v1/apps`` routes
+    with the same ``X-Internal-Api-Key`` the infer path uses:
+
+    * :meth:`list_apps` → ``GET {base}/api/v1/apps`` — the catalog rows
+      (id / name / category / enabled / manifest / …).
+    * :meth:`app_status` → ``GET {base}/api/v1/apps/{id}/status`` — the
+      app's proxied ``/health`` + ``/state``.
+
+    This is the READ half of "every catalog app is a conversational
+    skill": the agent discovers container apps it can't import and
+    *relays* their state. It never enables / disables / configures an
+    app — those stay operator actions (the agent guides).
+
+    ADVISORY, like :class:`KaicCapabilitiesClient`: both methods NEVER
+    raise. Results (and failures) are cached for ``ttl_seconds``
+    (default 60) so a down / unset registry costs at most one short
+    timeout per TTL. On any error the cached value is ``None`` = unknown
+    / unreachable, and the tools surface a graceful "couldn't reach the
+    app registry" message instead of crashing.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str = "",
+        ttl_seconds: float = 60.0,
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        self._base = base_url.rstrip("/")
+        self._api_key = api_key
+        self._ttl = ttl_seconds
+        self._timeout = timeout_seconds
+        # list_apps cache (list, or None = unknown / unreachable).
+        self._apps: list[dict[str, Any]] | None = None
+        self._apps_fetched_at: float | None = None
+        # Per-app status cache: app_id -> (fetched_at, value|None).
+        self._status: dict[str, tuple[float, dict[str, Any] | None]] = {}
+
+    @property
+    def apps_cached(self) -> list[dict[str, Any]] | None:
+        """Last-known installed-apps list without triggering a fetch
+        (``None`` = unknown / never fetched / unreachable). Lets the
+        synchronous skills panel surface app entries from whatever the
+        most recent :meth:`list_apps` refresh saw."""
+        return self._apps
+
+    def _headers(self) -> dict[str, str]:
+        return {"X-Internal-Api-Key": self._api_key} if self._api_key else {}
+
+    async def list_apps(self) -> list[dict[str, Any]] | None:
+        """The installed apps (``GET /api/v1/apps``), cached per TTL.
+
+        Returns the catalog list, or ``None`` when the registry is
+        unreachable / errored (negative-cached for the TTL). Never
+        raises."""
+        now = time.monotonic()
+        if (
+            self._apps_fetched_at is not None
+            and now - self._apps_fetched_at < self._ttl
+        ):
+            return self._apps
+        # Stamp BEFORE the call so an unreachable registry is rate-limited
+        # to one attempt per TTL (negative caching), same as the caps client.
+        self._apps_fetched_at = now
+        try:
+            resp = await self._client().get(
+                f"{self._base}/api/v1/apps", headers=self._headers()
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            self._apps = list(data) if isinstance(data, list) else None
+        except Exception as exc:
+            logger.debug(
+                "app registry list_apps failed (%s); app skills fall back to "
+                "unavailable", exc,
+            )
+            self._apps = None
+        return self._apps
+
+    async def app_status(self, app_id: str) -> dict[str, Any] | None:
+        """One app's live status (``GET /api/v1/apps/{id}/status``),
+        cached per TTL per app.
+
+        Returns the proxied ``{"health": …, "state": …}`` dict, or
+        ``None`` when the registry is unreachable / errored. Never
+        raises."""
+        now = time.monotonic()
+        cached = self._status.get(app_id)
+        if cached is not None and now - cached[0] < self._ttl:
+            return cached[1]
+        value: dict[str, Any] | None
+        try:
+            resp = await self._client().get(
+                f"{self._base}/api/v1/apps/{app_id}/status",
+                headers=self._headers(),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            value = data if isinstance(data, dict) else None
+        except Exception as exc:
+            logger.debug(
+                "app registry status for %r failed (%s); tool reports the "
+                "registry is unreachable", app_id, exc,
+            )
+            value = None
+        self._status[app_id] = (now, value)
+        return value
 
 
 class SyntheticDetectionClient:

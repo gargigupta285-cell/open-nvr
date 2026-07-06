@@ -108,7 +108,11 @@ from core.auth import create_access_token, get_current_active_user  # noqa: E402
 from core.database import Base, get_db  # noqa: E402
 from models import AuditLog, InstalledApp, Role, User  # noqa: E402
 from routers import apps as apps_router  # noqa: E402
-from routers.apps import get_register_principal, validate_app_config  # noqa: E402
+from routers.apps import (  # noqa: E402
+    get_read_principal,
+    get_register_principal,
+    validate_app_config,
+)
 
 
 class _StubUser:
@@ -163,6 +167,7 @@ def client():
     app, _session_factory, engine = _make_app()
     app.dependency_overrides[get_current_active_user] = lambda: _StubUser()
     app.dependency_overrides[get_register_principal] = lambda: _StubUser()
+    app.dependency_overrides[get_read_principal] = lambda: _StubUser()
 
     with TestClient(app) as test_client:
         yield test_client
@@ -400,8 +405,10 @@ def test_register_with_wrong_internal_api_key_is_401(auth_client):
         headers={"X-Internal-Api-Key": "not-the-key"},
     )
     assert resp.status_code == 401
-    # Nothing landed in the catalog.
-    assert auth_client.get("/apps").json() == []
+    # Nothing landed in the catalog (read it back with the valid key).
+    assert auth_client.get(
+        "/apps", headers={"X-Internal-Api-Key": _effective_internal_key()}
+    ).json() == []
 
 
 def test_register_without_any_credential_is_401(auth_client):
@@ -410,7 +417,9 @@ def test_register_without_any_credential_is_401(auth_client):
         json={"url": "http://loitering:9200", "manifest": _manifest()},
     )
     assert resp.status_code == 401
-    assert auth_client.get("/apps").json() == []
+    assert auth_client.get(
+        "/apps", headers={"X-Internal-Api-Key": _effective_internal_key()}
+    ).json() == []
 
 
 def test_register_with_user_jwt_still_works(auth_client):
@@ -451,23 +460,145 @@ def test_register_with_garbage_bearer_is_401(auth_client):
     assert resp.status_code == 401
 
 
-def test_operator_routes_do_not_accept_internal_api_key(auth_client):
-    """enable/disable/config/status are operator actions — the service
-    key must NOT open them. (They 401/403 without a user JWT; here the
-    stubbed get_current_active_user is bypassed only for register.)"""
-    # Register via the service key, then try to enable with it: the
-    # enable route's auth is the overridden user dependency in this
-    # fixture, so instead assert the register-only dependency is not
-    # wired there by checking the real router's dependency graph.
+def test_write_routes_do_not_accept_internal_api_key(auth_client):
+    """enable/disable/config are operator actions — NEITHER service-key
+    dependency may open them. They stay strictly ``get_current_active_user``
+    so the service key can never toggle or reconfigure an app. Verified on
+    the real router's dependency graph (the fixture bypasses the user
+    dependency only for register)."""
     from routers.apps import router as apps_router_obj
 
+    # register accepts the key via get_register_principal; the two read
+    # routes accept it via get_read_principal — both are intended.
+    service_principals = {"get_register_principal", "get_read_principal"}
+    write_paths = {"/apps/{app_id}/enable", "/apps/{app_id}/disable",
+                   "/apps/{app_id}/config"}
+    checked = set()
     for route in apps_router_obj.routes:
-        if route.path.endswith("/register"):
+        if route.path not in write_paths:
             continue
+        checked.add(route.path)
         dependency_names = {
             dep.call.__name__ for dep in route.dependant.dependencies
         }
+        assert not (service_principals & dependency_names), route.path
+    assert checked == write_paths          # all three write routes exist
+
+
+def test_read_routes_are_read_only(auth_client):
+    """list + status accept the service key (get_read_principal) but expose
+    no write dependency — they can only READ. No mutation path is reachable
+    through the read principal."""
+    from routers.apps import router as apps_router_obj
+
+    read_routes = {("/apps", "GET"), ("/apps/{app_id}/status", "GET")}
+    checked: set[tuple[str, str]] = set()
+    for route in apps_router_obj.routes:
+        if (route.path, "GET") not in read_routes or "GET" not in route.methods:
+            continue
+        checked.add((route.path, "GET"))
+        dependency_names = {
+            dep.call.__name__ for dep in route.dependant.dependencies
+        }
+        assert "get_read_principal" in dependency_names, route.path
+        # The register/write service identity is never wired here.
         assert "get_register_principal" not in dependency_names, route.path
+    # Guard against vacuous passes: if the read routes are ever renamed or
+    # removed, the loop body would simply never run — fail instead.
+    assert checked == read_routes, f"read routes not found: {read_routes - checked}"
+
+
+# ─── Read routes accept the internal key (service reads for the agent) ──
+
+
+def test_list_apps_with_internal_api_key_succeeds(auth_client):
+    """The OpenNVR Agent lists the catalog with the shared internal key
+    alone — no user JWT — so it can surface installed apps as skills."""
+    # Seed a row via the service key, then read it back with the key.
+    reg = auth_client.post(
+        "/apps/register",
+        json={"url": "http://loitering:9200", "manifest": _manifest()},
+        headers={"X-Internal-Api-Key": _effective_internal_key()},
+    )
+    assert reg.status_code == 200
+    resp = auth_client.get(
+        "/apps", headers={"X-Internal-Api-Key": _effective_internal_key()}
+    )
+    assert resp.status_code == 200
+    assert [row["id"] for row in resp.json()] == ["loitering-detection"]
+
+
+def test_status_with_internal_api_key_succeeds(auth_client, monkeypatch):
+    """The agent probes an app's live state with the internal key alone."""
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    class _LiveClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url):
+            if url.endswith("/health"):
+                return _Resp({"ready": True})
+            return _Resp({"active_tracks": 1})
+
+    auth_client.post(
+        "/apps/register",
+        json={"url": "http://loitering:9200", "manifest": _manifest()},
+        headers={"X-Internal-Api-Key": _effective_internal_key()},
+    )
+    monkeypatch.setattr(apps_router.httpx, "AsyncClient", _LiveClient)
+
+    resp = auth_client.get(
+        "/apps/loitering-detection/status",
+        headers={"X-Internal-Api-Key": _effective_internal_key()},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["health"]["ready"] is True
+    assert body["state"] == {"active_tracks": 1}
+
+
+def test_read_with_wrong_internal_api_key_and_no_user_is_401(auth_client):
+    """A bad key with no bearer to fall back to is refused on both read
+    routes — the service key is the only credential and it doesn't match."""
+    for path in ("/apps", "/apps/anything/status"):
+        resp = auth_client.get(path, headers={"X-Internal-Api-Key": "not-the-key"})
+        assert resp.status_code == 401, path
+
+
+def test_read_without_any_credential_is_401(auth_client):
+    """No bearer, no key → 401 on the read routes (get_read_principal)."""
+    for path in ("/apps", "/apps/anything/status"):
+        assert auth_client.get(path).status_code == 401, path
+
+
+def test_list_apps_with_user_jwt_still_works(auth_client):
+    """The pre-existing operator path — a real bearer token for a live
+    user row — keeps reading the catalog alongside the service key."""
+    token = create_access_token({"sub": "operator"})
+    auth_client.post(
+        "/apps/register",
+        json={"url": "http://loitering:9200", "manifest": _manifest()},
+        headers={"X-Internal-Api-Key": _effective_internal_key()},
+    )
+    resp = auth_client.get("/apps", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    assert [row["id"] for row in resp.json()] == ["loitering-detection"]
 
 
 # ─── enable / disable ───────────────────────────────────────────────────

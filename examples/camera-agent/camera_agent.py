@@ -34,9 +34,11 @@ import base64
 import difflib
 import json
 import logging
+import math
 import re
 import signal
 import subprocess
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -46,15 +48,23 @@ from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from adapter_clients import (
+    AppRegistryClient,
     KaicAdapterClient,
+    KaicCapabilitiesClient,
     OllamaClient,
     OpenAILLMClient,
     PiperClient,
     SyntheticDetectionClient,
     WhisperClient,
 )
-from context import CameraContext, CameraSpec, run_event_subscriber
+from context import (
+    CameraContext,
+    CameraSpec,
+    run_app_alert_subscriber,
+    run_event_subscriber,
+)
 from frame_sources import build_frame_source, discover_local_cameras
+from monitor_host import MonitorHost
 from tools import CameraTools, build_tool_definitions
 
 logger = logging.getLogger("camera-agent")
@@ -70,6 +80,19 @@ class AppConfig:
     # KAI-C (for the vision tool calls — auditable).
     kaic_url: str
     kaic_api_key: str
+
+    # Optional single BASE URL for the OpenNVR deployment. When set, any UNSET
+    # sibling URL that points at the SAME deployment is derived from it, so a
+    # typical single-deployment install only has to configure one address:
+    #   opennvr_api_url ← opennvr_base_url   (the server API origin)
+    #   opennvr_ui_url  ← opennvr_base_url   (the main OpenNVR web UI)
+    # kaic_url and nats_inference_url are DELIBERATELY not derived — the KAI-C
+    # inference gateway and the NATS event bus are separate services on their
+    # own ports, so they stay explicit even when they live in the same
+    # deployment. Any per-field value set explicitly always wins over the base
+    # (the base only fills in the blanks). Unset → each sibling keeps its own
+    # value / stays None, i.e. fully backward-compatible.
+    opennvr_base_url: str | None = None
     detection_adapter: str = "yolov8"
     recognition_adapter: str = "insightface"
     caption_adapter: str = "blip"
@@ -155,6 +178,25 @@ class AppConfig:
     opennvr_cameras_url: str | None = None
     opennvr_api_key: str | None = None
 
+    # Optional OpenNVR server BASE URL (e.g. "http://127.0.0.1:8000") for the
+    # APP DOOR: when set, the agent discovers installed catalog apps via
+    # GET {opennvr_api_url}/api/v1/apps and can relay one app's live state via
+    # GET {opennvr_api_url}/api/v1/apps/{id}/status — surfacing every installed
+    # app as a READ-ONLY conversational skill. Auth is X-Internal-Api-Key: the
+    # key is opennvr_api_key, falling back to kaic_api_key (the same deployment
+    # INTERNAL_API_KEY) or the INTERNAL_API_KEY env var. The agent only READS
+    # here — it never enables / disables / configures an app (that stays an
+    # operator action; the agent guides). Unset → no app skills, cleanly.
+    opennvr_api_url: str | None = None
+
+    # Optional base URL of the main OpenNVR UI (e.g. "https://nvr.example"),
+    # used only to build a deep link into the AI Adapters view when a skill is
+    # greyed out for want of a backing adapter. The agent GUIDES the operator
+    # there — it never enables or approves an adapter itself (that stays an
+    # operator action behind OpenNVR's permission gate). Unset → no link, the
+    # skills panel just names the suggested adapter(s) in text.
+    opennvr_ui_url: str | None = None
+
     # Optional emergency contacts for alarms, keyed by alarm target/name
     # (e.g. {"fire": "+1-555-0100"}). The actual call-out is a documented
     # future integration (see ALARMS.md); for now an armed alarm with a
@@ -162,8 +204,9 @@ class AppConfig:
     emergency_contacts: dict[str, str] | None = None
 
     # Identity used for the optional wake word ("Hey <agent_name>") and event
-    # metadata. The demo presents the agent as "the OpenNVR camera agent" (chat
-    # label: "agent") and never uses this as a persona name. If you turn on a
+    # metadata. The demo presents the agent as "the OpenNVR Agent" (chat
+    # label: "agent") and never uses this as a persona name. The default value
+    # stays "Camera Agent" for infra/wake-word compat. If you turn on a
     # named wake word, pick a name STT transcribes reliably and register its
     # spellings in wake_words (an unusual name is often mis-heard).
     agent_name: str = "Camera Agent"
@@ -234,9 +277,10 @@ _DEFAULT_SYSTEM_PROMPT = (
 # The agent's persona name follows the configured voice gender. The actual
 # spoken voice is whichever Piper voice the ai-adapter serves; ``voice_gender``
 # here selects the matching pronouns the agent uses.
-# The agent has no persona name: it presents as "the OpenNVR camera agent" (chat
+# The agent has no persona name: it presents as "the OpenNVR Agent" (chat
 # label "agent"). ``agent_name`` below is a technical default used only for event
-# metadata and the OPTIONAL wake word. The voice is a separate choice.
+# metadata and the OPTIONAL wake word — it keeps the legacy "Camera Agent"
+# value for infra/wake-word compat. The voice is a separate choice.
 DEFAULT_AGENT_NAME = "Camera Agent"
 DEFAULT_VOICE_GENDER = "neutral"
 
@@ -257,6 +301,7 @@ SKILL_TOOLS: dict[str, list[str]] = {
     "watch": ["create_monitor", "stop_monitor"],
     "report": ["create_report", "stop_report"],
     "task": ["create_background_task"],
+    "apps": ["list_apps", "app_status", "recent_app_alerts"],
 }
 # id, icon, name, example question, requirement key ("" = always available)
 _SKILL_META: list[tuple[str, str, str, str, str]] = [
@@ -278,7 +323,161 @@ _SKILL_META: list[tuple[str, str, str, str, str]] = [
      "Every morning at 7, summarise overnight activity.", ""),
     ("task", "⚙", "Run longer searches in the background",
      "Check every camera for anyone in a red shirt.", ""),
+    ("apps", "🧩", "Query installed catalog apps",
+     "What apps are running, and is the loitering detector healthy?", "apps"),
 ]
+# Which KAI-C task strings (``tasks_advertised``, aggregated live from
+# GET /api/v1/ai/capabilities) back each skill. Advisory display data
+# only: ``skill_requirement_met`` stays the enable gate, so a briefly
+# unreachable KAI-C never disables a working tool — the UI just loses
+# the live "is an adapter for this actually registered?" signal.
+# ``see`` is satisfied by EITHER a captioning or a VQA adapter; the
+# converged watch monitors (count/crossing → occupancy/line_crossing
+# SDK rules) ride on object detection. Skills not listed here (events,
+# footage, alarm, report, task) don't consume KAI-C inference.
+#
+# This map is now DERIVED from the bundled canonical task registry
+# (``tasks.yml``, a copy of ``server/config/tasks.yml``): each task's
+# ``agent_skill`` says which skill it backs, and its ``aliases`` are
+# folded in so an adapter advertising EITHER spelling (e.g. a
+# ``scene_caption`` or an ``image_captioning`` adapter) satisfies the
+# ``see`` skill. The upshot: adding a task to tasks.yml with an
+# ``agent_skill`` makes it an agent skill backing with NO code change
+# here. ``_SKILL_BACKING_FALLBACK`` is the last-known-good hardcoded map,
+# used verbatim if the bundled file is missing/unreadable (never crash).
+
+# ``watch`` has no ``agent_skill`` of its own in tasks.yml (its converged
+# count/crossing monitors ride on the same detection ``count`` uses), so
+# it inherits whatever tasks back the named skill.
+_SKILL_TASK_INHERITS: dict[str, str] = {"watch": "count"}
+
+_SKILL_BACKING_FALLBACK: dict[str, list[str]] = {
+    "see": ["image_captioning", "vqa"],
+    "count": ["object_detection"],
+    "faces": ["face_recognition"],
+    "watch": ["object_detection"],
+}
+
+TASKS_REGISTRY_PATH = Path(__file__).resolve().parent / "tasks.yml"
+
+
+def _derive_skill_backing_tasks() -> dict[str, list[str]]:
+    """Invert the bundled task registry's ``agent_skill`` field into
+    ``skill id -> [canonical task + its aliases]``.
+
+    Both the canonical name and every alias are included so live-adapter
+    matching succeeds regardless of which spelling an adapter advertises
+    (contract §4: the canonical-alias case, e.g. scene_caption ≡
+    image_captioning). Skills that inherit another skill's backing
+    (``_SKILL_TASK_INHERITS``) get its derived tasks. On any error —
+    missing file, bad YAML — falls back to the hardcoded map so the agent
+    never fails to start over a taxonomy file."""
+    try:
+        raw = yaml.safe_load(TASKS_REGISTRY_PATH.read_text()) or []
+        derived: dict[str, list[str]] = {}
+        for entry in raw:
+            skill = entry.get("agent_skill")
+            if not skill:
+                continue
+            names = [entry["task"], *(entry.get("aliases") or [])]
+            for name in names:
+                if name not in derived.setdefault(skill, []):
+                    derived[skill].append(name)
+        for skill, source in _SKILL_TASK_INHERITS.items():
+            if source in derived:
+                derived[skill] = list(derived[source])
+        if not derived:                       # empty/degenerate file → fallback
+            return dict(_SKILL_BACKING_FALLBACK)
+        return derived
+    except Exception:                          # pragma: no cover - defensive
+        logger.warning(
+            "could not load bundled tasks.yml (%s); using the hardcoded "
+            "skill-backing map", TASKS_REGISTRY_PATH, exc_info=True,
+        )
+        return dict(_SKILL_BACKING_FALLBACK)
+
+
+_SKILL_BACKING_TASKS: dict[str, list[str]] = _derive_skill_backing_tasks()
+
+
+def _derive_skill_suggested_adapters() -> dict[str, list[str]]:
+    """Union the ``suggested_adapters`` of every task backing each skill,
+    from the bundled task registry — ``skill id -> [adapter names]``, order
+    preserved and deduped.
+
+    This is the editorial "which adapter provides this skill" answer the
+    agent surfaces when a skill is greyed out (no live adapter advertises a
+    backing task). It's GUIDANCE ONLY: it names adapters for the operator to
+    enable in the AI Adapters view; the agent never enables one. Inherited
+    skills (``_SKILL_TASK_INHERITS``) pick up their source's adapters. On any
+    error the map is simply empty — a missing suggestion never breaks the UI."""
+    try:
+        raw = yaml.safe_load(TASKS_REGISTRY_PATH.read_text()) or []
+        by_task: dict[str, list[str]] = {}
+        for entry in raw:
+            names = [entry["task"], *(entry.get("aliases") or [])]
+            adapters = entry.get("suggested_adapters") or []
+            for name in names:
+                by_task[name] = list(adapters)
+        derived: dict[str, list[str]] = {}
+        for skill, tasks in _SKILL_BACKING_TASKS.items():
+            seen: list[str] = []
+            for task in tasks:
+                for adapter in by_task.get(task, []):
+                    if adapter not in seen:
+                        seen.append(adapter)
+            derived[skill] = seen
+        return derived
+    except Exception:                          # pragma: no cover - defensive
+        logger.warning(
+            "could not derive skill suggested adapters from %s",
+            TASKS_REGISTRY_PATH, exc_info=True,
+        )
+        return {}
+
+
+_SKILL_SUGGESTED_ADAPTERS: dict[str, list[str]] = _derive_skill_suggested_adapters()
+
+
+def _derive_skill_suggested_apps() -> dict[str, list[str]]:
+    """Union the ``suggested_apps`` of every task backing each skill, from
+    the bundled task registry — ``skill id -> [app ids]``, order preserved
+    and deduped.
+
+    The app-install twin of ``_derive_skill_suggested_adapters``: when a
+    skill is greyed out for want of a backing adapter, the agent can point
+    the operator either at a raw adapter to enable OR at a packaged catalog
+    app that delivers the same capability (e.g. object_detection →
+    intrusion-detection / occupancy-counting). GUIDANCE ONLY: the agent
+    never installs an app — the link opens the App Catalog. Inherited
+    skills (``_SKILL_TASK_INHERITS``) pick up their source's apps. On any
+    error the map is empty — a missing suggestion never breaks the UI."""
+    try:
+        raw = yaml.safe_load(TASKS_REGISTRY_PATH.read_text()) or []
+        by_task: dict[str, list[str]] = {}
+        for entry in raw:
+            names = [entry["task"], *(entry.get("aliases") or [])]
+            apps = entry.get("suggested_apps") or []
+            for name in names:
+                by_task[name] = list(apps)
+        derived: dict[str, list[str]] = {}
+        for skill, tasks in _SKILL_BACKING_TASKS.items():
+            seen: list[str] = []
+            for task in tasks:
+                for app in by_task.get(task, []):
+                    if app not in seen:
+                        seen.append(app)
+            derived[skill] = seen
+        return derived
+    except Exception:                          # pragma: no cover - defensive
+        logger.warning(
+            "could not derive skill suggested apps from %s",
+            TASKS_REGISTRY_PATH, exc_info=True,
+        )
+        return {}
+
+
+_SKILL_SUGGESTED_APPS: dict[str, list[str]] = _derive_skill_suggested_apps()
 
 
 # Phrases Whisper commonly hallucinates from silence / background noise / the
@@ -522,10 +721,11 @@ def _frames_for(runtime, max_frames: int = 3) -> list[dict]:
 
 
 def greeting_for(name: str | None = None) -> str:
-    # Nameless by design — the agent introduces itself as "the OpenNVR camera
-    # agent", not by a persona name. (``name`` is accepted for call-site compat.)
+    # No persona name by design — the agent introduces itself by the product
+    # name, "the OpenNVR Agent" (formerly "Camera Agent"), described as your
+    # camera agent. (``name`` is accepted for call-site compat.)
     return (
-        "Hi, I'm your OpenNVR camera agent. I keep an eye on all your "
+        "Hi, I'm the OpenNVR Agent — your camera agent. I keep an eye on all your "
         "cameras and run the checks you ask for. I can tell you what's "
         "happening right now, look back at what happened earlier, set up "
         "alarms and watches, and take on longer searches in the background "
@@ -641,7 +841,10 @@ class Monitor:
     line: list[float] | None = None   # crossing: [x1,y1,x2,y2] normalized
     current: dict[str, int] = field(default_factory=dict)
     peak: dict[str, int] = field(default_factory=dict)
-    counters: dict = field(default_factory=dict)  # per-camera LineCounter (crossing)
+    # Per-camera LineCounter — LEGACY-loop crossing monitors only. Converged
+    # crossing monitors (kind in _CONVERGED) tally in MonitorHost's
+    # HostedMonitor.tallies instead; this stays {} for them. Never serialized.
+    counters: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         d = {
@@ -700,10 +903,20 @@ class LineCounter:
 
 
 class MonitorManager:
-    """Runs the agent's standing watches: every ``interval_s`` it grabs a frame
-    from each watched camera, runs detection, and counts the target. Notify
-    monitors raise a (cooldown-limited) notification when the target is
-    present; count monitors track live + peak counts. In-memory only."""
+    """Runs the agent's standing watches. The registry (ids, list,
+    persistence, notifications) is unchanged, but the RULES are converged
+    onto the App SDK (app-sdk-spec §07 "one rule library, two front doors"):
+
+    * kind="count" / kind="crossing" → SDK detectors hosted in-process by
+      :class:`monitor_host.MonitorHost` (the occupancy-counting and
+      line-crossing example rule classes, driven by the agent's frame
+      source + detection client).
+    * kind="notify" → the legacy poll loop below (cooldown-refire presence
+      has no SDK archetype yet; see monitor_host.py's module docstring).
+    """
+
+    # kind → MonitorHost rule for the SDK-converged monitor kinds.
+    _CONVERGED = {"count": "occupancy", "crossing": "line_crossing"}
 
     def __init__(self, runtime: "CameraAgentRuntime", *, default_interval: float = 8.0,
                  notify_cooldown: float = 30.0, max_monitors: int = 20) -> None:
@@ -716,8 +929,23 @@ class MonitorManager:
         self._cooldown = notify_cooldown
         self._max = max_monitors
         self._last_notified: dict[tuple[int, str], float] = {}
-        self._notifications: list[dict[str, Any]] = []
+        # Bounded: the feed only ever serves the newest 50 (notifications()),
+        # but appends arrive from monitor notify paths AND the app-alert
+        # relay — an unbounded list in a long-running agent is a slow leak.
+        self._notifications: deque[dict[str, Any]] = deque(maxlen=200)
         self._next_note_id = 1
+        # SDK front door. Everything is late-bound through ``runtime`` so
+        # tests that monkeypatch ``context.get_frame`` / ``detection_client
+        # .infer`` after construction are honored, exactly like the legacy
+        # loop's attribute lookups per poll.
+        self.host = MonitorHost(
+            get_frame=lambda cam: runtime.context.get_frame(cam),
+            infer=lambda **kw: runtime.detection_client.infer(**kw),
+            notify=self._hosted_notify,
+            dedup=lambda dets: runtime.tools._dedup_detections(dets),
+            stop_check=lambda: runtime._stop_event.is_set(),
+            default_interval_s=default_interval,
+        )
 
     def create(self, *, kind: str, camera_ids: list[str], target: str,
                description: str = "", interval_s: float | None = None,
@@ -730,9 +958,26 @@ class MonitorManager:
             interval_s=float(interval_s or self._default_interval),
             created_at=time.time(), line=line,
         )
-        if kind == "crossing" and line and len(line) == 4:
-            ln = ((line[0], line[1]), (line[2], line[3]))
-            mon.counters = {cam: LineCounter(ln) for cam in camera_ids}
+        if kind in self._CONVERGED:
+            # SDK front door (§07): instantiate the example app's rule
+            # class via MonitorHost instead of the bespoke loop. May raise
+            # ValueError on bad params — BEFORE the monitor is registered,
+            # so a rejected request leaves no orphan row or task.
+            params: dict[str, Any] = {
+                "target": mon.target, "interval_s": mon.interval_s,
+            }
+            if kind == "crossing":
+                params["line"] = list(line or [])
+
+            def _sink(cam: str, current: int, peak_candidate: int,
+                      _mon: Monitor = mon) -> None:
+                _mon.current[cam] = current
+                _mon.peak[cam] = max(_mon.peak.get(cam, 0), peak_candidate)
+
+            self.host.create(
+                self._CONVERGED[kind], list(camera_ids), params,
+                monitor_id=mon.id, counts_sink=_sink,
+            )
         self._next_id += 1
         self._monitors[mon.id] = mon
         self._order.append(mon.id)
@@ -740,7 +985,9 @@ class MonitorManager:
             old = self._order.pop(0)
             self.stop(old)
             self._monitors.pop(old, None)
-        self._tasks[mon.id] = asyncio.create_task(self._loop(mon), name=f"monitor-{mon.id}")
+        if kind not in self._CONVERGED:
+            # Legacy poll loop — only kind="notify" lands here now.
+            self._tasks[mon.id] = asyncio.create_task(self._loop(mon), name=f"monitor-{mon.id}")
         logger.info("monitor #%d (%s %r on %s) started", mon.id, kind, target, camera_ids)
         return mon
 
@@ -749,10 +996,33 @@ class MonitorManager:
         if not mon:
             return False
         mon.active = False
+        self.host.stop(monitor_id)  # no-op for legacy (notify) monitors
         t = self._tasks.pop(monitor_id, None)
         if t:
             t.cancel()
         return True
+
+    def _hosted_notify(self, monitor_id: int, alert: Any) -> None:
+        """Alert bridge target: a hosted (SDK) monitor fired. Routes into
+        the same notify machinery the legacy loop used — the in-memory
+        notification feed the UI polls plus the webhook fan-out. Called
+        synchronously from the detector's dispatch; never blocks (list
+        append + fire-and-forget task)."""
+        import time
+
+        now = time.time()
+        self._notifications.append({
+            "id": self._next_note_id,
+            "monitor_id": monitor_id,
+            "text": f"{alert.title} — {alert.description}",
+            "ts": now,
+        })
+        self._next_note_id += 1
+        logger.info("monitor #%d alerted: %s", monitor_id, alert.title)
+        self._runtime.notifier.fire({
+            "type": "notify", "title": alert.title, "text": alert.description,
+            "camera": alert.camera_id, "severity": alert.severity, "ts": now,
+        })
 
     def stop_all(self) -> None:
         for mid in list(self._monitors):
@@ -773,10 +1043,24 @@ class MonitorManager:
                 logger.exception("monitor restore failed for %r", s)
 
     def list(self) -> list[dict[str, Any]]:
-        return [self._monitors[i].to_dict() for i in self._order if i in self._monitors]
+        out: list[dict[str, Any]] = []
+        for i in self._order:
+            mon = self._monitors.get(i)
+            if mon is None:
+                continue
+            d = mon.to_dict()
+            hosted = self.host.get(i)
+            if hosted is not None and hosted.error is not None:
+                # The hosted poll task died (see MonitorHost._loop) —
+                # surface that in /monitors instead of listing a zombie
+                # as active.
+                d["active"] = False
+                d["status"] = f"error: {hosted.error}"
+            out.append(d)
+        return out
 
     def notifications(self) -> list[dict[str, Any]]:
-        return list(self._notifications[-50:])
+        return list(self._notifications)[-50:]
 
     def _count_target(self, detections: list[dict[str, Any]], target: str) -> int:
         deduped = self._runtime.tools._dedup_detections(detections[:64])
@@ -817,6 +1101,10 @@ class MonitorManager:
             out.append({"id": tid, "x": x, "y": y})
         return out
 
+    # Legacy poll loop. Only kind="notify" monitors run it — "count" and
+    # "crossing" are hosted SDK detectors now (see ``self.host``), so the
+    # count/crossing branches in ``_poll`` below are kept only as the
+    # reference semantics the convergence was tested against.
     async def _loop(self, mon: Monitor) -> None:
         try:
             while mon.active and not self._runtime._stop_event.is_set():
@@ -1214,12 +1502,19 @@ class Notifier:
         title = str(event.get("title") or "OpenNVR alert")
         detail = str(event.get("text") or "")
         body = f"{title}: {detail}" if detail else title
-        return {
+        payload = {
             "text": body, "content": body,  # Slack / Discord
             "type": event.get("type"), "title": title, "detail": detail,
             "camera": event.get("camera"), "severity": event.get("severity"),
             "ts": event.get("ts"), "agent": self._runtime.agent_name,
         }
+        # App-alert relay labels its source (``app:<id>``) so a webhook
+        # consumer can tell "the PPE app flagged a violation" apart from the
+        # agent's own watches. Only present for relayed app alerts.
+        source = event.get("source")
+        if source:
+            payload["source"] = source
+        return payload
 
     async def send(self, event: dict[str, Any]) -> int:
         kind = event.get("type")
@@ -1600,6 +1895,104 @@ def _create_background_task_tool() -> dict[str, Any]:
     }
 
 
+# ── App door tools (read-only orchestration of installed catalog apps) ──
+# The agent discovers container apps it can't import and RELAYS their state.
+# These tools READ ONLY — there is deliberately no enable/disable/configure
+# tool (those stay operator actions; the agent guides). Gated behind the
+# "apps" skill, which requires opennvr_api_url to be configured.
+
+
+def _list_apps_tool() -> dict[str, Any]:
+    """Function schema for listing the installed + enabled catalog apps."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "list_apps",
+            "description": (
+                "List the OpenNVR catalog apps installed and ENABLED on this "
+                "system (loitering detection, occupancy counting, PPE, etc.). "
+                "Use to answer 'what apps are running?', 'do I have a loitering "
+                "detector?', 'what can this system watch for automatically?'. "
+                "Returns each app's id, name, summary, category, and what it "
+                "emits (alert types). Read-only: you can report what's "
+                "installed, but you CANNOT enable, disable, or configure an "
+                "app — that's an operator action in the app catalog."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+
+
+def _app_status_tool() -> dict[str, Any]:
+    """Function schema for reading one installed app's live state/health."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "app_status",
+            "description": (
+                "Get the live state and health of one installed OpenNVR app by "
+                "its id (from list_apps). Use for 'is the loitering detector "
+                "healthy?', 'what is the occupancy app seeing right now?'. "
+                "Returns the app's reported health + state. Read-only — you "
+                "report status, you do not change the app's configuration."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app_id": {
+                        "type": "string",
+                        "description": (
+                            "The app's id as returned by list_apps, e.g. "
+                            "'loitering-detection'."
+                        ),
+                    }
+                },
+                "required": ["app_id"],
+            },
+        },
+    }
+
+
+def _recent_app_alerts_tool() -> dict[str, Any]:
+    """Function schema for the app-door ALERT RELAY read side: recent
+    alerts fired by installed catalog apps, off the bus."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "recent_app_alerts",
+            "description": (
+                "Look back at recent ALERTS fired by installed OpenNVR catalog "
+                "apps (loitering, PPE violations, occupancy limits, etc.). Use "
+                "for 'any alerts from my apps?', 'did the PPE app flag anything?', "
+                "'has the loitering detector gone off?'. Returns alerts "
+                "newest-first with the app, camera, severity, and what fired. "
+                "Read-only: you RELAY what an app reported — you cannot arm, "
+                "silence, or reconfigure the app."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app_id": {
+                        "type": "string",
+                        "description": (
+                            "Optional: filter to one app's alerts by its id "
+                            "(from list_apps), e.g. 'ppe-detection'. Omit for "
+                            "alerts from all apps."
+                        ),
+                    },
+                    "window_seconds": {
+                        "type": "number",
+                        "description": (
+                            "How far back, in SECONDS (60=1min, 3600=1hr). "
+                            "Defaults to 3600 (the last hour)."
+                        ),
+                    },
+                },
+            },
+        },
+    }
+
+
 def load_config(path: str | Path) -> AppConfig:
     raw = yaml.safe_load(Path(path).read_text())
     if not isinstance(raw, dict):
@@ -1681,9 +2074,20 @@ def load_config(path: str | Path) -> AppConfig:
             "transcribes reliably and add the spellings it emits to wake_words "
             "(watch the 'wake score' log line while testing).", _name)
 
+    # Single-base-URL ergonomics: when opennvr_base_url is set, DERIVE any unset
+    # sibling that points at the same deployment (opennvr_api_url, opennvr_ui_url)
+    # from it. Explicit per-field values always win — the base only fills blanks.
+    # kaic_url and nats_inference_url are intentionally NOT derived (separate
+    # services / ports); the relationship is documented on AppConfig.
+    _base = raw.get("opennvr_base_url")
+    _base = str(_base).rstrip("/") if _base else None
+    _opennvr_api_url = raw.get("opennvr_api_url") or _base
+    _opennvr_ui_url = raw.get("opennvr_ui_url") or _base
+
     return AppConfig(
         kaic_url=str(raw["kaic_url"]),
         kaic_api_key=str(raw["kaic_api_key"]),
+        opennvr_base_url=_base,
         detection_adapter=_str("detection_adapter", "yolov8"),
         recognition_adapter=_str("recognition_adapter", "insightface"),
         caption_adapter=_str("caption_adapter", "blip"),
@@ -1721,6 +2125,8 @@ def load_config(path: str | Path) -> AppConfig:
         footage_index_path=raw.get("footage_index_path"),
         opennvr_cameras_url=raw.get("opennvr_cameras_url"),
         opennvr_api_key=raw.get("opennvr_api_key"),
+        opennvr_api_url=_opennvr_api_url,
+        opennvr_ui_url=_opennvr_ui_url,
         emergency_contacts=(
             dict(raw["emergency_contacts"])
             if isinstance(raw.get("emergency_contacts"), dict) else None
@@ -1858,6 +2264,36 @@ class CameraAgentRuntime:
             api_key=cfg.kaic_api_key,
             adapter_name=cfg.recognition_adapter,
         )
+        # Live "skills as capabilities" signal: which tasks KAI-C's registered
+        # adapters currently advertise (60s TTL, advisory — see skills_payload).
+        self.kaic_capabilities = KaicCapabilitiesClient(
+            kaic_url=cfg.kaic_url,
+            api_key=cfg.kaic_api_key,
+        )
+
+        # App door (read-only): discover installed catalog apps and relay
+        # their live state as conversational skills. Only constructed when
+        # opennvr_api_url is configured — otherwise the app tools/skills
+        # simply don't exist (clean fall-back). The key reuses the same
+        # deployment INTERNAL_API_KEY the infer path uses: opennvr_api_key,
+        # else kaic_api_key, else the INTERNAL_API_KEY env var.
+        self.app_registry: AppRegistryClient | None = None
+        if cfg.opennvr_api_url:
+            import os
+
+            app_key = (
+                cfg.opennvr_api_key
+                or cfg.kaic_api_key
+                or os.environ.get("INTERNAL_API_KEY", "")
+            )
+            self.app_registry = AppRegistryClient(
+                base_url=cfg.opennvr_api_url, api_key=app_key,
+            )
+            logger.info(
+                "app door enabled: reading installed apps from %s "
+                "(read-only — the agent never enables/disables/configures)",
+                cfg.opennvr_api_url,
+            )
 
         # Optional read-only footage-search index → enables search_footage.
         self.footage_index = None
@@ -1907,6 +2343,9 @@ class CameraAgentRuntime:
             "enroll_face": self._handle_enroll_face,
             "list_people": self._handle_list_people,
             "forget_face": self._handle_forget_face,
+            "list_apps": self._handle_list_apps,
+            "app_status": self._handle_app_status,
+            "recent_app_alerts": self._handle_recent_app_alerts,
         }
 
         self.agent_name = agent_name_for(cfg.agent_name)
@@ -1918,6 +2357,10 @@ class CameraAgentRuntime:
         self.reports = ReportScheduler(self)
         self._stop_event = asyncio.Event()
         self._subscriber_task: asyncio.Task | None = None
+        self._app_alert_subscriber_task: asyncio.Task | None = None
+        # Push-side throttle for the app-alert relay: last relay time per
+        # (app_id, camera_id). Reuses MonitorManager's notify cooldown.
+        self._app_relay_last: dict[tuple[str, str], float] = {}
 
     def _configure_tools(self) -> None:
         """(Re)build the advertised tool lists from ``enabled_tools`` minus the
@@ -1928,6 +2371,12 @@ class CameraAgentRuntime:
         excluded: set[str] = set()
         for sid in self.disabled_skills:
             excluded.update(SKILL_TOOLS.get(sid, ()))
+        # App door: never advertise the read-only app tools when the registry
+        # isn't wired (opennvr_api_url unset) — there's nothing to read, so the
+        # LLM shouldn't see them. When it IS wired, they're advertised and the
+        # handlers degrade gracefully if the registry is momentarily down.
+        if not self.skill_requirement_met("apps"):
+            excluded.update(SKILL_TOOLS["apps"])
         allow = None if self.cfg.enabled_tools is None else set(self.cfg.enabled_tools)
 
         def keep(defn: dict[str, Any]) -> bool:
@@ -1943,6 +2392,7 @@ class CameraAgentRuntime:
             _create_alarm_tool(cam_all), _stop_alarm_tool(),
             _create_report_tool(), _stop_report_tool(),
             _enroll_face_tool(cam_all), _list_people_tool(), _forget_face_tool(),
+            _list_apps_tool(), _app_status_tool(), _recent_app_alerts_tool(),
         ) if keep(t)]
         self.background_tool_definitions = base
         self.tool_definitions = base + control
@@ -1957,11 +2407,26 @@ class CameraAgentRuntime:
         if req == "footage":
             return bool(getattr(self, "footage_index", None)
                         and self.footage_index.available)
+        if req == "apps":
+            # The app door is wired iff the OpenNVR server base URL is set —
+            # then the AppRegistryClient exists. Configuration presence is the
+            # gate; a momentarily-unreachable registry degrades at call time.
+            return getattr(self, "app_registry", None) is not None
         return True   # no external requirement
 
     def skills_payload(self) -> list[dict[str, Any]]:
         """Catalogue for the UI: what each skill is, what it uses, and whether
-        it's enabled / can be enabled."""
+        it's enabled / can be enabled.
+
+        Each entry also carries the LIVE KAI-C view: ``backing_tasks`` (the
+        task strings that would serve the skill) and ``tasks_available``
+        (whether the last capabilities fetch saw an adapter advertising one
+        of them) — so the UI can grey a skill out with a reason. Advisory
+        only: ``skill_requirement_met`` remains the enable gate, and when
+        KAI-C is unreachable (last fetch failed / not yet fetched) every
+        skill reports ``tasks_available: true`` — i.e. exactly the previous
+        config-based behavior, never a spuriously greyed-out tool."""
+        live_tasks = self.kaic_capabilities.tasks_advertised   # None = unknown
         advertised = {t["function"]["name"] for t in self.tool_definitions}
         allow = None if self.cfg.enabled_tools is None else set(self.cfg.enabled_tools)
         uses = {
@@ -1970,11 +2435,13 @@ class CameraAgentRuntime:
             "faces": f"{self.cfg.recognition_adapter} recognition",
             "events": "inference event bus (NATS)",
             "footage": "footage-search index",
+            "apps": "OpenNVR app registry + alert relay (read-only)",
         }
         hints = {
             "faces": "Set faces_url to the recognition adapter to enable.",
             "events": "Set nats_inference_url to stream inference events.",
             "footage": "Set footage_index_path (built by the footage-search example).",
+            "apps": "Set opennvr_api_url to read installed catalog apps.",
         }
         out: list[dict[str, Any]] = []
         for sid, icon, name, example, req in _SKILL_META:
@@ -1986,13 +2453,109 @@ class CameraAgentRuntime:
             # (Vision tools are always advertised and degrade at call time, so a
             # missing backend must still read as not-enabled in the panel.)
             enabled = (primary in advertised) and req_met
-            out.append({
+            backing = _SKILL_BACKING_TASKS.get(sid, [])
+            # Live availability from the tasks_advertised intersection. Unknown
+            # (KAI-C unreachable) or nothing to back → don't grey anything out.
+            tasks_available = (
+                live_tasks is None or not backing
+                or bool(set(backing) & live_tasks)
+            )
+            entry = {
                 "id": sid, "icon": icon, "name": name, "example": example,
                 "uses": uses.get(sid, f"agent app + {self.cfg.llm_model}"),
                 "enabled": enabled, "available": available,
                 "hint": "" if available else (hints.get(req, "Not enabled in config.")),
-            })
+                "backing_tasks": backing, "tasks_available": tasks_available,
+            }
+            # When a skill is greyed out for want of a backing adapter, GUIDE
+            # the operator: name the suggested adapter(s) and, if we know the
+            # main UI's base URL, deep-link them to the AI Adapters view to
+            # enable one. Guidance only — no auto-enable path exists here; the
+            # link is a plain navigation target and enabling stays an operator
+            # action behind OpenNVR's permission gate. Additive: not-greyed
+            # skills omit both fields.
+            if not tasks_available:
+                entry["suggested_adapters"] = _SKILL_SUGGESTED_ADAPTERS.get(sid, [])
+                entry["enable_url"] = (
+                    f"{self.cfg.opennvr_ui_url.rstrip('/')}/ai-adapters"
+                    if self.cfg.opennvr_ui_url else None
+                )
+                # App-install on-ramp, symmetric to the adapter one above:
+                # name the catalog app(s) that package this capability and,
+                # when we know the main UI's base URL, deep-link the App
+                # Catalog. Guide-only — no install POST; the operator
+                # installs from the catalog behind OpenNVR's permission gate.
+                entry["suggested_apps"] = _SKILL_SUGGESTED_APPS.get(sid, [])
+                entry["app_enable_url"] = (
+                    f"{self.cfg.opennvr_ui_url.rstrip('/')}/app-catalog"
+                    if self.cfg.opennvr_ui_url else None
+                )
+            if sid == "watch":
+                # The converged monitors: which SDK rule classes back the
+                # count/crossing kinds (spec §07 "one rule library, two doors").
+                entry["rules"] = sorted(MonitorManager._CONVERGED.values())
+            out.append(entry)
+
+        # ── App door: each installed+enabled catalog app as a skill entry ──
+        # Additive and clearly marked source:"app". These are container apps
+        # the agent can't import — it READS them (list/status) and relays. Only
+        # surfaced when the registry is wired AND reachable (apps_cached is a
+        # list); unset or unreachable → no app entries (clean fall-back). Read
+        # only: there is no enable/disable/configure path from these entries.
+        out.extend(self._app_skill_entries())
         return out
+
+    def _app_skill_entries(self) -> list[dict[str, Any]]:
+        """Skill entries for installed+enabled catalog apps (source:"app").
+
+        Reads the AppRegistryClient's cached list (the ``/skills`` endpoint
+        refreshes it first, TTL'd, never raising). Returns [] when the app
+        door is unwired or the registry is unreachable — so a down registry
+        never removes the *generic* "apps" capability skill, it only omits
+        the per-app entries."""
+        registry = getattr(self, "app_registry", None)
+        if registry is None:
+            return []
+        apps = registry.apps_cached          # None = unknown / unreachable
+        if not apps:
+            return []
+        entries: list[dict[str, Any]] = []
+        for a in apps:
+            if not a.get("enabled"):
+                continue
+            app_id = str(a.get("id") or "")
+            if not app_id:
+                continue
+            manifest = a.get("manifest") or {}
+            name = str(a.get("name") or manifest.get("name") or app_id)
+            summary = str(manifest.get("summary") or "").strip()
+            category = a.get("category") or manifest.get("category") or "app"
+            emits = [
+                str(e.get("name"))
+                for e in (manifest.get("emits") or [])
+                if isinstance(e, dict) and e.get("name")
+            ]
+            entries.append({
+                "id": f"app:{app_id}",
+                "source": "app",           # clearly marks the app door origin
+                "app_id": app_id,
+                "icon": "🧩",
+                "name": name,
+                "category": category,
+                "uses": f"installed app — {summary}" if summary
+                        else "installed app",
+                "summary": summary,
+                "emits": emits,
+                # Installed + enabled by an operator ⇒ enabled. The agent
+                # can query it (read-only); it can't toggle or configure it.
+                "enabled": True,
+                "available": True,
+                "read_only": True,
+                "hint": "",
+                "backing_tasks": [],
+                "tasks_available": True,
+            })
+        return entries
 
     def set_skill_enabled(self, skill_id: str, enabled: bool) -> bool:
         """Turn a skill on/off and reconfigure the toolset. Returns False if the
@@ -2136,6 +2699,10 @@ class CameraAgentRuntime:
             "monitors": self.monitors.export(),
             "alarms": self.alarms.export(),
             "reports": self.reports.export(),
+            # Operator skill toggles are part of the durable agent state
+            # too — without this a skill switched off at runtime silently
+            # comes back on the next restart (its tools re-advertised).
+            "disabled_skills": sorted(self.disabled_skills),
         }
         try:
             d = os.path.dirname(self.cfg.state_path) or "."
@@ -2163,9 +2730,17 @@ class CameraAgentRuntime:
         self.monitors.restore(data.get("monitors") or [])
         self.alarms.restore(data.get("alarms") or [], contact_for=self._emergency_contact_for)
         self.reports.restore(data.get("reports") or [])
-        logger.info("restored %d watches, %d alarms, %d reports from %s",
+        # Re-apply persisted skill toggles through the normal path so the
+        # advertised toolset reflects them (a disabled skill's tools stay
+        # unadvertised). Ignore unknown ids so a stale state file can't
+        # break boot.
+        restored_disabled: list[str] = []
+        for sid in (data.get("disabled_skills") or []):
+            if self.set_skill_enabled(sid, False):
+                restored_disabled.append(sid)
+        logger.info("restored %d watches, %d alarms, %d reports, %d disabled skills from %s",
                     len(data.get("monitors") or []), len(data.get("alarms") or []),
-                    len(data.get("reports") or []), self.cfg.state_path)
+                    len(data.get("reports") or []), len(restored_disabled), self.cfg.state_path)
 
     async def _handle_create_monitor(self, args: dict[str, Any]) -> str:
         kind = str(args.get("kind") or "").strip().lower()
@@ -2183,11 +2758,27 @@ class CameraAgentRuntime:
                 return ("For crossing counts I need a line as [x1,y1,x2,y2] in "
                         "0-1 frame coordinates — where should the line go?")
             line = [float(v) for v in line]
-        mon = self.monitors.create(
-            kind=kind, camera_ids=cams, target=target,
-            description=str(args.get("description") or "").strip(),
-            line=line if kind == "crossing" else None,
-        )
+        try:
+            mon = self.monitors.create(
+                kind=kind, camera_ids=cams, target=target,
+                description=str(args.get("description") or "").strip(),
+                line=line if kind == "crossing" else None,
+            )
+        except ValueError as exc:
+            # The SDK rule rejected the params (e.g. a degenerate line
+            # whose two points coincide). Relay the reason so the LLM can
+            # ask the user to fix it. ERROR: prefix → HTTP 400 on /monitors.
+            return f"ERROR: I couldn't set that watch up — {exc}"
+        except RuntimeError:
+            # The converged rule library module isn't shipped with this
+            # build (monitor_host loads occupancy_counting.py /
+            # line_crossing.py by file path from the sibling examples/
+            # tree). Same relayable ERROR: shape as the ValueError path
+            # so the conversation degrades gracefully instead of dying.
+            rule = self.monitors._CONVERGED.get(kind, kind)
+            logger.exception("create_monitor: rule library for %r unavailable", kind)
+            return (f"ERROR: I couldn't set that watch up — this build "
+                    f"doesn't include the '{rule}' rule library.")
         self.persist()
         where = "all cameras" if set(cams) == {c.camera_id for c in self.cfg.cameras} else ", ".join(cams)
         if kind == "notify":
@@ -2207,6 +2798,167 @@ class CameraAgentRuntime:
         ok = self.monitors.stop(mid)
         self.persist()
         return (f"Stopped watch #{mid}." if ok else f"I don't have a watch #{mid} running.")
+
+    # ── App door handlers (read-only) ─────────────────────────────
+    # Relay installed catalog apps + their state. NO enable/disable/config
+    # path exists here — those are operator actions in the app catalog.
+
+    _APP_REGISTRY_UNREACHABLE = (
+        "I couldn't reach the app registry right now, so I can't tell you "
+        "about the installed apps. Please try again shortly."
+    )
+
+    async def _handle_list_apps(self, args: dict[str, Any]) -> str:
+        """Tool handler: report the installed + ENABLED catalog apps. Reads
+        the registry (cached, never raises); a down/unset registry yields a
+        graceful message rather than an error."""
+        if self.app_registry is None:
+            return self._APP_REGISTRY_UNREACHABLE
+        apps = await self.app_registry.list_apps()
+        if apps is None:
+            return self._APP_REGISTRY_UNREACHABLE
+        enabled = [a for a in apps if a.get("enabled")]
+        if not enabled:
+            if apps:
+                return (
+                    "There are catalog apps installed, but none are currently "
+                    "enabled. An operator can enable one from the app catalog."
+                )
+            return "No catalog apps are installed on this system yet."
+        lines: list[str] = []
+        for a in enabled:
+            manifest = a.get("manifest") or {}
+            summary = manifest.get("summary") or "(no summary)"
+            category = a.get("category") or manifest.get("category") or "app"
+            emits = [
+                str(e.get("name"))
+                for e in (manifest.get("emits") or [])
+                if isinstance(e, dict) and e.get("name")
+            ]
+            emits_str = f"; alerts: {', '.join(emits)}" if emits else ""
+            lines.append(
+                f"- {a.get('name') or a.get('id')} ({category}): {summary}"
+                f"{emits_str}"
+            )
+        return "Installed and enabled apps:\n" + "\n".join(lines)
+
+    async def _handle_app_status(self, args: dict[str, Any]) -> str:
+        """Tool handler: report one installed app's live state/health,
+        proxied from the registry. Read-only; degrades gracefully."""
+        if self.app_registry is None:
+            return self._APP_REGISTRY_UNREACHABLE
+        app_id = str(args.get("app_id") or "").strip()
+        if not app_id:
+            return "Tell me which app — I need its id (from list_apps)."
+        status = await self.app_registry.app_status(app_id)
+        if status is None:
+            return self._APP_REGISTRY_UNREACHABLE
+        health = status.get("health") or {}
+        state = status.get("state")
+        health_status = (
+            health.get("status")
+            or ("ready" if health.get("ready") else "not ready")
+        )
+        parts = [f"App '{app_id}' health: {health_status}."]
+        if isinstance(state, dict) and state:
+            summary = ", ".join(f"{k}={v}" for k, v in list(state.items())[:6])
+            parts.append(f"State: {summary}.")
+        elif state is None:
+            parts.append("No live state was reported.")
+        return " ".join(parts)
+
+    async def _handle_recent_app_alerts(self, args: dict[str, Any]) -> str:
+        """Tool handler (app-door ALERT RELAY, read side): report recent
+        alerts fired by installed catalog apps, off the bus. Read-only —
+        the agent RELAYS what an app reported; it never arms/silences it.
+        Degrades to a graceful message when the alert bus isn't wired."""
+        raw_window = args.get("window_seconds")
+        if raw_window in (None, ""):
+            window = 3600.0
+        else:
+            try:
+                window = float(raw_window)
+            except (TypeError, ValueError):
+                return "ERROR: window_seconds must be a number."
+        if not math.isfinite(window) or window <= 0:
+            # json.loads accepts NaN/Infinity; Infinity would blow up the
+            # int(window / 60) below (OverflowError), NaN would match nothing.
+            return "ERROR: window_seconds must be a positive finite number."
+        window = min(window, 7 * 86400.0)  # the ring holds hours, not weeks
+
+        app_arg = args.get("app_id")
+        app_id: str | None
+        if app_arg in (None, "", "__any__"):
+            app_id = None
+        else:
+            app_id = str(app_arg).strip() or None
+
+        alerts = self.context.recent_app_alerts(
+            app_id=app_id, window_seconds=window
+        )
+        if not alerts:
+            scope = f"'{app_id}'" if app_id else "any app"
+            mins = int(window / 60) or 1
+            if not self.cfg.nats_inference_url:
+                return (
+                    "No app alerts — the alert bus isn't configured, so I'm "
+                    "not receiving alerts from installed apps."
+                )
+            return f"No alerts from {scope} in the last {mins} minute(s)."
+        import time as _time
+
+        now = _time.time()
+        lines = [
+            f"{int(now - a.received_at)}s ago — [{a.severity}] app:{a.app_id} "
+            f"on {a.camera_id}: {a.summary}"
+            for a in alerts[:6]
+        ]
+        return "Recent app alerts:\n" + "\n".join(lines)
+
+    def _relay_app_alert(self, alert: Any) -> None:
+        """Notification bridge (app-door ALERT RELAY): a subscribed app
+        fired an alert. Push it into the SAME notification feed the demo
+        polls + the Notifier webhook fan-out, so 'the PPE app flagged a
+        violation' surfaces proactively — app alerts are just another
+        source, labelled ``app:<id>``. Read/relay only: this reports the
+        alert; it never acts on the app. Called synchronously from the
+        subscriber's handler; never blocks (list append + fire-and-forget
+        webhook task).
+
+        Throttled per (app, camera) with the same cooldown the legacy
+        monitor notify path uses: this runs once per bus message, so
+        without it a misbehaving app alerting in a loop would spam the
+        feed and fire one webhook POST per message. The full alert
+        stream stays queryable via recent_app_alerts — only the PUSH
+        side is rate-limited."""
+        import time as _t
+
+        now = _t.time()
+        key = (str(alert.app_id), str(alert.camera_id))
+        if now - self._app_relay_last.get(key, 0.0) < self.monitors._cooldown:
+            logger.debug(
+                "app alert throttled (cooldown): app:%s on %s",
+                alert.app_id, alert.camera_id,
+            )
+            return
+        self._app_relay_last[key] = now
+        self.monitors._notifications.append({
+            "id": self.monitors._next_note_id,
+            "source": f"app:{alert.app_id}",
+            "text": f"{alert.title} — {alert.summary}",
+            "ts": now,
+        })
+        self.monitors._next_note_id += 1
+        logger.info(
+            "app alert relayed: app:%s on %s — %s",
+            alert.app_id, alert.camera_id, alert.title,
+        )
+        self.notifier.fire({
+            "type": "notify", "title": f"App alert: {alert.title}",
+            "text": alert.summary, "camera": alert.camera_id,
+            "severity": alert.severity, "source": f"app:{alert.app_id}",
+            "ts": now,
+        })
 
     async def _handle_create_task(self, args: dict[str, Any]) -> str:
         """Tool handler: queue a long-running job and acknowledge so the
@@ -2269,10 +3021,30 @@ class CameraAgentRuntime:
                 "camera-agent: NATS subscriber started on %s",
                 self.cfg.nats_inference_url,
             )
+            # App-door ALERT RELAY: subscribe opennvr.alerts.app.> on the SAME
+            # bus so app-emitted alerts reach the user both conversationally
+            # (recent_app_alerts tool) and proactively (the notification feed,
+            # via the _relay_app_alert bridge). Read/relay only — the agent
+            # reports app alerts, it never acts on the app.
+            self._app_alert_subscriber_task = asyncio.create_task(
+                run_app_alert_subscriber(
+                    context=self.context,
+                    nats_url=self.cfg.nats_inference_url,
+                    nats_token=self.cfg.nats_inference_token,
+                    stop_event=self._stop_event,
+                    on_alert=self._relay_app_alert,
+                ),
+                name="camera-agent-app-alert-subscriber",
+            )
+            logger.info(
+                "camera-agent: app-alert subscriber started on %s "
+                "(opennvr.alerts.app.>)",
+                self.cfg.nats_inference_url,
+            )
         else:
             logger.info(
-                "camera-agent: NATS not configured; recent_events tool "
-                "will always report 'no events'"
+                "camera-agent: NATS not configured; recent_events and "
+                "recent_app_alerts tools will always report 'no events'"
             )
 
         # Pre-warm the LLM in the background so the FIRST real question
@@ -2364,25 +3136,95 @@ class CameraAgentRuntime:
         self.monitors.stop_all()
         self.alarms.stop_all()
         self.reports.stop_all()
-        if self._subscriber_task is not None:
+        for task, label in (
+            (self._subscriber_task, "subscriber"),
+            (self._app_alert_subscriber_task, "app-alert subscriber"),
+        ):
+            if task is None:
+                continue
             try:
-                await asyncio.wait_for(self._subscriber_task, timeout=5.0)
+                await asyncio.wait_for(task, timeout=5.0)
             except asyncio.TimeoutError:
-                self._subscriber_task.cancel()
+                task.cancel()
             except Exception:
-                logger.exception("subscriber shutdown raised")
+                logger.exception("%s shutdown raised", label)
         # Close all reusable HTTP clients so pytest / uvicorn don't
         # log warnings about unclosed AsyncClient instances on exit.
         closers = [
             self.whisper.aclose(), self.ollama.aclose(), self.piper.aclose(),
             self.caption_client.aclose(), self.detection_client.aclose(),
-            self.recognition_client.aclose(),
+            self.recognition_client.aclose(), self.kaic_capabilities.aclose(),
         ]
         if self.faces:
             closers.append(self.faces.aclose())
+        if self.app_registry:
+            closers.append(self.app_registry.aclose())
         await asyncio.gather(*closers, return_exceptions=True)
 
     # ── System prompt construction ────────────────────────────────
+
+    def unavailable_capabilities_hint(self) -> str:
+        """A compact, dynamic system-prompt note about capabilities that are
+        NOT available this turn, so the model can proactively (and honestly)
+        tell the user "I can't do X — no adapter/app provides it" and point at
+        the install path, WITHOUT ever claiming to perform it.
+
+        Built from ``skills_payload()`` — the single source of truth for
+        per-skill availability. A skill is listed here only when it's genuinely
+        known-unavailable: either its backend requirement is unmet (``available``
+        false) or KAI-C affirmatively reports no adapter advertising its backing
+        task (``tasks_available`` false). This degrades cleanly: when KAI-C is
+        unreachable ``tasks_available`` is True for every skill (see
+        ``skills_payload``), so we never over-claim that a working tool is
+        unavailable — an unknown capability just stays off this list.
+
+        Guidance ONLY — this adds no tool and grants no enable/install action.
+        Empty string when every capability is available (no tokens spent)."""
+        # A prompt hint must never be able to break turn construction — if
+        # skills_payload() ever raises, drop the hint rather than the prompt.
+        try:
+            payload = self.skills_payload()
+        except Exception:
+            logger.exception("unavailable_capabilities_hint: skills_payload failed")
+            return ""
+        lines: list[str] = []
+        for s in payload:
+            # Skip installed catalog-app entries — those are always available
+            # (an operator enabled them) and carry no adapter/app suggestion.
+            if s.get("source") == "app":
+                continue
+            unavailable = (not s.get("available")) or (not s.get("tasks_available"))
+            if not unavailable:
+                continue
+            suggestion = ""
+            adapters = s.get("suggested_adapters") or []
+            apps = s.get("suggested_apps") or []
+            if adapters:
+                suggestion = (
+                    f"suggest installing the {', '.join(adapters)} adapter"
+                    f" via AI Adapters"
+                )
+            elif apps:
+                suggestion = (
+                    f"suggest installing the {', '.join(apps)} app"
+                    f" via the App Catalog"
+                )
+            name = str(s.get("name") or s.get("id"))
+            lines.append(
+                f"- {name}: unavailable"
+                + (f" — {suggestion}" if suggestion else "")
+            )
+        if not lines:
+            return ""
+        return (
+            "UNAVAILABLE CAPABILITIES (no adapter/app currently provides these). "
+            "If the user asks for one of these, say plainly that it isn't "
+            "available right now, briefly "
+            + ("suggest installing the named adapter/app in OpenNVR's AI "
+               "Adapters / App Catalog")
+            + ", and do NOT claim to perform it or make up a result:\n"
+            + "\n".join(lines)
+        )
 
     def build_system_prompt(self) -> str:
         """Compose the system prompt the LLM sees: the agent's identity + the
@@ -2391,9 +3233,9 @@ class CameraAgentRuntime:
             f"- {cam.camera_id}: {cam.role}" for cam in self.cfg.cameras
         )
         prompt = (
-            f"You are the OpenNVR camera agent. Speak in the FIRST person — "
-            f"say 'I see…', 'I'm watching…', not in the third person. If asked "
-            f"your name, say you're the OpenNVR camera agent.\n\n"
+            f"You are the OpenNVR Agent, this system's camera agent. Speak in "
+            f"the FIRST person — say 'I see…', 'I'm watching…', not in the "
+            f"third person. If asked your name, say you're the OpenNVR Agent.\n\n"
             f"{self.cfg.system_prompt.strip()}\n\n"
             f"Cameras available to you:\n{roster}\n\n"
             f"Always pass one of the camera_id values exactly as listed "
@@ -2430,6 +3272,14 @@ class CameraAgentRuntime:
             f"look into it and get back to them, and keep the conversation going. "
             f"You'll deliver the result when the task finishes."
         )
+        # Proactive honesty about capabilities that aren't wired this turn:
+        # a compact, dynamic list so the model can say "I can't do X — install
+        # the adapter/app" instead of hallucinating a result. Empty (and thus a
+        # no-op) when everything is available, or when KAI-C is unreachable and
+        # availability is unknown (we never over-claim unavailability).
+        unavailable_hint = self.unavailable_capabilities_hint()
+        if unavailable_hint:
+            prompt += f"\n\n{unavailable_hint}"
         # Disable Qwen3-style "thinking" for snappy tool-calling when the
         # operator opted out. Only appended when llm_think is explicitly False,
         # so non-thinking models (qwen2.5, llama3.2, …) are unaffected.
@@ -2588,7 +3438,13 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         """The agent's capabilities for the UI's Skills panel. Each entry reports
         what it ``uses`` (model/adapter/app), whether it's ``enabled`` now, and
         whether it's ``available`` to enable (its backend is configured) — with a
-        ``hint`` otherwise, so the panel never promises something it can't do."""
+        ``hint`` otherwise, so the panel never promises something it can't do.
+        Also refreshes (60s TTL, never raises) the live KAI-C capabilities view
+        behind each entry's ``backing_tasks`` / ``tasks_available`` fields, and
+        the installed-apps list behind the source:"app" entries (read-only)."""
+        await runtime.kaic_capabilities.refresh()
+        if runtime.app_registry is not None:
+            await runtime.app_registry.list_apps()   # 60s TTL; never raises
         return {"skills": runtime.skills_payload()}
 
     @app.post("/skills/{skill_id}/{action}")
@@ -2598,6 +3454,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         if action not in ("enable", "disable"):
             return JSONResponse({"error": "action must be enable or disable"},
                                 status_code=400)
+        await runtime.kaic_capabilities.refresh()   # 60s TTL; never raises
         ok = runtime.set_skill_enabled(skill_id, action == "enable")
         if not ok:
             # Unknown skill, or its backend isn't configured yet.

@@ -116,6 +116,59 @@ event_ring_size: 256
 # opennvr_cameras_url: http://127.0.0.1:8000/api/v1/internal/camera-agent/cameras
 # opennvr_api_key: REPLACE_WITH_INTERNAL_API_KEY
 
+# ── OpenNVR deployment URL ──────────────────────────────────────────
+# SIMPLE PATH: if the agent runs alongside a single OpenNVR deployment,
+# set ONE base URL and the agent derives the sibling URLs that point at
+# the same deployment — the SERVER API (opennvr_api_url, the "app door")
+# and the main web UI (opennvr_ui_url, for deep links). This is all most
+# installs need.
+#
+# SET THIS so the install on-ramp works out of the box: when a skill is
+# greyed out for want of a backing adapter/app, the skills panel shows an
+# "Enable →" / "install the <App> app" deep-link into OpenNVR — but ONLY
+# when this (or opennvr_ui_url) is set. Unset ⇒ suggestion text only, no link.
+#
+# Use the HOST origin your BROWSER reaches OpenNVR at (these links open in
+# your browser, so a compose-internal name like http://opennvr-core:8000 will
+# NOT resolve there). The docker configs default this to http://localhost:8000
+# — the address the compose stack publishes opennvr-core on — via the
+# OPENNVR_UI_URL env var. For a LAN box or remote host, override it in .env:
+#   OPENNVR_UI_URL=http://<host-ip>:8000     (or https://nvr.example)
+# so `docker compose ... --profile camera-agent up` yields working links.
+# opennvr_base_url: http://localhost:8000
+#
+# NOTE: opennvr_base_url does NOT derive kaic_url or nats_inference_url —
+# the KAI-C inference gateway and the NATS event bus are separate services
+# on their own ports (see kaic_url above / nats_inference_url below), so
+# set those explicitly even when they live in the same deployment.
+#
+# ── Advanced: per-field overrides ───────────────────────────────────
+# Any of the two derived URLs can be set explicitly to override the base
+# (or to point at a split deployment). An explicit value ALWAYS wins over
+# opennvr_base_url; leave these commented to just use the base.
+#
+# opennvr_api_url — the APP DOOR: base URL of the OpenNVR SERVER API (not
+# the UI). When set (directly OR via opennvr_base_url), the agent discovers
+# installed catalog apps and can relay their live state as READ-ONLY
+# conversational skills:
+#   GET <opennvr_api_url>/api/v1/apps            — installed + enabled apps
+#   GET <opennvr_api_url>/api/v1/apps/{id}/status — one app's health + state
+# Auth is X-Internal-Api-Key. The key is opennvr_api_key, falling back to
+# kaic_api_key (the same deployment INTERNAL_API_KEY) or the INTERNAL_API_KEY
+# env var. The agent only READS here — it surfaces "list_apps" and "app_status"
+# tools and an "apps" skill (plus one skill entry per installed app). It NEVER
+# enables, disables, or configures an app; that stays an operator action in the
+# app catalog. Unset (and no base) → no app tools/skills at all (clean fall-back).
+# opennvr_api_url: http://127.0.0.1:8000
+#
+# opennvr_ui_url — base URL of the main OpenNVR UI. Used ONLY to deep-link the
+# operator to the AI Adapters view when a skill is greyed out for want of a
+# backing adapter — the skills panel then shows an "Enable →" link next to the
+# suggested adapter(s). The agent guides you there; it never enables or
+# approves an adapter itself (that stays your action, behind the permission
+# gate). When unset (and no base), no link is shown — just the suggestion text.
+# opennvr_ui_url: https://nvr.example
+
 # HTTP listen address for the agent. Public if you put it behind
 # your reverse proxy; localhost only by default.
 host: 127.0.0.1
