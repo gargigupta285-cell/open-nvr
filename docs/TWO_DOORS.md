@@ -93,6 +93,23 @@ day a matching adapter appears, the badge flips on its own.
 what an adapter *can do*; `permissions` says what it *needs* from the
 host. The two never interact — see contract §8.1.)
 
+**Canonical tasks (curated + open).** Task strings stay free-text — you
+can advertise anything and it matches — but once a task converges,
+OpenNVR gives it a canonical name in
+[`server/config/tasks.yml`](../server/config/tasks.yml)
+([contract §4.1](./AI_ADAPTER_CONTRACT.md#41-the-canonical-task-taxonomy--curated--open)),
+served over `GET /ai-models/tasks`. Each entry carries a label, a skill
+binding, and **aliases** — non-canonical spellings that mean the same
+capability. That last part is what makes the intersection above robust:
+we shipped one captioning adapter as `scene_caption` and another as
+`image_captioning` — one capability, two names. Listing `scene_caption`
+as an alias of `image_captioning` folds them into one, so both spellings
+satisfy the agent's `see` skill and the catalog counts them as the same
+task. A short lint (`lint_task_names`) nudges adapters toward the
+canonical spelling, but nothing is ever blocked — a brand-new task string
+still registers and works, just uncategorized until it's promoted into
+`tasks.yml`.
+
 ## 3. The decision flow
 
 What actually happens when you ask the agent about something,

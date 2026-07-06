@@ -67,6 +67,10 @@ COPY examples/camera-agent/serializer.py      ./serializer.py
 COPY examples/camera-agent/services.py        ./services.py
 COPY examples/camera-agent/tools.py           ./tools.py
 COPY examples/camera-agent/footage_index.py   ./footage_index.py
+# Bundled copy of the canonical task registry (server/config/tasks.yml).
+# The agent derives its skill→backing-tasks map from this at runtime, so a
+# new task with an agent_skill becomes a skill backing with no code change.
+COPY examples/camera-agent/tasks.yml          ./tasks.yml
 COPY examples/camera-agent/config.example.yml ./config.example.yml
 COPY examples/camera-agent/demo               ./demo
 

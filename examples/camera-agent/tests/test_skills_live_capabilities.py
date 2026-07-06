@@ -176,14 +176,19 @@ def test_skills_payload_all_backing_tasks_available():
     rt.kaic_capabilities = _StubCaps(
         {"object_detection", "image_captioning", "face_recognition"})
     skills = _by_id(rt)
-    assert skills["see"]["backing_tasks"] == ["image_captioning", "vqa"]
+    # backing_tasks is derived from the bundled tasks.yml and now folds in
+    # each canonical task's aliases (so either spelling of a live adapter
+    # matches). The canonical name leads each list.
+    assert skills["see"]["backing_tasks"][:1] == ["image_captioning"]
+    assert "scene_caption" in skills["see"]["backing_tasks"]   # the alias case
+    assert "vqa" in skills["see"]["backing_tasks"]
     assert skills["see"]["tasks_available"] is True
-    assert skills["count"]["backing_tasks"] == ["object_detection"]
+    assert skills["count"]["backing_tasks"][0] == "object_detection"
     assert skills["count"]["tasks_available"] is True
     assert skills["faces"]["backing_tasks"] == ["face_recognition"]
     assert skills["faces"]["tasks_available"] is True
     # Converged watch monitors: object detection + their SDK rule library.
-    assert skills["watch"]["backing_tasks"] == ["object_detection"]
+    assert skills["watch"]["backing_tasks"][0] == "object_detection"
     assert skills["watch"]["tasks_available"] is True
     assert skills["watch"]["rules"] == ["line_crossing", "occupancy"]
 
@@ -202,6 +207,72 @@ def test_skills_payload_vqa_alone_backs_see():
     rt = _runtime()
     rt.kaic_capabilities = _StubCaps({"vqa"})
     assert _by_id(rt)["see"]["tasks_available"] is True
+
+
+def test_skills_payload_alias_and_canonical_both_back_see():
+    # The canonical-alias case (contract §4): an adapter that advertises
+    # the alias ``scene_caption`` satisfies ``see`` exactly like one that
+    # advertises the canonical ``image_captioning`` — because backing_tasks
+    # is derived from tasks.yml with aliases folded in.
+    for advertised in ({"image_captioning"}, {"scene_caption"}):
+        rt = _runtime()
+        rt.kaic_capabilities = _StubCaps(advertised)
+        assert _by_id(rt)["see"]["tasks_available"] is True, advertised
+
+
+# ── decoupling: a new agent_skill in tasks.yml needs no agent code edit ─
+
+
+def test_new_agent_skill_mapping_needs_no_code_edit(tmp_path, monkeypatch):
+    """The whole point of deriving from tasks.yml: dropping a new entry
+    with an ``agent_skill`` into the registry makes it a skill backing
+    with zero edits to camera_agent.py. We point the loader at a temp
+    registry and assert the new mapping (+ its alias) appears."""
+    import camera_agent
+
+    registry = [
+        {"task": "object_detection", "label": "Object Detection",
+         "agent_skill": "count", "aliases": []},
+        # A task nobody wired by hand — a brand-new adapter capability that
+        # backs the ``see`` skill, declared purely in the taxonomy file.
+        {"task": "thermal_scene", "label": "Thermal Scene",
+         "agent_skill": "see", "aliases": ["thermal_caption"]},
+    ]
+    reg_file = tmp_path / "tasks.yml"
+    import yaml as _yaml
+    reg_file.write_text(_yaml.safe_dump(registry))
+    monkeypatch.setattr(camera_agent, "TASKS_REGISTRY_PATH", reg_file)
+
+    derived = camera_agent._derive_skill_backing_tasks()
+    assert derived["count"] == ["object_detection"]
+    # New mapping present, with BOTH the canonical name and its alias —
+    # no line of camera_agent.py changed to make this happen.
+    assert derived["see"] == ["thermal_scene", "thermal_caption"]
+
+
+def test_derive_falls_back_when_bundled_file_missing(tmp_path, monkeypatch):
+    """A missing/unreadable tasks.yml must never crash the agent — it
+    falls back to the hardcoded last-known-good map."""
+    import camera_agent
+
+    monkeypatch.setattr(
+        camera_agent, "TASKS_REGISTRY_PATH", tmp_path / "does-not-exist.yml"
+    )
+    derived = camera_agent._derive_skill_backing_tasks()
+    assert derived == camera_agent._SKILL_BACKING_FALLBACK
+
+
+def test_bundled_registry_derives_expected_skills():
+    """Sanity check against the file actually shipped next to the agent."""
+    import camera_agent
+
+    derived = camera_agent._derive_skill_backing_tasks()
+    assert derived["count"][0] == "object_detection"
+    assert derived["faces"] == ["face_recognition"]
+    assert "image_captioning" in derived["see"]
+    assert "scene_caption" in derived["see"]     # alias folded in
+    assert "vqa" in derived["see"]
+    assert derived["watch"] == derived["count"]  # watch inherits count's tasks
 
 
 def test_skills_payload_kaic_unreachable_falls_back_to_config_behavior():
@@ -251,7 +322,8 @@ def test_skills_endpoint_refreshes_and_reports_fields():
     assert rt.kaic_capabilities.refreshes == 1
     assert skills["count"]["tasks_available"] is True
     assert skills["see"]["tasks_available"] is False
-    assert skills["see"]["backing_tasks"] == ["image_captioning", "vqa"]
+    assert skills["see"]["backing_tasks"][:1] == ["image_captioning"]
+    assert "vqa" in skills["see"]["backing_tasks"]
     assert skills["watch"]["rules"] == ["line_crossing", "occupancy"]
 
 
@@ -268,3 +340,22 @@ def test_skills_endpoint_survives_unreachable_kaic():
     resp = client.get("/skills")
     assert resp.status_code == 200
     assert all(s["tasks_available"] is True for s in resp.json()["skills"])
+
+
+def test_bundled_tasks_registry_matches_server_canonical_copy():
+    """The agent bundles a copy of server/config/tasks.yml (for offline
+    startup). Guard against silent drift: the two must stay identical —
+    if this fails, re-copy server/config/tasks.yml over
+    examples/camera-agent/tasks.yml."""
+    import pathlib
+    import yaml
+
+    here = pathlib.Path(__file__).resolve()
+    bundled = here.parent.parent / "tasks.yml"
+    server = here.parents[3] / "server" / "config" / "tasks.yml"
+    if not server.exists():  # server tree not present in this checkout
+        import pytest
+        pytest.skip("server/config/tasks.yml not in this checkout")
+    assert yaml.safe_load(bundled.read_text()) == yaml.safe_load(server.read_text()), (
+        "agent tasks.yml has drifted from server/config/tasks.yml — re-sync them"
+    )

@@ -75,6 +75,94 @@ def _load_use_case_map() -> list[UseCaseEntry]:
     return [UseCaseEntry(**entry) for entry in raw]
 
 
+class TaskEntry(BaseModel):
+    """One canonical task in the curated taxonomy (server/config/tasks.yml).
+
+    ``task`` is the canonical string an adapter SHOULD advertise in
+    ``tasks_advertised`` (contract §4). ``aliases`` are non-canonical
+    spellings that mean the same capability — the canonicalizer folds
+    them in, and the OpenNVR Agent's skill mapping treats an adapter
+    advertising an alias exactly like the canonical. ``agent_skill`` names
+    the Agent skill id (see/count/faces/watch) this task backs, or None.
+    """
+
+    task: str
+    label: str
+    summary: str | None = None
+    categories: list[str] = []
+    tags: list[str] = []
+    agent_skill: str | None = None
+    aliases: list[str] = []
+
+
+TASKS_REGISTRY_PATH = Path(__file__).resolve().parent.parent / "config" / "tasks.yml"
+
+
+@lru_cache(maxsize=1)
+def _load_tasks_registry() -> list[TaskEntry]:
+    raw = yaml.safe_load(TASKS_REGISTRY_PATH.read_text()) or []
+    return [TaskEntry(**entry) for entry in raw]
+
+
+def canonicalize_task(name: str, registry: list[TaskEntry]) -> str:
+    """Map an advertised task string to its canonical name.
+
+    Pure and reusable — no I/O. Returns the canonical ``task`` when
+    ``name`` matches a canonical name (case-insensitively) or any of its
+    ``aliases``; otherwise returns ``name`` unchanged (an unknown /
+    free-text task registers and stays as-is, §15.1). Canonical names
+    always win over aliases if the two ever collide.
+    """
+    key = (name or "").strip().lower()
+    if not key:
+        return name
+    for entry in registry:
+        if entry.task.lower() == key:
+            return entry.task
+    for entry in registry:
+        if any(a.lower() == key for a in entry.aliases):
+            return entry.task
+    return name
+
+
+def lint_task_names(advertised: list[str], registry: list[TaskEntry]) -> list[str]:
+    """Human-readable warnings for a list of advertised task strings.
+
+    Returns one message per string that is neither a canonical task nor a
+    canonical name itself:
+
+    * an alias → nudge toward the canonical spelling
+      ("'scene_caption' is an alias of 'image_captioning'; prefer the
+      canonical name")
+    * anything unknown → note it registers but stays uncategorized
+      ("'foo_bar' is not a known task — it will register but stay
+      uncategorized")
+
+    Canonical strings produce no warning. Purely advisory: nothing here
+    blocks registration — free-text tasks are first-class (§15.1).
+    """
+    canonical = {e.task.lower(): e.task for e in registry}
+    alias_to_task = {
+        a.lower(): e.task for e in registry for a in e.aliases
+    }
+    warnings: list[str] = []
+    for raw in advertised or []:
+        key = (raw or "").strip().lower()
+        if not key or key in canonical:
+            continue
+        if key in alias_to_task:
+            warnings.append(
+                f"'{raw}' is an alias of '{alias_to_task[key]}'; "
+                "prefer the canonical name"
+            )
+        else:
+            warnings.append(
+                f"'{raw}' is not a known task — it will register but "
+                "stay uncategorized"
+            )
+    return warnings
+
+
 class InferenceRequest(BaseModel):
     camera_id: int
     rtsp_url: str
@@ -376,6 +464,28 @@ async def get_use_cases(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to load use-case map: {e!s}",
+        )
+
+
+@router.get("/tasks", response_model=list[TaskEntry])
+async def get_tasks(
+    current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)
+):
+    """
+    The canonical task taxonomy: for each converged task, its canonical
+    string, label, categories/tags, which OpenNVR Agent skill it backs,
+    and the non-canonical aliases that mean the same thing (contract §4).
+
+    Curated + open: an adapter may still advertise any free-text task it
+    likes (§15.1); this registry adds canonical names, skill mapping, and
+    a lint. Product-owned editorial content, like the use-case map.
+    """
+    try:
+        return _load_tasks_registry()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load task registry: {e!s}",
         )
 
 

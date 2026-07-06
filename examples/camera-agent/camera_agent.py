@@ -292,12 +292,69 @@ _SKILL_META: list[tuple[str, str, str, str, str]] = [
 # converged watch monitors (count/crossing → occupancy/line_crossing
 # SDK rules) ride on object detection. Skills not listed here (events,
 # footage, alarm, report, task) don't consume KAI-C inference.
-_SKILL_BACKING_TASKS: dict[str, list[str]] = {
+#
+# This map is now DERIVED from the bundled canonical task registry
+# (``tasks.yml``, a copy of ``server/config/tasks.yml``): each task's
+# ``agent_skill`` says which skill it backs, and its ``aliases`` are
+# folded in so an adapter advertising EITHER spelling (e.g. a
+# ``scene_caption`` or an ``image_captioning`` adapter) satisfies the
+# ``see`` skill. The upshot: adding a task to tasks.yml with an
+# ``agent_skill`` makes it an agent skill backing with NO code change
+# here. ``_SKILL_BACKING_FALLBACK`` is the last-known-good hardcoded map,
+# used verbatim if the bundled file is missing/unreadable (never crash).
+
+# ``watch`` has no ``agent_skill`` of its own in tasks.yml (its converged
+# count/crossing monitors ride on the same detection ``count`` uses), so
+# it inherits whatever tasks back the named skill.
+_SKILL_TASK_INHERITS: dict[str, str] = {"watch": "count"}
+
+_SKILL_BACKING_FALLBACK: dict[str, list[str]] = {
     "see": ["image_captioning", "vqa"],
     "count": ["object_detection"],
     "faces": ["face_recognition"],
     "watch": ["object_detection"],
 }
+
+TASKS_REGISTRY_PATH = Path(__file__).resolve().parent / "tasks.yml"
+
+
+def _derive_skill_backing_tasks() -> dict[str, list[str]]:
+    """Invert the bundled task registry's ``agent_skill`` field into
+    ``skill id -> [canonical task + its aliases]``.
+
+    Both the canonical name and every alias are included so live-adapter
+    matching succeeds regardless of which spelling an adapter advertises
+    (contract §4: the canonical-alias case, e.g. scene_caption ≡
+    image_captioning). Skills that inherit another skill's backing
+    (``_SKILL_TASK_INHERITS``) get its derived tasks. On any error —
+    missing file, bad YAML — falls back to the hardcoded map so the agent
+    never fails to start over a taxonomy file."""
+    try:
+        raw = yaml.safe_load(TASKS_REGISTRY_PATH.read_text()) or []
+        derived: dict[str, list[str]] = {}
+        for entry in raw:
+            skill = entry.get("agent_skill")
+            if not skill:
+                continue
+            names = [entry["task"], *(entry.get("aliases") or [])]
+            for name in names:
+                if name not in derived.setdefault(skill, []):
+                    derived[skill].append(name)
+        for skill, source in _SKILL_TASK_INHERITS.items():
+            if source in derived:
+                derived[skill] = list(derived[source])
+        if not derived:                       # empty/degenerate file → fallback
+            return dict(_SKILL_BACKING_FALLBACK)
+        return derived
+    except Exception:                          # pragma: no cover - defensive
+        logger.warning(
+            "could not load bundled tasks.yml (%s); using the hardcoded "
+            "skill-backing map", TASKS_REGISTRY_PATH, exc_info=True,
+        )
+        return dict(_SKILL_BACKING_FALLBACK)
+
+
+_SKILL_BACKING_TASKS: dict[str, list[str]] = _derive_skill_backing_tasks()
 
 
 # Phrases Whisper commonly hallucinates from silence / background noise / the
