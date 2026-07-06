@@ -116,6 +116,19 @@ event_ring_size: 256
 # opennvr_cameras_url: http://127.0.0.1:8000/api/v1/internal/camera-agent/cameras
 # opennvr_api_key: REPLACE_WITH_INTERNAL_API_KEY
 
+# Optional: the APP DOOR. Base URL of the OpenNVR SERVER API (not the UI).
+# When set, the agent discovers installed catalog apps and can relay their
+# live state as READ-ONLY conversational skills:
+#   GET <opennvr_api_url>/api/v1/apps            — installed + enabled apps
+#   GET <opennvr_api_url>/api/v1/apps/{id}/status — one app's health + state
+# Auth is X-Internal-Api-Key. The key is opennvr_api_key, falling back to
+# kaic_api_key (the same deployment INTERNAL_API_KEY) or the INTERNAL_API_KEY
+# env var. The agent only READS here — it surfaces "list_apps" and "app_status"
+# tools and an "apps" skill (plus one skill entry per installed app). It NEVER
+# enables, disables, or configures an app; that stays an operator action in the
+# app catalog. Unset → no app tools/skills at all (clean fall-back).
+# opennvr_api_url: http://127.0.0.1:8000
+
 # Base URL of the main OpenNVR UI. Used ONLY to deep-link the operator to
 # the AI Adapters view when a skill is greyed out for want of a backing
 # adapter — the skills panel then shows an "Enable →" link next to the

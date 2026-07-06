@@ -154,6 +154,61 @@ Two things in this diagram are worth staring at:
    and suggests installing an adapter, mirroring the catalog's greyed
    badge.
 
+## 3a. The app door — container apps as read-only conversational skills
+
+The convergence above covers rules the agent can *instantiate* itself: the
+bundled `Detector` library. But a catalog app is often a **container app** —
+its own process, registered with the server (`POST /api/v1/apps/register`),
+that the agent can't import and run in-session. The occupancy counter you
+enabled from a card, a third-party PPE app, an LPR pipeline: these are
+already running as 24/7 daemons. The agent shouldn't reimplement them — it
+should be able to *talk about* them.
+
+That's the **app door**: when the agent is configured with the OpenNVR
+server's base URL (`opennvr_api_url`), it discovers every installed catalog
+app and can relay its state conversationally. Two read-only tools back it:
+
+- **`list_apps`** — the installed **and enabled** apps: id, name, summary,
+  category, and what each emits (alert types). "What apps are running? Do I
+  have a loitering detector?"
+- **`app_status`** — one app's live health + state, proxied through the
+  server's `GET /api/v1/apps/{id}/status`. "Is the occupancy app healthy?
+  What's it seeing right now?"
+
+Each installed+enabled app also surfaces in the agent's skills panel as a
+`source:"app"` entry (`id` like `app:loitering-detection`), alongside the
+generic **`apps`** capability skill — so "every catalog app is a
+conversational skill" holds for container apps too, not just the bundled
+rule library.
+
+**The read-only boundary is the whole point.** The app door is strictly
+*read/relay*: the agent surfaces what's installed and reports live state, and
+that is **all** it can do. There is deliberately no enable / disable /
+configure tool, no handler, and no client method — enabling an app, editing
+its config, or registering one stays an **operator action** in the app
+catalog, behind OpenNVR's permission gate. The agent **guides** ("you have a
+loitering detector installed but disabled — enable it from the app catalog");
+it never flips the switch. This mirrors the greyed-skill on-ramp in §2: the
+agent names the action and points at the operator's screen, but the operator
+acts.
+
+On the server, this is one thin seam: `GET /api/v1/apps` and
+`GET /apps/{id}/status` accept the deployment's `X-Internal-Api-Key` (a
+read-only service principal, constant-time compared) as an alternative to a
+user JWT, exactly like `POST /apps/register` already does — while
+enable/disable/config **remain user-JWT-only**. The agent's registry client
+is cached (60s TTL, negative-cached) and never raises: an unreachable or
+unconfigured registry degrades to a graceful "couldn't reach the app
+registry" message and simply omits the per-app skill entries, never a crash.
+
+> **Deferred next slice: alert relay.** This slice is discovery + state
+> query. The natural follow-on is the agent **subscribing** to app alerts
+> (`opennvr.alerts.app.>` on the bus) so a container app firing a loitering
+> or PPE alert can reach the user through the same conversational surface as
+> the agent's own watches. That's a separate, additive slice — still
+> read-only (the agent relays alerts, it doesn't arm or silence the app) —
+> and is not built here.
+
 ## 4. What this means for you as a developer
 
 Two contribution surfaces, each of which now pays out twice:

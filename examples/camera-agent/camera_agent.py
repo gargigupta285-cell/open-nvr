@@ -46,6 +46,7 @@ from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from adapter_clients import (
+    AppRegistryClient,
     KaicAdapterClient,
     KaicCapabilitiesClient,
     OllamaClient,
@@ -156,6 +157,17 @@ class AppConfig:
     # reuse cameras configured in OpenNVR instead of duplicating RTSP URLs.
     opennvr_cameras_url: str | None = None
     opennvr_api_key: str | None = None
+
+    # Optional OpenNVR server BASE URL (e.g. "http://127.0.0.1:8000") for the
+    # APP DOOR: when set, the agent discovers installed catalog apps via
+    # GET {opennvr_api_url}/api/v1/apps and can relay one app's live state via
+    # GET {opennvr_api_url}/api/v1/apps/{id}/status — surfacing every installed
+    # app as a READ-ONLY conversational skill. Auth is X-Internal-Api-Key: the
+    # key is opennvr_api_key, falling back to kaic_api_key (the same deployment
+    # INTERNAL_API_KEY) or the INTERNAL_API_KEY env var. The agent only READS
+    # here — it never enables / disables / configures an app (that stays an
+    # operator action; the agent guides). Unset → no app skills, cleanly.
+    opennvr_api_url: str | None = None
 
     # Optional base URL of the main OpenNVR UI (e.g. "https://nvr.example"),
     # used only to build a deep link into the AI Adapters view when a skill is
@@ -269,6 +281,7 @@ SKILL_TOOLS: dict[str, list[str]] = {
     "watch": ["create_monitor", "stop_monitor"],
     "report": ["create_report", "stop_report"],
     "task": ["create_background_task"],
+    "apps": ["list_apps", "app_status"],
 }
 # id, icon, name, example question, requirement key ("" = always available)
 _SKILL_META: list[tuple[str, str, str, str, str]] = [
@@ -290,6 +303,8 @@ _SKILL_META: list[tuple[str, str, str, str, str]] = [
      "Every morning at 7, summarise overnight activity.", ""),
     ("task", "⚙", "Run longer searches in the background",
      "Check every camera for anyone in a red shirt.", ""),
+    ("apps", "🧩", "Query installed catalog apps",
+     "What apps are running, and is the loitering detector healthy?", "apps"),
 ]
 # Which KAI-C task strings (``tasks_advertised``, aggregated live from
 # GET /api/v1/ai/capabilities) back each skill. Advisory display data
@@ -1809,6 +1824,64 @@ def _create_background_task_tool() -> dict[str, Any]:
     }
 
 
+# ── App door tools (read-only orchestration of installed catalog apps) ──
+# The agent discovers container apps it can't import and RELAYS their state.
+# These tools READ ONLY — there is deliberately no enable/disable/configure
+# tool (those stay operator actions; the agent guides). Gated behind the
+# "apps" skill, which requires opennvr_api_url to be configured.
+
+
+def _list_apps_tool() -> dict[str, Any]:
+    """Function schema for listing the installed + enabled catalog apps."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "list_apps",
+            "description": (
+                "List the OpenNVR catalog apps installed and ENABLED on this "
+                "system (loitering detection, occupancy counting, PPE, etc.). "
+                "Use to answer 'what apps are running?', 'do I have a loitering "
+                "detector?', 'what can this system watch for automatically?'. "
+                "Returns each app's id, name, summary, category, and what it "
+                "emits (alert types). Read-only: you can report what's "
+                "installed, but you CANNOT enable, disable, or configure an "
+                "app — that's an operator action in the app catalog."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+
+
+def _app_status_tool() -> dict[str, Any]:
+    """Function schema for reading one installed app's live state/health."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "app_status",
+            "description": (
+                "Get the live state and health of one installed OpenNVR app by "
+                "its id (from list_apps). Use for 'is the loitering detector "
+                "healthy?', 'what is the occupancy app seeing right now?'. "
+                "Returns the app's reported health + state. Read-only — you "
+                "report status, you do not change the app's configuration."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app_id": {
+                        "type": "string",
+                        "description": (
+                            "The app's id as returned by list_apps, e.g. "
+                            "'loitering-detection'."
+                        ),
+                    }
+                },
+                "required": ["app_id"],
+            },
+        },
+    }
+
+
 def load_config(path: str | Path) -> AppConfig:
     raw = yaml.safe_load(Path(path).read_text())
     if not isinstance(raw, dict):
@@ -1930,6 +2003,7 @@ def load_config(path: str | Path) -> AppConfig:
         footage_index_path=raw.get("footage_index_path"),
         opennvr_cameras_url=raw.get("opennvr_cameras_url"),
         opennvr_api_key=raw.get("opennvr_api_key"),
+        opennvr_api_url=raw.get("opennvr_api_url"),
         opennvr_ui_url=raw.get("opennvr_ui_url"),
         emergency_contacts=(
             dict(raw["emergency_contacts"])
@@ -2075,6 +2149,30 @@ class CameraAgentRuntime:
             api_key=cfg.kaic_api_key,
         )
 
+        # App door (read-only): discover installed catalog apps and relay
+        # their live state as conversational skills. Only constructed when
+        # opennvr_api_url is configured — otherwise the app tools/skills
+        # simply don't exist (clean fall-back). The key reuses the same
+        # deployment INTERNAL_API_KEY the infer path uses: opennvr_api_key,
+        # else kaic_api_key, else the INTERNAL_API_KEY env var.
+        self.app_registry: AppRegistryClient | None = None
+        if cfg.opennvr_api_url:
+            import os
+
+            app_key = (
+                cfg.opennvr_api_key
+                or cfg.kaic_api_key
+                or os.environ.get("INTERNAL_API_KEY", "")
+            )
+            self.app_registry = AppRegistryClient(
+                base_url=cfg.opennvr_api_url, api_key=app_key,
+            )
+            logger.info(
+                "app door enabled: reading installed apps from %s "
+                "(read-only — the agent never enables/disables/configures)",
+                cfg.opennvr_api_url,
+            )
+
         # Optional read-only footage-search index → enables search_footage.
         self.footage_index = None
         if cfg.footage_index_path:
@@ -2123,6 +2221,8 @@ class CameraAgentRuntime:
             "enroll_face": self._handle_enroll_face,
             "list_people": self._handle_list_people,
             "forget_face": self._handle_forget_face,
+            "list_apps": self._handle_list_apps,
+            "app_status": self._handle_app_status,
         }
 
         self.agent_name = agent_name_for(cfg.agent_name)
@@ -2144,6 +2244,12 @@ class CameraAgentRuntime:
         excluded: set[str] = set()
         for sid in self.disabled_skills:
             excluded.update(SKILL_TOOLS.get(sid, ()))
+        # App door: never advertise the read-only app tools when the registry
+        # isn't wired (opennvr_api_url unset) — there's nothing to read, so the
+        # LLM shouldn't see them. When it IS wired, they're advertised and the
+        # handlers degrade gracefully if the registry is momentarily down.
+        if not self.skill_requirement_met("apps"):
+            excluded.update(SKILL_TOOLS["apps"])
         allow = None if self.cfg.enabled_tools is None else set(self.cfg.enabled_tools)
 
         def keep(defn: dict[str, Any]) -> bool:
@@ -2159,6 +2265,7 @@ class CameraAgentRuntime:
             _create_alarm_tool(cam_all), _stop_alarm_tool(),
             _create_report_tool(), _stop_report_tool(),
             _enroll_face_tool(cam_all), _list_people_tool(), _forget_face_tool(),
+            _list_apps_tool(), _app_status_tool(),
         ) if keep(t)]
         self.background_tool_definitions = base
         self.tool_definitions = base + control
@@ -2173,6 +2280,11 @@ class CameraAgentRuntime:
         if req == "footage":
             return bool(getattr(self, "footage_index", None)
                         and self.footage_index.available)
+        if req == "apps":
+            # The app door is wired iff the OpenNVR server base URL is set —
+            # then the AppRegistryClient exists. Configuration presence is the
+            # gate; a momentarily-unreachable registry degrades at call time.
+            return getattr(self, "app_registry", None) is not None
         return True   # no external requirement
 
     def skills_payload(self) -> list[dict[str, Any]]:
@@ -2196,11 +2308,13 @@ class CameraAgentRuntime:
             "faces": f"{self.cfg.recognition_adapter} recognition",
             "events": "inference event bus (NATS)",
             "footage": "footage-search index",
+            "apps": "OpenNVR app registry (read-only)",
         }
         hints = {
             "faces": "Set faces_url to the recognition adapter to enable.",
             "events": "Set nats_inference_url to stream inference events.",
             "footage": "Set footage_index_path (built by the footage-search example).",
+            "apps": "Set opennvr_api_url to read installed catalog apps.",
         }
         out: list[dict[str, Any]] = []
         for sid, icon, name, example, req in _SKILL_META:
@@ -2244,7 +2358,67 @@ class CameraAgentRuntime:
                 # count/crossing kinds (spec §07 "one rule library, two doors").
                 entry["rules"] = sorted(MonitorManager._CONVERGED.values())
             out.append(entry)
+
+        # ── App door: each installed+enabled catalog app as a skill entry ──
+        # Additive and clearly marked source:"app". These are container apps
+        # the agent can't import — it READS them (list/status) and relays. Only
+        # surfaced when the registry is wired AND reachable (apps_cached is a
+        # list); unset or unreachable → no app entries (clean fall-back). Read
+        # only: there is no enable/disable/configure path from these entries.
+        out.extend(self._app_skill_entries())
         return out
+
+    def _app_skill_entries(self) -> list[dict[str, Any]]:
+        """Skill entries for installed+enabled catalog apps (source:"app").
+
+        Reads the AppRegistryClient's cached list (the ``/skills`` endpoint
+        refreshes it first, TTL'd, never raising). Returns [] when the app
+        door is unwired or the registry is unreachable — so a down registry
+        never removes the *generic* "apps" capability skill, it only omits
+        the per-app entries."""
+        registry = getattr(self, "app_registry", None)
+        if registry is None:
+            return []
+        apps = registry.apps_cached          # None = unknown / unreachable
+        if not apps:
+            return []
+        entries: list[dict[str, Any]] = []
+        for a in apps:
+            if not a.get("enabled"):
+                continue
+            app_id = str(a.get("id") or "")
+            if not app_id:
+                continue
+            manifest = a.get("manifest") or {}
+            name = str(a.get("name") or manifest.get("name") or app_id)
+            summary = str(manifest.get("summary") or "").strip()
+            category = a.get("category") or manifest.get("category") or "app"
+            emits = [
+                str(e.get("name"))
+                for e in (manifest.get("emits") or [])
+                if isinstance(e, dict) and e.get("name")
+            ]
+            entries.append({
+                "id": f"app:{app_id}",
+                "source": "app",           # clearly marks the app door origin
+                "app_id": app_id,
+                "icon": "🧩",
+                "name": name,
+                "category": category,
+                "uses": f"installed app — {summary}" if summary
+                        else "installed app",
+                "summary": summary,
+                "emits": emits,
+                # Installed + enabled by an operator ⇒ enabled. The agent
+                # can query it (read-only); it can't toggle or configure it.
+                "enabled": True,
+                "available": True,
+                "read_only": True,
+                "hint": "",
+                "backing_tasks": [],
+                "tasks_available": True,
+            })
+        return entries
 
     def set_skill_enabled(self, skill_id: str, enabled: bool) -> bool:
         """Turn a skill on/off and reconfigure the toolset. Returns False if the
@@ -2475,6 +2649,74 @@ class CameraAgentRuntime:
         ok = self.monitors.stop(mid)
         self.persist()
         return (f"Stopped watch #{mid}." if ok else f"I don't have a watch #{mid} running.")
+
+    # ── App door handlers (read-only) ─────────────────────────────
+    # Relay installed catalog apps + their state. NO enable/disable/config
+    # path exists here — those are operator actions in the app catalog.
+
+    _APP_REGISTRY_UNREACHABLE = (
+        "I couldn't reach the app registry right now, so I can't tell you "
+        "about the installed apps. Please try again shortly."
+    )
+
+    async def _handle_list_apps(self, args: dict[str, Any]) -> str:
+        """Tool handler: report the installed + ENABLED catalog apps. Reads
+        the registry (cached, never raises); a down/unset registry yields a
+        graceful message rather than an error."""
+        if self.app_registry is None:
+            return self._APP_REGISTRY_UNREACHABLE
+        apps = await self.app_registry.list_apps()
+        if apps is None:
+            return self._APP_REGISTRY_UNREACHABLE
+        enabled = [a for a in apps if a.get("enabled")]
+        if not enabled:
+            if apps:
+                return (
+                    "There are catalog apps installed, but none are currently "
+                    "enabled. An operator can enable one from the app catalog."
+                )
+            return "No catalog apps are installed on this system yet."
+        lines: list[str] = []
+        for a in enabled:
+            manifest = a.get("manifest") or {}
+            summary = manifest.get("summary") or "(no summary)"
+            category = a.get("category") or manifest.get("category") or "app"
+            emits = [
+                str(e.get("name"))
+                for e in (manifest.get("emits") or [])
+                if isinstance(e, dict) and e.get("name")
+            ]
+            emits_str = f"; alerts: {', '.join(emits)}" if emits else ""
+            lines.append(
+                f"- {a.get('name') or a.get('id')} ({category}): {summary}"
+                f"{emits_str}"
+            )
+        return "Installed and enabled apps:\n" + "\n".join(lines)
+
+    async def _handle_app_status(self, args: dict[str, Any]) -> str:
+        """Tool handler: report one installed app's live state/health,
+        proxied from the registry. Read-only; degrades gracefully."""
+        if self.app_registry is None:
+            return self._APP_REGISTRY_UNREACHABLE
+        app_id = str(args.get("app_id") or "").strip()
+        if not app_id:
+            return "Tell me which app — I need its id (from list_apps)."
+        status = await self.app_registry.app_status(app_id)
+        if status is None:
+            return self._APP_REGISTRY_UNREACHABLE
+        health = status.get("health") or {}
+        state = status.get("state")
+        health_status = (
+            health.get("status")
+            or ("ready" if health.get("ready") else "not ready")
+        )
+        parts = [f"App '{app_id}' health: {health_status}."]
+        if isinstance(state, dict) and state:
+            summary = ", ".join(f"{k}={v}" for k, v in list(state.items())[:6])
+            parts.append(f"State: {summary}.")
+        elif state is None:
+            parts.append("No live state was reported.")
+        return " ".join(parts)
 
     async def _handle_create_task(self, args: dict[str, Any]) -> str:
         """Tool handler: queue a long-running job and acknowledge so the
@@ -2858,8 +3100,11 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         whether it's ``available`` to enable (its backend is configured) — with a
         ``hint`` otherwise, so the panel never promises something it can't do.
         Also refreshes (60s TTL, never raises) the live KAI-C capabilities view
-        behind each entry's ``backing_tasks`` / ``tasks_available`` fields."""
+        behind each entry's ``backing_tasks`` / ``tasks_available`` fields, and
+        the installed-apps list behind the source:"app" entries (read-only)."""
         await runtime.kaic_capabilities.refresh()
+        if runtime.app_registry is not None:
+            await runtime.app_registry.list_apps()   # 60s TTL; never raises
         return {"skills": runtime.skills_payload()}
 
     @app.post("/skills/{skill_id}/{action}")

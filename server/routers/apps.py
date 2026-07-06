@@ -287,6 +287,64 @@ def get_register_principal(
     )
 
 
+def get_read_principal(
+    x_internal_api_key: str | None = Header(default=None, alias="X-Internal-Api-Key"),
+    credentials: HTTPAuthorizationCredentials | None = Depends(_optional_bearer),
+    db: Session = Depends(get_db),
+) -> User | None:
+    """Authenticate a READ-ONLY registry call (``GET /apps`` and
+    ``GET /apps/{id}/status``).
+
+    Mirrors :func:`get_register_principal` exactly — same constant-time,
+    empty-key-safe compare, same JWT fallback — but is a *separate*
+    dependency so it reads clearly at the call sites as "reads only".
+    A registered SDK app / a companion service (e.g. the OpenNVR Agent)
+    needs to *see* the catalog and probe an app's health to relay its
+    state conversationally; it holds only the deployment's
+    ``INTERNAL_API_KEY``, not a user JWT.
+
+    Returns the ``User`` for the JWT path, or ``None`` for the
+    service-key path. Raises 401 when neither credential is valid. The
+    write routes (enable/disable/config/register) never call this — they
+    stay strictly ``get_current_active_user`` (register additionally
+    accepts the key via :func:`get_register_principal`).
+    """
+    if x_internal_api_key is not None:
+        expected = _internal_api_key()
+        if expected and secrets.compare_digest(x_internal_api_key, expected):
+            return None  # service identity
+        # A service sends its one token as BOTH headers (it can't know
+        # which kind the operator provisioned) — a non-matching key
+        # only fails the request when there's no bearer to fall back to.
+        if credentials is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid internal API key",
+            )
+
+    if credentials is not None:
+        token_data = verify_token(credentials.credentials)
+        if token_data is not None:
+            user = (
+                db.query(User)
+                .filter(User.username == token_data.username)
+                .first()
+            )
+            if user is not None and user.is_active:
+                return user
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Provide a bearer token or X-Internal-Api-Key",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
 # ── Request schemas / serialization ────────────────────────────────
 
 
@@ -328,7 +386,7 @@ def _get_app_or_404(db: Session, app_id: str) -> InstalledApp:
 
 @router.get("")
 async def list_apps(
-    current_user: User = Depends(get_current_active_user),
+    principal: User | None = Depends(get_read_principal),
     db: Session = Depends(get_db),
 ):
     """
@@ -338,7 +396,10 @@ async def list_apps(
     ``GET /api/v1/adapters`` client-side to grey out apps whose model
     prerequisites aren't met.
 
-    Requires authenticated user.
+    Requires an authenticated user OR the deployment's internal API key
+    (``X-Internal-Api-Key``) — a service (the OpenNVR Agent) reads the
+    catalog to relay installed apps as conversational skills. Read only;
+    see :func:`get_read_principal`.
     """
     rows = db.query(InstalledApp).order_by(InstalledApp.id).all()
     return [_serialize_app(row) for row in rows]
@@ -526,7 +587,7 @@ async def update_app_config(
 @router.get("/{app_id}/status")
 async def get_app_status(
     app_id: str,
-    current_user: User = Depends(get_current_active_user),
+    principal: User | None = Depends(get_read_principal),
     db: Session = Depends(get_db),
 ):
     """
@@ -542,7 +603,9 @@ async def get_app_status(
     guard existed): a blocked URL short-circuits to
     ``{"health": {"status": "blocked_url"}, "state": None}``.
 
-    Requires authenticated user.
+    Requires an authenticated user OR the deployment's internal API key
+    (``X-Internal-Api-Key``) — a service reads live app state to relay
+    it; see :func:`get_read_principal`. Read only.
     """
     row = _get_app_or_404(db, app_id)
     base_url = row.url.rstrip("/")
