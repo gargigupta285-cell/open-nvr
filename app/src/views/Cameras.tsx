@@ -24,6 +24,7 @@ import { api } from '../lib/api'
 import { useSnackbar } from '../components/Snackbar'
 import { usePermissions } from '../hooks/usePermissions'
 import { Unplug } from 'lucide-react'
+import { AddCameraDialog } from './LiveView'
 
 type Camera = {
   id: number
@@ -207,42 +208,6 @@ export function Cameras() {
     // Refresh streaming status if MediaMTX is available
     if (mediamtxAvailable && data.cameras?.length) {
       fetchStreamStatuses(data.cameras)
-    }
-  }
-
-  const onCreate = async (e: React.FormEvent) => {
-    e.preventDefault()
-    try {
-      setLoading(true)
-      const payload: any = {
-        name: form.name,
-        description: form.description || null,
-        ip_address: form.ip_address,
-        port: Number(form.port) || 554,
-        username: form.username || null,
-        password: form.password || null,
-        rtsp_url: form.rtsp_url || null,
-        location: form.location || null,
-        vlan: form.vlan || null,
-        status: form.status || 'unknown',
-      }
-      const response = await apiService.createCamera(payload)
-      setShowCreateDialog(false)
-      resetForm()
-      await refreshCameras()
-
-      const camera = response.data
-      if (camera.mediamtx_provisioned === true) {
-        showSuccess(`Camera created and automatically configured for streaming!${camera.recording_enabled ? ' Recording is enabled.' : ''}`)
-      } else if (camera.mediamtx_provisioned === false) {
-        showInfo(`Camera created but Media Server configuration failed. You can manually provision it from the camera actions.`)
-      } else {
-        showSuccess('Camera created. Add an RTSP URL and provision it to enable streaming.')
-      }
-    } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Failed to create camera')
-    } finally {
-      setLoading(false)
     }
   }
 
@@ -437,46 +402,13 @@ export function Cameras() {
         </div>
       )}
 
-      {/* Create Camera Dialog */}
+      {/* Create Camera Dialog — shared with Live View (discover / manual) */}
       {canManageCameras && showCreateDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-[var(--panel)] border border-neutral-700 p-6 max-w-lg w-full mx-4 rounded-lg">
-            <h3 className="text-lg font-medium mb-4">Add New Camera</h3>
-            <form onSubmit={onCreate} className="grid grid-cols-2 gap-3">
-              <Field label="Name">
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
-              </Field>
-              <Field label="IP Address">
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.ip_address} onChange={(e) => setForm({ ...form, ip_address: e.target.value })} required />
-              </Field>
-              <Field label="Port">
-                <input type="number" className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.port} onChange={(e) => setForm({ ...form, port: Number(e.target.value) })} min={1} max={65535} />
-              </Field>
-              <Field label="RTSP URL">
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.rtsp_url || ''} onChange={(e) => setForm({ ...form, rtsp_url: e.target.value })} />
-              </Field>
-              <Field label="Username">
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.username || ''} onChange={(e) => setForm({ ...form, username: e.target.value })} />
-              </Field>
-              <Field label="Password">
-                <input type="password" className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.password || ''} onChange={(e) => setForm({ ...form, password: e.target.value })} />
-              </Field>
-              <Field label="Location">
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.location || ''} onChange={(e) => setForm({ ...form, location: e.target.value })} />
-              </Field>
-              <Field label="VLAN">
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.vlan || ''} onChange={(e) => setForm({ ...form, vlan: e.target.value })} />
-              </Field>
-              <Field label="Description">
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.description || ''} onChange={(e) => setForm({ ...form, description: e.target.value })} />
-              </Field>
-              <div className="col-span-2 flex justify-end gap-2 mt-4">
-                <button type="button" className="px-4 py-2 border border-neutral-700 bg-[var(--panel-2)] rounded" onClick={() => { setShowCreateDialog(false); resetForm() }}>Cancel</button>
-                <button type="submit" className="px-4 py-2 bg-[var(--accent)] text-white rounded" disabled={loading}>{loading ? 'Creating...' : 'Create Camera'}</button>
-              </div>
-            </form>
-          </div>
-        </div>
+        <AddCameraDialog
+          title="Add New Camera"
+          onClose={() => { setShowCreateDialog(false); resetForm() }}
+          onCameraAdded={async () => { setShowCreateDialog(false); resetForm(); await refreshCameras() }}
+        />
       )}
 
       {/* Cameras Table */}

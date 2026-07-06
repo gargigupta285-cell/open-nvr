@@ -1,0 +1,207 @@
+# Copyright (c) 2026 OpenNVR
+# Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0)
+"""
+Tests for the camera source resolver — deriving an RTSP URL (+ identity) from
+IP + credentials (ONVIF-first, vendor RTSP fallback).
+
+    cd server && pytest tests/test_camera_source_resolver.py -v
+"""
+
+from __future__ import annotations
+
+import datetime as _dt  # noqa: I001
+
+if not hasattr(_dt, "UTC"):
+    _dt.UTC = _dt.timezone.utc
+
+import os
+import secrets
+import sys
+import types as _types
+from pathlib import Path
+
+import pytest
+from cryptography.fernet import Fernet
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "server"))
+
+os.environ.setdefault("DATABASE_URL", "postgresql://u:p@localhost/x")
+os.environ.setdefault("SECRET_KEY", secrets.token_urlsafe(48))
+os.environ.setdefault("MEDIAMTX_SECRET", secrets.token_hex(32))
+os.environ.setdefault("INTERNAL_API_KEY", secrets.token_urlsafe(48))
+os.environ.setdefault("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
+_lm = _types.ModuleType("core.logging_config")
+
+
+class _L:
+    def __getattr__(self, _n):
+        return lambda *a, **k: None
+
+
+_lm.__getattr__ = lambda _n: _L()
+_lm.setup_logging = lambda *a, **k: None
+sys.modules.setdefault("core.logging_config", _lm)
+
+import services.camera_source_resolver as csr  # noqa: E402
+from services import onvif_digest_service as ods  # noqa: E402
+from services.camera_source_resolver import (  # noqa: E402
+    fetch_identity,
+    inject_credentials,
+    resolve_source,
+    sync_camera_time,
+)
+
+
+@pytest.mark.parametrize(
+    "url,user,pw,expected",
+    [
+        ("rtsp://10.0.0.5:554/s", "admin", "secret", "rtsp://admin:secret@10.0.0.5:554/s"),
+        ("rtsp://a:b@10.0.0.5/s", "x", "y", "rtsp://a:b@10.0.0.5/s"),  # keeps existing
+        ("http://10.0.0.5/s", "a", "b", "http://10.0.0.5/s"),  # non-rtsp untouched
+        ("rtsp://10.0.0.5/s", None, "b", "rtsp://10.0.0.5/s"),  # no user
+        ("rtsp://h/x", "ad min", "p@ss", "rtsp://ad%20min:p%40ss@h/x"),  # encoded
+        (None, "a", "b", None),
+    ],
+)
+def test_inject_credentials(url, user, pw, expected):
+    assert inject_credentials(url, user, pw) == expected
+
+
+def test_inject_credentials_fixes_bare_manual_url():
+    """Regression: a manual RTSP URL with separate user/pass fields must get the
+    credentials embedded, otherwise MediaMTX can't authenticate and the stream
+    fails. inject_credentials is a no-op once userinfo is already present."""
+    bare = "rtsp://192.168.1.100:554/stream1"
+    embedded = inject_credentials(bare, "admin", "pass")
+    assert embedded == "rtsp://admin:pass@192.168.1.100:554/stream1"
+    # Re-applying (or a URL that already has creds) must not double-embed.
+    assert inject_credentials(embedded, "admin", "pass") == embedded
+
+
+@pytest.mark.asyncio
+async def test_resolve_via_onvif_unescapes_and_injects(monkeypatch):
+    async def fake_connect(ip, u, p, port):
+        # Only port 80 answers; returns an XML-escaped URI (as real cameras do).
+        if port != 80:
+            raise Exception("refused")
+        return {
+            "device_info": {
+                "manufacturer": "HIKVISION", "model": "DS-2CD204WFWD-I",
+                "firmwareversion": "V5.5.61", "serialnumber": "SN123", "hardwareid": "88",
+            },
+            "profiles": [
+                {"token": "P1", "stream_uri":
+                 "rtsp://192.168.1.64:554/Streaming/Channels/101?a=1&amp;b=2"},
+            ],
+        }
+
+    monkeypatch.setattr(ods, "connect_and_get_profiles", fake_connect)
+    r = await resolve_source("192.168.1.64", "admin", "pw", 554)
+    assert r["source"] == "onvif"
+    assert r["manufacturer"] == "HIKVISION"
+    assert r["model"] == "DS-2CD204WFWD-I"
+    assert r["serial_number"] == "SN123"
+    # credentials injected AND the &amp; unescaped to &
+    assert r["rtsp_url"] == (
+        "rtsp://admin:pw@192.168.1.64:554/Streaming/Channels/101?a=1&b=2"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_falls_back_to_vendor_probe(monkeypatch):
+    async def fail_connect(ip, u, p, port):
+        raise Exception("no onvif")
+
+    async def fake_probe(host, port, path, user, pw, timeout=3.0):
+        return path == "/Streaming/Channels/101"  # only the Hik path answers
+
+    monkeypatch.setattr(ods, "connect_and_get_profiles", fail_connect)
+    monkeypatch.setattr(csr, "_rtsp_path_works", fake_probe)
+    r = await resolve_source("10.0.0.9", "admin", "pw", 554)
+    assert r["source"] == "rtsp_probe"
+    assert r["rtsp_url"] == "rtsp://admin:pw@10.0.0.9:554/Streaming/Channels/101"
+    assert r["manufacturer"] is None  # identity unknown via raw RTSP
+
+
+@pytest.mark.asyncio
+async def test_resolve_returns_none_when_nothing_works(monkeypatch):
+    async def fail_connect(ip, u, p, port):
+        raise Exception("no onvif")
+
+    async def no_probe(host, port, path, user, pw, timeout=3.0):
+        return False
+
+    monkeypatch.setattr(ods, "connect_and_get_profiles", fail_connect)
+    monkeypatch.setattr(csr, "_rtsp_path_works", no_probe)
+    assert await resolve_source("10.0.0.9", "admin", "pw", 554) is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_identity_returns_device_info(monkeypatch):
+    async def fake_connect(ip, u, p, port):
+        if port != 80:
+            raise Exception("refused")
+        return {
+            "device_info": {
+                "manufacturer": "HIKVISION", "model": "DS-2CD204WFWD-I",
+                "firmwareversion": "V5.5.61", "serialnumber": "SN123", "hardwareid": "88",
+            },
+            "profiles": [],
+        }
+
+    monkeypatch.setattr(ods, "connect_and_get_profiles", fake_connect)
+    r = await fetch_identity("192.168.1.64", "admin", "pw")
+    assert r["manufacturer"] == "HIKVISION"
+    assert r["model"] == "DS-2CD204WFWD-I"
+    assert r["serial_number"] == "SN123"
+    assert r["onvif_port"] == 80  # reused by the caller for time-sync
+
+
+@pytest.mark.asyncio
+async def test_fetch_identity_returns_none_when_no_onvif(monkeypatch):
+    async def fail_connect(ip, u, p, port):
+        raise Exception("no onvif")
+
+    monkeypatch.setattr(ods, "connect_and_get_profiles", fail_connect)
+    assert await fetch_identity("10.0.0.9", "admin", "pw") is None
+
+
+@pytest.mark.asyncio
+async def test_sync_camera_time_uses_preferred_port(monkeypatch):
+    calls = []
+
+    async def fake_set(ip, u, p, port):
+        calls.append(port)
+        return {"synced_utc": "2026-07-05T00:00:00Z"}
+
+    monkeypatch.setattr(ods, "set_system_datetime", fake_set)
+    ok = await sync_camera_time("10.0.0.5", "admin", "pw", onvif_port=8000)
+    assert ok is True
+    assert calls == [8000]  # only the known-good port is tried, no re-probe
+
+
+@pytest.mark.asyncio
+async def test_sync_camera_time_probes_ports_when_none_given(monkeypatch):
+    calls = []
+
+    async def fake_set(ip, u, p, port):
+        calls.append(port)
+        if port != 80:
+            raise Exception("refused")
+        return {}
+
+    monkeypatch.setattr(ods, "set_system_datetime", fake_set)
+    ok = await sync_camera_time("10.0.0.5", "admin", "pw")
+    assert ok is True
+    assert calls[0] == 80  # first candidate port answers
+
+
+@pytest.mark.asyncio
+async def test_sync_camera_time_returns_false_and_never_raises(monkeypatch):
+    async def fake_set(ip, u, p, port):
+        raise Exception("unreachable")
+
+    monkeypatch.setattr(ods, "set_system_datetime", fake_set)
+    assert await sync_camera_time("10.0.0.5", "admin", "pw") is False
