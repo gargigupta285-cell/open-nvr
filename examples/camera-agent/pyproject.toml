@@ -29,7 +29,15 @@ dependencies = [
     "PyYAML>=6.0,<7.0",
     "nats-py>=2.6",
     "Pillow>=10.0",
+    # App SDK convergence (app-sdk-spec §07): create_monitor's count/
+    # crossing watches instantiate SDK detectors (the occupancy-counting
+    # and line-crossing example rule classes) via monitor_host.MonitorHost
+    # instead of the bespoke poll loops.
+    "opennvr-app-sdk",
 ]
+
+[tool.uv.sources]
+opennvr-app-sdk = { path = "../../sdk/opennvr-app-sdk", editable = true }
 
 [project.optional-dependencies]
 # Local capture-device cameras (device:0 / webcam / drone /dev/video) need

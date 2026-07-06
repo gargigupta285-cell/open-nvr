@@ -73,6 +73,32 @@ def test_definitions_persist_and_restore(tmp_path):
     assert reps[0]["query"] == "overnight" and reps[0]["schedule"] == "daily at 07:00"
 
 
+def test_disabled_skill_survives_restart(tmp_path):
+    """A skill switched off at runtime stays off after a restart, and its
+    tool is not re-advertised to the LLM."""
+    state = tmp_path / "skills.json"
+
+    def _advertised(rt):
+        return {t["function"]["name"] for t in rt.tool_definitions}
+
+    # disable the always-available "see" skill (tool: describe_camera)
+    rt = _runtime(state)
+    assert "describe_camera" in _advertised(rt)
+    assert rt.set_skill_enabled("see", False) is True
+    assert "describe_camera" not in _advertised(rt)
+    rt.persist()
+
+    data = json.loads(state.read_text())
+    assert data["disabled_skills"] == ["see"]
+
+    # a fresh runtime restores the toggle and keeps the tool unadvertised
+    rt2 = _runtime(state)
+    assert "describe_camera" in _advertised(rt2)  # default-on before restore
+    rt2.load_state()
+    assert "see" in rt2.disabled_skills
+    assert "describe_camera" not in _advertised(rt2)
+
+
 def test_stop_updates_persisted_state(tmp_path):
     state = tmp_path / "s.json"
 

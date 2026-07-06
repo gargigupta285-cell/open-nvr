@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# OpenNVR Camera Agent — one-command quickstart
+# OpenNVR Agent (formerly Camera Agent) — one-command quickstart
 # ============================================================
 # Clone → run → talk to your cameras. Two ways to run the SAME agent:
 #
@@ -36,7 +36,7 @@ for arg in "$@"; do
     --down|--stop) ACTION="down";;
     -h|--help)
       cat <<'EOF'
-OpenNVR Camera Agent — one-command quickstart (run from repo root)
+OpenNVR Agent (formerly Camera Agent) — one-command quickstart (run from repo root)
 
   examples/camera-agent/quickstart.sh          voice (default): speak, hear answers
   examples/camera-agent/quickstart.sh --chat   chat: type, read answers (lighter)

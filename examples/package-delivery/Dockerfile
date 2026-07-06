@@ -27,6 +27,13 @@ RUN pip install --no-cache-dir \
         "nats-py>=2.6" \
         "Pillow>=10.0"
 
+# The OpenNVR App SDK — this app's modules import opennvr_app_sdk
+# (alerts/frame_sources) at top level, so it must be installed into the
+# image or the container crashes on startup with ModuleNotFoundError.
+# Installed from the in-repo package.
+COPY sdk/opennvr-app-sdk /opt/opennvr-app-sdk
+RUN pip install --no-cache-dir /opt/opennvr-app-sdk
+
 COPY examples/package-delivery/__init__.py        ./__init__.py
 COPY examples/package-delivery/alerts.py          ./alerts.py
 COPY examples/package-delivery/frame_sources.py   ./frame_sources.py

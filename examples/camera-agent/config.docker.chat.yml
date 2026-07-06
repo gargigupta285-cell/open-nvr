@@ -39,6 +39,17 @@ event_ring_size: 256
 opennvr_cameras_url: http://opennvr-core:8000/api/v1/internal/camera-agent/cameras
 opennvr_api_key: ${INTERNAL_API_KEY}
 
+# Browser-facing OpenNVR origin — feeds opennvr_ui_url (deep-links to AI
+# Adapters / App Catalog when a skill is greyed out). The HOST origin the
+# operator's browser reaches OpenNVR at; defaults to http://localhost:8000.
+# Override via OPENNVR_UI_URL in .env for LAN/remote installs.
+opennvr_base_url: ${OPENNVR_UI_URL}
+
+# App door (read-only): fetched FROM INSIDE the container — must be the
+# compose-internal service name, NOT the browser-facing URL, or the app door
+# silently never works under compose (localhost:8000 = the agent itself).
+opennvr_api_url: http://opennvr-core:8000
+
 nats_inference_url: nats://nats:4222
 nats_inference_token: ${INTERNAL_API_KEY}
 

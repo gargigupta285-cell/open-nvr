@@ -167,6 +167,17 @@ class RtspFrameSource:
             "-nostdin",
             "-loglevel", "error",
             "-rtsp_transport", "tcp",
+            # Emit a KEYFRAME, not merely the first decodable frame. On a
+            # long-GOP H.265/HEVC stream (CPplus and many OEM cameras keep a
+            # keyframe only every 1-4s) connecting mid-GOP means the first
+            # frame ffmpeg decodes is a P/B-frame with no reference I-frame in
+            # hand — it decodes to a uniform ~128 grey wash with faint blocky
+            # noise, not the real scene. `-skip_frame nokey` tells the decoder
+            # to drop every non-key frame, so `-frames:v 1` below outputs the
+            # first true keyframe instead. It's an input/decoder option, hence
+            # before `-i`. If no keyframe arrives within the timeout we now
+            # fail loudly (VISION DEGRADED) rather than hand back grey mush.
+            "-skip_frame", "nokey",
             "-i", self._url,
             "-frames:v", "1",   # exactly one frame
             "-q:v", "3",        # good JPEG quality

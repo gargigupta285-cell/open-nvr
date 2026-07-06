@@ -7,16 +7,29 @@
 
 PY ?= python3
 
-.PHONY: help secrets secrets-env check-secrets
+.PHONY: help secrets secrets-env check-secrets sync-agent-tasks
 
 help:
 	@echo "OpenNVR Makefile targets:"
-	@echo "  make secrets        Print cryptographically random values for the"
-	@echo "                      required secret env vars. Pipe into your .env."
-	@echo "  make secrets-env    Write the random values directly to server/.env"
-	@echo "                      (refuses to clobber an existing file)."
-	@echo "  make check-secrets  Verify your server/.env has no placeholder"
-	@echo "                      values left for the required secrets."
+	@echo "  make secrets           Print cryptographically random values for the"
+	@echo "                         required secret env vars. Pipe into your .env."
+	@echo "  make secrets-env       Write the random values directly to server/.env"
+	@echo "                         (refuses to clobber an existing file)."
+	@echo "  make check-secrets     Verify your server/.env has no placeholder"
+	@echo "                         values left for the required secrets."
+	@echo "  make sync-agent-tasks  Re-copy server/config/tasks.yml into the"
+	@echo "                         camera-agent bundle (keeps the parity test green)."
+
+# --------------------------------------------------------------------------
+# make sync-agent-tasks
+# --------------------------------------------------------------------------
+# The OpenNVR Agent bundles a copy of the canonical task registry so it can
+# derive its skill vocabulary offline. That copy MUST stay byte-identical to
+# server/config/tasks.yml (a parity test enforces it). Run this after editing
+# the canonical file to re-sync the bundle.
+sync-agent-tasks:
+	cp server/config/tasks.yml examples/camera-agent/tasks.yml
+	@echo "Synced examples/camera-agent/tasks.yml from server/config/tasks.yml"
 
 # --------------------------------------------------------------------------
 # make secrets

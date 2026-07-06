@@ -1,0 +1,148 @@
+# Copyright (c) 2026 OpenNVR
+# This file is part of OpenNVR.
+#
+# OpenNVR is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenNVR is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
+
+# OpenNVR canonical task taxonomy — "curated + open".
+#
+# Adapters advertise free-text task names in ``tasks_advertised``
+# (contract §4 / §8.1) and MAY invent any string they like — §15.1
+# free-text registration is preserved. This file is the CURATED half:
+# a canonical name, human label, and skill mapping for the tasks that
+# have converged, so the UI can render them nicely, the OpenNVR Agent
+# can wire a task to a skill with zero code, and a lint can nudge
+# adapters toward the canonical spelling.
+#
+# Product-owned editorial content, exactly like use_case_map.yml — an
+# adapter never edits this file; it proposes a new entry (see contract
+# §4.1, "declare a new task"). An advertised string that is neither a
+# canonical ``task`` nor any ``alias`` still registers and works — it is
+# simply uncategorized until promoted here.
+#
+# Entry shape:
+#   task:        canonical string (matches tasks_advertised)
+#   label:       human-facing display name
+#   summary:     one-line description
+#   categories:  broad groupings for catalog filtering
+#   tags:        free keywords for search
+#   agent_skill: which OpenNVR Agent skill id this task backs
+#                (see/count/faces/watch), or null if it backs none
+#   aliases:     non-canonical spellings that MEAN this task; the
+#                canonicalizer and skill-mapping fold these in so an
+#                adapter advertising an alias is treated as the canonical.
+#   suggested_adapters: reference adapter(s) from the v0.1 set that
+#                provide this task — editorial, consistent with
+#                use_case_map.yml. The OpenNVR Agent uses these to tell an
+#                operator which adapter to enable when a skill is greyed
+#                out (guidance only; the agent never enables one itself).
+#   suggested_apps: catalog app id(s) from examples/ that deliver this
+#                task's capability as a packaged use case — the app-install
+#                on-ramp alongside suggested_adapters. Same editorial
+#                source-of-truth as use_case_map.yml's suggested_apps; the
+#                Agent surfaces these as "or install the <App> app" when a
+#                skill is greyed out (guide-only deep link, never a POST).
+
+- task: object_detection
+  label: Object Detection
+  summary: Detects and classifies objects in a frame, with bounding boxes.
+  categories: [vision, security, analytics]
+  tags: [person, vehicle, bag, perimeter, bbox]
+  agent_skill: count
+  aliases: [detect_objects, object-detection]
+  suggested_adapters: [yolov8]
+  suggested_apps: [intrusion-detection, loitering-detection, occupancy-counting]
+
+- task: face_recognition
+  label: Face Recognition
+  summary: Identifies known people by matching faces against an enrolled set.
+  categories: [vision, identity, security]
+  tags: [face, identity, watchlist, doorbell]
+  agent_skill: faces
+  aliases: []
+  suggested_adapters: [insightface]
+  suggested_apps: [smart-doorbell]
+
+- task: image_captioning
+  label: Image Captioning
+  summary: Produces a natural-language description of a frame.
+  categories: [vision, language]
+  tags: [caption, description, search, vlm]
+  agent_skill: see
+  # "scene_caption" is the SAME capability under a different spelling
+  # (an adapter shipped it that way); folding it in here resolves the
+  # duplication so both count as backing the agent's "see" skill.
+  aliases: [scene_caption, image-captioning]
+  suggested_adapters: [blip, moondream]
+
+- task: vqa
+  label: Visual Question Answering
+  summary: Answers arbitrary natural-language questions about a frame.
+  categories: [vision, language]
+  tags: [vqa, vlm, question, moondream]
+  agent_skill: see
+  aliases: [visual_question_answering]
+  suggested_adapters: [moondream]
+
+- task: face_detection
+  label: Face Detection
+  summary: Locates faces in a frame without identifying who they are.
+  categories: [vision, security]
+  tags: [face, bbox, presence]
+  agent_skill: null
+  aliases: []
+
+- task: person_detection
+  label: Person Detection
+  summary: Detects people specifically — a narrowed object detector.
+  categories: [vision, security, analytics]
+  tags: [person, presence, occupancy]
+  agent_skill: null
+  aliases: []
+
+- task: license_plate_recognition
+  label: License Plate Recognition
+  summary: Reads vehicle license plates (ANPR/LPR) from a frame.
+  categories: [vision, language, security]
+  tags: [plate, anpr, lpr, vehicle, ocr]
+  agent_skill: null
+  aliases: [lpr, anpr]
+  suggested_adapters: [fast-plate-ocr]
+  suggested_apps: [license-plate-recognition]
+
+- task: multi_object_tracking
+  label: Multi-Object Tracking
+  summary: Tracks objects across frames with stable per-object ids.
+  categories: [vision, analytics]
+  tags: [tracking, bytetrack, crossing, counting]
+  agent_skill: null
+  aliases: [tracking, mot]
+  suggested_adapters: [bytetrack]
+
+- task: speech_to_text
+  label: Speech to Text
+  summary: Transcribes spoken audio into text (ASR).
+  categories: [audio, language]
+  tags: [asr, whisper, transcription, voice]
+  agent_skill: null
+  aliases: [asr, stt, transcription]
+  suggested_adapters: [whisper]
+
+- task: text_to_speech
+  label: Text to Speech
+  summary: Synthesizes spoken audio from text (TTS).
+  categories: [audio, language]
+  tags: [tts, piper, voice, synthesis]
+  agent_skill: null
+  aliases: [tts, speech_synthesis]
+  suggested_adapters: [piper]

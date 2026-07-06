@@ -7,6 +7,13 @@ folder, and edit the predicate.
 The thirteen shipped examples cover two orthogonal axes of the OpenNVR pipeline:
 *driving* inference vs *subscribing* to it, and *inference events* vs *alerts*.
 
+> **Why write your rule as an SDK app?** Because every catalog app is
+> automatically a conversational skill: the same `Detector` class serves the
+> App Catalog (operator form, 24/7 daemon) *and* the camera agent
+> (conversation-built session monitor). See
+> [**Two Doors**](../docs/TWO_DOORS.md) for the full story and the
+> capability-matching mechanism behind it.
+
 ```
                       Drives inference?
                       ──────────────────

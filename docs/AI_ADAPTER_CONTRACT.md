@@ -464,6 +464,86 @@ A few notes on the shape:
   surfaces "model identity not verifiable" in the UI rather than
   silently trusting.
 
+### 4.1 The canonical task taxonomy — "curated + open"
+
+`tasks_advertised` is deliberately free-text (§4 above, §8.1, §15.1): an
+adapter may invent any task string it likes and it registers and works.
+That openness is the point — you are never bottlenecked on us adding an
+enum value. But once the community converges on a task, an unconstrained
+string vocabulary has two costs: the UI can't render a nice label for it,
+and the same capability shows up under two spellings (we actually shipped
+both `image_captioning` and `scene_caption` for one captioning adapter —
+one capability, two names, counted as two).
+
+OpenNVR resolves this with a **curated + open** taxonomy: a
+product-owned registry at [`server/config/tasks.yml`](../server/config/tasks.yml),
+served over `GET /api/v1/ai-models/tasks`, that adds a canonical layer on top of
+the free-text one — without closing it. Each entry is:
+
+```yaml
+- task: image_captioning          # canonical string (matches tasks_advertised)
+  label: Image Captioning         # human display name
+  summary: Produces a natural-language description of a frame.
+  categories: [vision, language]  # broad groupings for catalog filtering
+  tags: [caption, description, search, vlm]
+  agent_skill: see                # OpenNVR Agent skill it backs, or null
+  aliases: [scene_caption, image-captioning]   # non-canonical spellings
+  suggested_adapters: [blip, moondream]        # reference adapter(s) that provide it
+```
+
+- **`task`** is the canonical name an adapter SHOULD advertise.
+- **`aliases`** are non-canonical spellings that mean the *same*
+  capability. A canonicalizer folds them in — `scene_caption` and
+  `image-captioning` both resolve to `image_captioning` — which is how
+  the duplication above is fixed: one entry, one canonical name, every
+  known spelling pointing at it.
+- **`agent_skill`** wires a task to an OpenNVR Agent skill
+  (`see`/`count`/`faces`/`watch`, or `null`). The agent derives its
+  skill→backing-tasks map from a bundled copy of this file, aliases
+  included, so an adapter advertising **either** `scene_caption` or
+  `image_captioning` satisfies the `see` skill — and a *new* task with an
+  `agent_skill` set becomes an agent skill backing with **no agent code
+  change**.
+- **`suggested_adapters`** (optional) names the reference adapter(s) that
+  provide the task — editorial, consistent with `use_case_map.yml`. When a
+  skill greys out because no live adapter advertises a backing task, the
+  agent surfaces these to tell the operator which adapter to enable (and
+  deep-links to the AI Adapters view when configured with the UI URL). It's
+  guidance only — the agent never enables or approves an adapter itself.
+
+**The lint.** Two pure helpers ship alongside the registry
+(`canonicalize_task`, `lint_task_names` in `server/routers/ai_models.py`)
+and produce advisory warnings — never errors, nothing is blocked:
+
+- an alias → *"'scene_caption' is an alias of 'image_captioning'; prefer
+  the canonical name"*
+- an unknown string → *"'foo_bar' is not a known task — it will register
+  but stay uncategorized"*
+
+(Wiring this lint into the `ai-adapter` conformance kit — so it runs at
+`python -m conformance ...` time — lives in the SDK repo and is not part
+of this change.)
+
+**Declaring a new task — the workflow.** The open door stays wide open:
+
+1. **Invent it freely.** Advertise any string in `tasks_advertised`
+   (`fall_detection`, `weapon_detection`, …). It registers, the UI
+   renders the raw string, `nvr.adapters.find(task=...)` finds you. You
+   ship today, uncategorized, with no PR to us.
+2. **Optionally describe it richly** with a `CapabilityDescriptor` in the
+   `capabilities` block (§4) — label, summary, categories, tags — so
+   consumers get a nice card even before promotion.
+3. **Propose it for promotion.** Open a PR adding an entry to
+   `tasks.yml`. Once merged it gains a canonical name, catalog
+   categorization, an optional `agent_skill` binding, and any alias
+   spellings — and the lint starts nudging other adapters toward your
+   canonical name. The string you already advertised keeps working
+   throughout; promotion is additive.
+
+Like `use_case_map.yml`, `tasks.yml` is editorial and product-owned — an
+adapter never edits it, it *proposes* an entry. Curation adds names and
+structure; it never takes away the freedom to advertise a raw string.
+
 ## 5. Inference output — guidance, not strict schema
 
 Different models return different shapes. We do not try to standardize
@@ -1019,7 +1099,7 @@ What the operator experiences:
 
 ### 8.5 Startup-seeded adapters — config-as-consent
 
-> **Status: landing in this PR series.**
+> **Status: shipped** (KAI-C startup seed loop).
 
 Adapters seeded from the operator's own startup configuration (the
 compose overlay / adapter registry the operator wrote by hand) receive
