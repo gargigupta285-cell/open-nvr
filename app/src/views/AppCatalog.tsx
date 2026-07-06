@@ -23,8 +23,9 @@
 // manifest param schema — no app-specific UI code.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, Boxes, Check, Copy, Download, ExternalLink, RefreshCw, Settings2, Trash2 } from 'lucide-react'
+import { Activity, ArrowRight, Boxes, Check, Copy, Download, ExternalLink, RefreshCw, Settings2, Trash2 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
 import { Modal } from '../components/Modal'
@@ -34,7 +35,7 @@ import { GeometryEditor } from './apps/GeometryEditor'
 import { ChipListEditor } from './apps/ChipListEditor'
 import { TimeWindowEditor } from './apps/TimeWindowEditor'
 
-type ManifestParam = {
+export type ManifestParam = {
   name: string
   type: string
   default?: any
@@ -43,7 +44,7 @@ type ManifestParam = {
   description?: string
 }
 
-type AppManifest = {
+export type AppManifest = {
   id: string
   name: string
   version: string
@@ -68,7 +69,7 @@ type AppManifest = {
   actions?: ManifestAction[]
 }
 
-type ManifestAction = {
+export type ManifestAction = {
   name: string
   label: string
   params?: ManifestParam[]
@@ -76,7 +77,7 @@ type ManifestAction = {
   confirm?: boolean
 }
 
-type RegisteredApp = {
+export type RegisteredApp = {
   id: string
   name: string
   category: string
@@ -89,7 +90,7 @@ type RegisteredApp = {
   config?: Record<string, any> | null
 }
 
-type AppStatusResp = {
+export type AppStatusResp = {
   health?: { status?: string; [k: string]: any } | null
   state?: any
 }
@@ -235,7 +236,7 @@ function InstallStatusNote({ status }: { status: InstallStatusResp }) {
   )
 }
 
-function asStringList(v: unknown): string[] {
+export function asStringList(v: unknown): string[] {
   if (Array.isArray(v)) return v.map(String)
   return []
 }
@@ -249,7 +250,7 @@ function availableTasks(caps: CapabilitiesResp | undefined): Set<string> {
   return tasks
 }
 
-function statusVariant(status?: string): BadgeVariant {
+export function statusVariant(status?: string): BadgeVariant {
   switch ((status || '').toLowerCase()) {
     case 'ok':
     case 'ready':
@@ -286,7 +287,7 @@ function initialFormValue(p: ManifestParam, config: Record<string, any> | null |
 
 /* ------------------------- Config modal ------------------------- */
 
-function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: () => void }) {
+export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: () => void }) {
   const queryClient = useQueryClient()
   const { showSuccess } = useSnackbar()
   const params = app.manifest?.params ?? []
@@ -495,7 +496,7 @@ function ImageParamInput({ hasValue, onPick }: { hasValue: boolean; onPick: (b64
 // server's user-JWT-only proxy to the app's /actions/{name}. Results
 // with a list under "results" reuse the TableView renderer; anything
 // else pretty-prints.
-function AppActionModal({
+export function AppActionModal({
   app,
   action,
   onClose,
@@ -699,7 +700,7 @@ function AppStatusChip({ appId }: { appId: string }) {
 // zero-app-specific-UI bet as params → config form. Rendered from the
 // SAME react-query cache entry the status chip fills, so the live state
 // appears when the operator clicks "Check" and refreshes with it.
-type StateViewSpec = {
+export type StateViewSpec = {
   name: string
   label: string
   kind: 'metric' | 'table'
@@ -781,7 +782,7 @@ function TableView({ view, value }: { view: StateViewSpec; value: any }) {
   )
 }
 
-function LiveStateViews({ appId, views }: { appId: string; views: StateViewSpec[] }) {
+export function LiveStateViews({ appId, views }: { appId: string; views: StateViewSpec[] }) {
   // Same key as AppStatusChip; enabled:false — this component only
   // OBSERVES the cache the chip's "Check" fills (no extra fan-out).
   const statusQuery = useQuery({
@@ -817,6 +818,7 @@ function LiveStateViews({ appId, views }: { appId: string; views: StateViewSpec[
 
 function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<string>; onConfigure: () => void }) {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const { showSuccess, showError } = useSnackbar()
   const [uninstallPollActive, setUninstallPollActive] = useState(false)
   const [uninstallNote, setUninstallNote] = useState<string | null>(null)
@@ -830,8 +832,12 @@ function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<s
   const toggleMutation = useMutation({
     mutationFn: () => (app.enabled ? apiService.disableApp(app.id) : apiService.enableApp(app.id)),
     onSuccess: () => {
+      const wasEnabling = !app.enabled
       queryClient.invalidateQueries({ queryKey: ['apps'] })
       showSuccess(`${app.name} ${app.enabled ? 'disabled' : 'enabled'}`)
+      // First enable takes the operator straight to the app's own page so
+      // they land on its live dashboard and actions, not back on the grid.
+      if (wasEnabling) navigate(`/app-catalog/${app.id}`)
     },
     onError: (e) => showError(extractApiError(e, `Failed to ${app.enabled ? 'disable' : 'enable'} ${app.name}.`)),
   })
@@ -878,7 +884,9 @@ function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<s
     <Card>
       <CardHeader>
         <Boxes size={16} className="text-[var(--text-dim)]" />
-        <CardTitle>{app.name}</CardTitle>
+        <Link to={`/app-catalog/${app.id}`} className="hover:underline">
+          <CardTitle>{app.name}</CardTitle>
+        </Link>
         <Badge variant="info">{app.category}</Badge>
         <span className="text-xs text-[var(--text-dim)]">v{app.version}</span>
         <div className="ml-auto">
