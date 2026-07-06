@@ -67,9 +67,11 @@ live status dot and an auto-generated config form.
   [`examples/`](../examples/README.md) is a copy-as-template starting point.
   The examples README's grid (drives-inference vs subscribes;
   inference-events vs alerts) tells you which shape is closest to yours —
-  copy that folder and replace the predicate. That grid *is* the "two doors"
-  mental model of the platform: an app either drives inference or rides the
-  event bus.
+  copy that folder and replace the predicate. (Don't confuse that grid with
+  the platform's **"two doors"** — the two doors are the App Catalog and the
+  OpenNVR Agent, the two front doors through which one `Detector` class is
+  reached; see [`TWO_DOORS.md`](./TWO_DOORS.md). The grid is a different
+  axis: how an app *consumes* the pipeline.)
 - **Declare real tasks.** `requires_tasks` names the adapter task types your
   app depends on (`object_detection`, `multi_object_tracking`,
   `face_recognition`, `ocr`, `image_captioning`, …). These are the
@@ -146,13 +148,31 @@ Rules the validator enforces (details in step 4):
 
 - `id`, `name`, `summary`, `category`, `version`, `image`, `requires_tasks`,
   `docs_url`, and `install` (with a non-empty `compose` **and** `command`)
-  are all required.
-- `id` is unique and kebab-case.
+  are all required — **with the right YAML types** (quote your `version`: a
+  bare `1.0` parses as a float and is rejected).
+- `id` is unique, kebab-case, **and must exist as a service in
+  `docker-compose.apps.yml`** — your submission includes the service block
+  (plus its config-init companion; mirror `loitering-detection`) in the
+  same PR. Both install paths run `docker compose … up -d <id>` against
+  that overlay, so an entry without a service block is uninstallable for
+  everyone and the gate refuses it.
+- `install.command` is **exactly** the canonical
+  `docker compose -f docker-compose.yml -f docker-compose.apps.yml
+  --profile apps up -d <your-id>` — nothing free-form. The store renders
+  this with a Copy button, so it is operator-executed content.
+- `install.compose` must parse as YAML, may not use `privileged`,
+  `cap_add`, `security_opt`, `network_mode`, `pid`, `ipc`, `devices`, or
+  published `ports` (apps are internal-network + `expose` only), may not
+  mount the Docker socket or absolute host paths, and its service `image`
+  must match the entry's declared `image` (or the overlay's
+  `${<ID>_IMAGE:-opennvr/<id>:local-build}` pin slot).
 - `image` is a well-formed `ghcr.io/...` or `opennvr/...` ref;
   `image_digest`, if present, is `sha256:` + 64 hex chars.
-- **No secrets.** The compose block references `${VAR}` placeholders (e.g.
-  `${INTERNAL_API_KEY}`) from the operator's `.env` — never a literal
-  key/password/token.
+- `docs_url` is an `https://` URL (link your README on GitHub).
+- **No secrets.** The compose block *and* the command reference `${VAR}`
+  placeholders (e.g. `${INTERNAL_API_KEY}`) from the operator's `.env` —
+  never a literal key/password/token, in `KEY=value` **or** `KEY: value`
+  form.
 
 ## 4. Validate it
 
@@ -166,13 +186,17 @@ python3 scripts/validate_apps_index.py
 ```
 
 It prints one clear message per problem and exits non-zero on any hard
-failure — required-field gaps, a non-kebab or duplicate `id`, a malformed
-`image` / `image_digest`, a plaintext secret, or an empty install block. An
-**unknown `requires_tasks` name only warns** (free-text is allowed by the
-adapter contract), nudging you toward a canonical task name. The same
-validator runs in CI over the shipped index
-(`server/tests/test_validate_apps_index.py`), so a green local run is the
-signal your entry will pass review mechanically.
+failure — required-field/type gaps, a non-kebab or duplicate `id`, an id
+with no `docker-compose.apps.yml` service block, a non-canonical install
+command, a dangerous compose directive (privileged / socket / host mounts
+/ published ports), a snippet image diverging from the entry's, a
+malformed `image` / `image_digest`, a non-https `docs_url`, a plaintext
+secret, or an empty install block. An **unknown `requires_tasks` name only
+warns** (free-text is allowed by the adapter contract), nudging you toward
+a canonical name from `server/config/tasks.yml`. The same validator runs
+in CI over the shipped index (`server/tests/test_validate_apps_index.py`),
+so a green local run is the signal your entry will pass review
+mechanically.
 
 ## 5. Open the PR
 

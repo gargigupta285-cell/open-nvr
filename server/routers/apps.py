@@ -35,6 +35,7 @@ Routes (mounted under ``/api/v1``):
 """
 
 import ipaddress
+import logging
 import secrets
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -47,6 +48,7 @@ import yaml
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user, verify_token
@@ -61,6 +63,8 @@ from services.audit_service import write_audit_log
 require_apps_install = RequirePermission("apps.install")
 
 router = APIRouter(prefix="/apps", tags=["apps"])
+
+logger = logging.getLogger(__name__)
 
 # Seconds allowed for each proxied call to the app's /health and /state.
 STATUS_PROBE_TIMEOUT_S = 3.0
@@ -117,8 +121,27 @@ class IndexEntry(BaseModel):
 
 @lru_cache(maxsize=1)
 def _load_apps_index() -> list[IndexEntry]:
+    """Load the curated index, skipping invalid ENTRIES.
+
+    One malformed entry (a bad community merge that slipped past
+    scripts/validate_apps_index.py) must degrade to "that card is
+    missing + an error log" — not 500 the whole store page AND every
+    install endpoint. A missing/unparseable FILE still raises: that's a
+    broken deploy, not a broken entry."""
     raw = yaml.safe_load(APPS_INDEX_PATH.read_text()) or []
-    return [IndexEntry(**entry) for entry in raw]
+    entries: list[IndexEntry] = []
+    for item in raw:
+        try:
+            entries.append(IndexEntry(**item))
+        except Exception:
+            bad_id = item.get("id") if isinstance(item, dict) else None
+            logger.error(
+                "apps_index.yml: skipping invalid entry %r — run "
+                "scripts/validate_apps_index.py",
+                bad_id,
+                exc_info=True,
+            )
+    return entries
 
 
 # ── Config validation (pure, reusable by the SDK conformance kit) ──
@@ -855,24 +878,41 @@ def _write_intent(
     """Upsert the desired-state row for ``entry`` and reset it to
     ``pending`` so the reconciler re-evaluates. image/image_digest are
     always taken from the curated index entry, never from the request."""
+    def _apply(row: AppInstallIntent) -> AppInstallIntent:
+        row.image = entry.image
+        row.image_digest = entry.image_digest
+        row.desired = desired
+        row.status = "pending"
+        row.message = None
+        row.requested_by = actor
+        row.requested_at = datetime.now(UTC)
+        db.commit()
+        db.refresh(row)
+        return row
+
     row = (
         db.query(AppInstallIntent)
         .filter(AppInstallIntent.id == entry.id)
         .first()
     )
-    if row is None:
-        row = AppInstallIntent(id=entry.id)
-        db.add(row)
-    row.image = entry.image
-    row.image_digest = entry.image_digest
-    row.desired = desired
-    row.status = "pending"
-    row.message = None
-    row.requested_by = actor
-    row.requested_at = datetime.now(UTC)
-    db.commit()
-    db.refresh(row)
-    return row
+    if row is not None:
+        return _apply(row)
+    row = AppInstallIntent(id=entry.id)
+    db.add(row)
+    try:
+        return _apply(row)
+    except IntegrityError:
+        # Two concurrent FIRST-TIME requests both saw "no row" and both
+        # INSERTed; the PK rejects the loser. State is already correct
+        # (the winner wrote the same desired data) — recover by updating
+        # the winner's row instead of 500ing the losing click.
+        db.rollback()
+        row = (
+            db.query(AppInstallIntent)
+            .filter(AppInstallIntent.id == entry.id)
+            .one()
+        )
+        return _apply(row)
 
 
 @router.post("/index/{app_id}/install")
@@ -937,6 +977,18 @@ async def uninstall_app(
     row = _write_intent(
         db, entry, desired="absent", actor=current_user.username
     )
+
+    # Drop the registration row now (best-effort) so the catalog moves
+    # the card back to "Available to install" immediately instead of
+    # showing an immortal zombie "installed" card drifting to
+    # unreachable — nothing else ever deletes installed_apps rows on
+    # uninstall (the reconciler only stops the container). If the
+    # teardown fails and the app restarts, its boot-time re-register
+    # simply recreates the row.
+    reg = db.query(InstalledApp).filter(InstalledApp.id == app_id).first()
+    if reg is not None:
+        db.delete(reg)
+        db.commit()
 
     write_audit_log(
         db,

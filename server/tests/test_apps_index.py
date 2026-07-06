@@ -177,18 +177,15 @@ def _seed_installed(client, app_id: str, *, enabled: bool):
 
 # ─── apps_index.yml loads + validates against IndexEntry ────────────────
 
-# The ten seeded apps (camera-agent is deliberately excluded — apps only).
+# The installable apps — every listed entry MUST have a service block in
+# docker-compose.apps.yml (review finding: the original ten listed eight
+# apps with no service block, so 8/10 install attempts failed with "no
+# such service" on every path). The de-listed apps return as their
+# service blocks land; scripts/validate_apps_index.py now enforces the
+# cross-check so this can't drift again.
 _EXPECTED_IDS = {
     "loitering-detection",
     "occupancy-counting",
-    "line-crossing",
-    "abandoned-object",
-    "intrusion-detection",
-    "license-plate-recognition",
-    "smart-doorbell",
-    "package-delivery",
-    "footage-search",
-    "home-assistant-relay",
 }
 
 
@@ -207,7 +204,9 @@ def test_index_yaml_entries_are_well_formed():
     for e in _load_apps_index():
         assert e.name and e.summary and e.category and e.version
         assert e.image.startswith("ghcr.io/open-nvr/")
-        assert e.docs_url.startswith("examples/")
+        # https GitHub URLs — repo-relative paths 404ed in the SPA and
+        # were an unconstrained href sink (review M5).
+        assert e.docs_url.startswith("https://github.com/open-nvr/")
         assert e.install.compose.strip()
         assert e.install.command.strip().startswith("docker compose")
 

@@ -22,7 +22,7 @@
 // model is present before enabling. Config forms are generated from the
 // manifest param schema — no app-specific UI code.
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, Boxes, Check, Copy, Download, ExternalLink, RefreshCw, Settings2, Trash2 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
@@ -93,12 +93,19 @@ type CapabilitiesResp = { kai_c?: Record<string, any>; adapters?: Record<string,
 // lands "pending"; the reconciler later flips it to "applied" or "failed".
 type InstallStatusPhase = 'none' | 'pending' | 'applied' | 'failed'
 type InstallStatusResp = {
-  app_id: string
+  id: string // the app id (the server serializes `id`, not `app_id`)
   status: InstallStatusPhase
   message?: string
   image?: string
   image_digest?: string
 }
+
+// Stop polling after ~5 minutes of "pending": the reconciler is a
+// separately-deployed OPT-IN component, so an intent can legitimately sit
+// pending forever (installer container not running) — without a cap the UI
+// polls every 2s per app per tab indefinitely with the buttons stuck on
+// "Installing…". After the cap we stop and surface a hint instead.
+const INSTALL_POLL_MAX_MS = 5 * 60 * 1000
 
 // The install/uninstall endpoints are opt-in + RBAC gated: a 403 is a normal,
 // expected path (operator disabled one-click, or caller lacks apps.install) —
@@ -145,27 +152,43 @@ function useKaiCapabilities() {
 
 // Polls install-status while a reconcile is in flight. Enabled only after an
 // install/uninstall intent is accepted (`active`); refetches on an interval
-// while pending and stops once the reconciler reports applied/failed. On
-// applied it invalidates ['apps'] + ['apps-index'] so the app hops groups.
+// while pending and stops once the reconciler reports applied/failed — or
+// once the poll budget is spent (the installer may simply not be running).
+// On applied it invalidates ['apps'] + ['apps-index'] so the app hops groups.
 function useInstallStatusPoll(id: string, active: boolean) {
   const queryClient = useQueryClient()
-  return useQuery({
+  const startedAtRef = useRef<number | null>(null)
+  const [timedOut, setTimedOut] = useState(false)
+  useEffect(() => {
+    // Reset the budget each time a new intent starts polling.
+    startedAtRef.current = active ? Date.now() : null
+    setTimedOut(false)
+  }, [active, id])
+  const query = useQuery({
     queryKey: ['app-install-status', id],
     queryFn: async () => {
       const { data } = await apiService.getInstallStatus(id)
       return data as InstallStatusResp
     },
-    enabled: active,
+    enabled: active && !timedOut,
     retry: 0,
     refetchInterval: (query) => {
       const status = query.state.data?.status
       if (status === 'applied') {
         queryClient.invalidateQueries({ queryKey: ['apps'] })
         queryClient.invalidateQueries({ queryKey: ['apps-index'] })
+        return false
       }
-      return status === 'pending' ? 2000 : false
+      if (status !== 'pending') return false
+      const started = startedAtRef.current
+      if (started !== null && Date.now() - started > INSTALL_POLL_MAX_MS) {
+        setTimedOut(true)
+        return false
+      }
+      return 2000
     },
   })
+  return { ...query, timedOut }
 }
 
 function InstallStatusNote({ status }: { status: InstallStatusResp }) {
@@ -457,7 +480,11 @@ function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<s
     },
   })
 
-  const uninstallInFlight = uninstallMutation.isPending || uninstallStatus.data?.status === 'pending'
+  // timedOut releases the button (installer may not be running) — same
+  // anti-wedge as the install modal.
+  const uninstallInFlight =
+    uninstallMutation.isPending ||
+    (uninstallStatus.data?.status === 'pending' && !uninstallStatus.timedOut)
 
   const confirmUninstall = () => {
     if (window.confirm(`Uninstall ${app.name}? This asks the reconciler to remove the app from this host.`)) {
@@ -511,6 +538,12 @@ function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<s
 
         {uninstallNote && <div className="text-sm text-amber-400">{uninstallNote}</div>}
         {uninstallPollActive && uninstallStatus.data && <InstallStatusNote status={uninstallStatus.data} />}
+        {uninstallStatus.timedOut && (
+          <div className="text-xs text-amber-400">
+            Still pending after 5 minutes — the app-installer service may not be
+            running (see docs/APPS_INSTALL.md).
+          </div>
+        )}
       </CardContent>
     </Card>
   )
@@ -557,7 +590,10 @@ function InstallModal({ app, onClose }: { app: IndexApp; onClose: () => void }) 
   })
 
   const status = statusQuery.data?.status
-  const inFlight = installMutation.isPending || status === 'pending'
+  // timedOut releases the button: an intent can sit "pending" forever when
+  // the opt-in installer container isn't running — don't wedge the modal.
+  const inFlight =
+    installMutation.isPending || (status === 'pending' && !statusQuery.timedOut)
 
   const copy = async (label: string, text: string) => {
     try {
@@ -604,6 +640,13 @@ function InstallModal({ app, onClose }: { app: IndexApp; onClose: () => void }) 
           {forbidden && <div className="text-sm text-amber-400">{forbidden}</div>}
           {error && <div className="text-sm text-red-400">{error}</div>}
           {pollActive && statusQuery.data && <InstallStatusNote status={statusQuery.data} />}
+          {statusQuery.timedOut && (
+            <div className="text-sm text-amber-400">
+              Still pending after 5 minutes — the app-installer service may not be
+              running. Start it with the app-installer compose profile (see
+              docs/APPS_INSTALL.md), or use the command below.
+            </div>
+          )}
         </div>
 
         <div className="text-sm text-[var(--text-dim)]">

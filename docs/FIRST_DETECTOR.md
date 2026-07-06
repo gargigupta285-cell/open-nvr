@@ -11,11 +11,13 @@ method** — the rule.
 > No Docker needed for steps 1–3. A running OpenNVR stack (step 4) is
 > only needed to see it fire against live cameras.
 
-An OpenNVR app has two archetypes. This guide builds a **Detector**: it
+The SDK ships three archetypes. This guide builds a **Detector**: it
 *subscribes* to KAI-C's NATS inference stream and reacts to detections
 another app is already driving — so it pays **zero adapter GPU cost**.
-(The other archetype, `FrameApp`, *drives* inference itself; see
-[`examples/intrusion-detection`](../examples/intrusion-detection).)
+(`FrameApp` *drives* inference itself — see
+[`examples/intrusion-detection`](../examples/intrusion-detection) — and
+`AlertSubscriber` is the pass-through archetype that rides the alert bus,
+like [`examples/home-assistant-relay`](../examples/home-assistant-relay).)
 
 ---
 
@@ -24,7 +26,7 @@ another app is already driving — so it pays **zero adapter GPU cost**.
 From the repo root:
 
 ```bash
-python scripts/create_opennvr_app.py package-watch --task object_detection
+python3 scripts/create_opennvr_app.py package-watch --task object_detection
 ```
 
 `package-watch` is your app id (kebab-case; it becomes `AppManifest.id`
@@ -56,7 +58,8 @@ owns: the NATS subscribe/decode loop, per-message exception isolation,
 the `camera_id` + `result.detections` payload walk, `completed_at`
 timestamp parsing, alert dispatch, the CLI, and signal handling. What's
 left for you is one method, `on_detections`, in `package_watch.py`.
-Here's exactly what the generator wrote:
+Here's the heart of what the generator wrote (abridged — the file on
+disk carries fuller docstrings and type annotations):
 
 ```python
 def on_detections(self, camera_id, detections, event) -> list[Alert]:
@@ -183,12 +186,17 @@ An OpenNVR app you build on the SDK is load-bearing **two ways at once**:
 
 That's the platform bet: you write **one rule** on **one SDK**, and it
 shows up as a catalog card an operator installs *and* as a skill the
-agent can reach for. Write the predicate once; both doors open.
+agent can reach for. Write the predicate once; both doors open. The full
+story — including the capability-matching mechanism that decides when
+either door can actually open — is [`docs/TWO_DOORS.md`](TWO_DOORS.md).
 
 ---
 
 ## Related reading
 
+- [`docs/TWO_DOORS.md`](TWO_DOORS.md) — the two-doors model in full:
+  catalog card + conversational skill from one `Detector`, and the task
+  intersection behind both.
 - [`examples/README.md`](../examples/README.md) — the gallery, the
   drives-vs-subscribes axis grid, and how an example folder is structured.
 - [`docs/CONTRIBUTING_APPS.md`](CONTRIBUTING_APPS.md) — the App Store

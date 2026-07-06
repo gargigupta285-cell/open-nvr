@@ -14,6 +14,11 @@
 #
 # Or wire it into the repo-root docker-compose.apps.yml overlay (see
 # docs/CONTRIBUTING_APPS.md for the App Store install path).
+#
+# NOTE: the COPY paths below assume the app lives at examples/__APP_ID__/
+# inside the open-nvr repo (the generator's default --dest). If you
+# scaffolded OUT of tree, adjust the COPY sources and vendor or pip-install
+# opennvr-app-sdk yourself — this file won't build as-is from elsewhere.
 
 FROM python:3.11-slim AS runtime
 

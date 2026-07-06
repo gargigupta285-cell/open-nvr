@@ -464,7 +464,7 @@ The fastest path to a first-party example slot:
 1. Open a [discussion](https://github.com/open-nvr/open-nvr/discussions) with
    your idea, the camera setup you'll demo on, and the adapter(s) you'll
    chain.
-2. Scaffold a working app — `python scripts/create_opennvr_app.py my-app` —
+2. Scaffold a working app — `python3 scripts/create_opennvr_app.py my-app` —
    or fork and copy one of the thirteen shipped examples as your starting
    template. The generator gives you a runnable, test-green Detector to fill
    in; see **[docs/FIRST_DETECTOR.md](../docs/FIRST_DETECTOR.md)**.

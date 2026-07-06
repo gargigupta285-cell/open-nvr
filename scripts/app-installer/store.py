@@ -91,10 +91,22 @@ class SqlIntentStore:
             for r in rows
         ]
 
-    def set_status(self, intent_id: str, status: str, message: str) -> None:
+    def set_status(
+        self, intent_id: str, status: str, message: str, *, desired: str
+    ) -> None:
+        """Guarded status write: only applies while the row's ``desired``
+        still equals the value this sweep acted on. If the operator
+        flipped install→uninstall (or vice versa) mid-reconcile, the
+        server has already rewritten ``desired`` + reset ``status`` to
+        ``pending`` — this UPDATE then matches zero rows and the new
+        request survives untouched for the next sweep, instead of being
+        clobbered into a silently-lost ``applied``."""
         stmt = (
             update(app_install_intents)
-            .where(app_install_intents.c.id == intent_id)
+            .where(
+                app_install_intents.c.id == intent_id,
+                app_install_intents.c.desired == desired,
+            )
             .values(
                 status=status,
                 message=message,

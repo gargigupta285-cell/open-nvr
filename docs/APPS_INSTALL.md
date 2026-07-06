@@ -96,7 +96,9 @@ All three live under the `/apps` router (`/api/v1/apps/...`).
 | `POST /apps/index/{id}/uninstall`           | `APPS_INSTALL_ENABLED` **and** `apps.install`    |
 | `GET  /apps/index/{id}/install-status`      | authenticated user (read-only; any role)         |
 
-Every gate, in order:
+Every gate (both 403 paths; at runtime the RBAC dependency actually
+resolves first, so a caller lacking the permission gets its 403 even
+while the flag is off):
 
 1. **OPT-IN — `APPS_INSTALL_ENABLED`** (default **false**). When off, the
    two POST endpoints return `403 "one-click install disabled; use the
@@ -104,9 +106,11 @@ Every gate, in order:
    stays available. **Sovereign / air-gapped: leave this off.**
 2. **RBAC — `apps.install`.** Install/uninstall require this named
    permission (not just any authenticated user). It is seeded by
-   `scripts/init_db.py` and granted to no default role except admin — an
-   operator must explicitly grant it. Superusers bypass, matching the
-   rest of the RBAC surface.
+   `server/scripts/init_db.py` on fresh installs — and idempotently
+   re-ensured on every server startup, so upgraded deployments whose
+   permission table predates it get the row too — and granted to no
+   default role except admin; an operator must explicitly grant it.
+   Superusers bypass, matching the rest of the RBAC surface.
 3. **INDEX-ONLY.** The id must be present in `server/config/apps_index.yml`
    (404 otherwise). No arbitrary image or user-supplied field ever
    reaches the desired state — `image` and `image_digest` are copied
@@ -114,9 +118,22 @@ Every gate, in order:
 4. **AUDIT.** Every install/uninstall writes an audit row
    (`app.install.request` / `app.uninstall.request`) with the actor
    username, app id, image + digest, and desired action.
+5. **INSTALLER RE-VALIDATION (defense in depth).** The gates above live
+   in the web app — the very component the trust split assumes could be
+   compromised. So the reconciler does NOT trust intent rows: it bakes
+   its **own copy of the curated index** into its image and treats a row
+   purely as a *selector* — the `image`/`image_digest` that actually
+   deploy come from the installer's index, never from the row, a
+   divergent row is logged and ignored, and an id that isn't kebab-case
+   or isn't in the index is marked `failed` without ever touching
+   Docker. An attacker who can write arbitrary rows to
+   `app_install_intents` can therefore only start/stop apps the curated
+   index already vouches for.
 
 The install endpoint then upserts the intent (`desired="installed"`,
-`status="pending"`) and returns it. Uninstall flips `desired="absent"`.
+`status="pending"`) and returns it. Uninstall flips `desired="absent"`
+and also drops the app's registration row so the catalog card moves back
+to "Available to install" immediately.
 
 ---
 
@@ -191,30 +208,60 @@ deferred*), not the pinning mechanism, which is complete and tested.
 component.
 
 * `reconciler.py` — the pure reconcile core. `reconcile_intent(intent,
-  runner)` returns `(status, message)`; the docker/subprocess call is an
-  **injected `runner(argv, env)`** callable so unit tests pass a fake and
-  never touch real Docker. `reconcile_once(store, runner)` sweeps every
-  pending intent (skips `applied`), calling `docker compose up -d <id>`
-  for `installed` and `docker compose rm -s -f <id>` for `absent`. A
+  runner, index=…)` returns `(status, message)`; the docker/subprocess
+  call is an **injected `runner(argv, env)`** callable so unit tests pass
+  a fake and never touch real Docker. The `index` is the installer's own
+  baked copy of `apps_index.yml` (its **trust anchor** — see gate 5
+  above): install intents must select an id in it, and the image/digest
+  that deploy come from it, never from the DB row.
+  `reconcile_once(store, runner, index=…)` sweeps every pending intent
+  (skips `applied`, plus any id the caller's failure backoff is holding),
+  calling `docker compose up -d <id>` for `installed` and
+  `docker compose rm -s -f <id>` for `absent` (teardown needs only the
+  kebab-case id check, so a de-listed app stays uninstallable). A
   non-zero exit → `status="failed"` with stderr in `message`. For a
-  pinned `installed` intent the runner also receives the
-  `{<ID>_IMAGE: image@sha256:…}` override (see *Digest pinning*), which
+  pinned entry the runner also receives the `{<ID>_IMAGE:
+  image@sha256:…}` override (see *Digest pinning*), which
   `docker_runner` merges over `os.environ`.
 * `store.py` — the production `IntentStore`: SQLAlchemy Core over
   `app_install_intents`. Least privilege: it only needs SELECT on the
   row and UPDATE of `status`/`message`/`updated_at` (it never INSERTs —
-  only the web app does).
-* `main.py` — the thin poll loop wiring `SqlIntentStore` + the real
-  `docker_runner` into `reconcile_once`.
+  only the web app does). The status write is **compare-and-swapped on
+  the `desired` value the sweep acted on**, so an operator flipping
+  install→uninstall mid-reconcile is never clobbered into a silently
+  lost request — the guarded UPDATE matches nothing and the new request
+  is picked up next sweep.
+* `main.py` — the poll loop wiring `SqlIntentStore` + the real
+  `docker_runner` into `reconcile_once`. Loads the baked index at
+  startup and **refuses to start without it** (fail-closed). Applies
+  exponential failure backoff per app (10s doubling to a 15-minute cap)
+  so a permanently-failing intent doesn't churn Docker every poll tick.
 * `tests/test_reconciler.py` — unit tests with a fake runner + fake
-  store: pending→up→applied, failed run→failed+message, absent→down,
-  unpinned→warning, digest-pin shape, sweep semantics. No Docker.
+  store: the trust boundary (uncurated/non-kebab ids refused, DB-supplied
+  images ignored in favor of the index), pending→up→applied, failed
+  run→failed+message, absent→down (including for de-listed ids),
+  unpinned→warning, digest-pin shape, CAS write-back, backoff skip,
+  sweep semantics. No Docker.
 
 ### The single privileged mount
 
 `docker-compose.installer.yml` (profile `app-installer`) is the only
 place the Docker socket is mounted — into this one tiny service, nowhere
-else in the stack. Read-only is sufficient for `compose up/down`.
+else in the stack. Be honest about what the `:ro` on that mount buys:
+it makes the socket *inode* read-only, not the daemon API — full daemon
+control (host-root-equivalent power) is available over a read-only-
+mounted socket. The real containment is everything around the mount:
+opt-in, non-network-facing, a minimal single-purpose image, and the
+baked-index re-validation (gate 5) that caps what any attacker who
+reaches the intents table can make it do.
+
+The repo is mounted read-only **at the same path as on the host**
+(`${PWD}:${PWD}`) — load-bearing, not cosmetic: the reconciler runs
+`docker compose` inside the container, and compose resolves relative
+binds like `./examples/…:/template` on the client side while the HOST
+daemon performs the mount. Identical paths keep those binds pointing at
+real host files. (Bring the installer up from the repo root, as every
+command in this doc already does.)
 
 The installer container **runs as root** (its Dockerfile sets no `USER`).
 This is deliberate and required: the bind-mounted `/var/run/docker.sock`
@@ -249,6 +296,13 @@ To stop reconciling (this does **not** uninstall apps):
 docker compose -f docker-compose.yml -f docker-compose.installer.yml \
     --profile app-installer down
 ```
+
+**If an install sits "pending":** the reconciler probably isn't running —
+the endpoints being enabled (`APPS_INSTALL_ENABLED`) and the installer
+container running are two separate opt-ins. The App Catalog stops polling
+after ~5 minutes of pending and points here rather than showing
+"Installing…" forever; bring the installer up (step 3) and the intent is
+picked up on its next sweep.
 
 **Sovereign / air-gapped guidance:** leave `APPS_INSTALL_ENABLED` unset,
 do not run the installer overlay, and install apps with the copy-paste

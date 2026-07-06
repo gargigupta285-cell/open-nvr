@@ -12,11 +12,11 @@ directory.
 
 Usage::
 
-    python scripts/create_opennvr_app.py <app-id> [--task object_detection] [--dest examples/]
+    python3 scripts/create_opennvr_app.py <app-id> [--task object_detection] [--dest examples/]
 
 Example::
 
-    python scripts/create_opennvr_app.py package-watch --task object_detection
+    python3 scripts/create_opennvr_app.py package-watch --task object_detection
 
 Tokens substituted in every template file (and in file names):
 

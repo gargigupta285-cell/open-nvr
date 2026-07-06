@@ -370,3 +370,64 @@ def test_status_readable_without_install_permission(unprivileged_client):
         f"/apps/index/{REAL_APP_ID}/install-status"
     )
     assert resp.status_code == 200
+
+
+# ── review fixes: service-key boundary + zombie-card cleanup ───────────
+
+
+def test_internal_api_key_alone_cannot_install():
+    """The service-key boundary the router comment stakes out (review
+    finding: it was never asserted): X-Internal-Api-Key — the read
+    principal the OpenNVR Agent holds — must NEVER satisfy
+    install/uninstall. Those are user-JWT + apps.install only. Guards
+    against a future refactor swapping the dependency to
+    get_read_principal and silently passing the suite."""
+    app, session_factory, engine = _make_app()
+    # Deliberately NO get_current_active_user override — auth runs for
+    # real, and the only credential presented is the internal key.
+    with TestClient(app) as tc:
+        for verb in ("install", "uninstall"):
+            resp = tc.post(
+                f"/apps/index/{REAL_APP_ID}/{verb}",
+                headers={
+                    "X-Internal-Api-Key": os.environ["INTERNAL_API_KEY"]
+                },
+            )
+            assert resp.status_code in (401, 403), (verb, resp.status_code)
+    s = session_factory()
+    try:
+        assert s.query(AppInstallIntent).count() == 0  # nothing written
+    finally:
+        s.close()
+    engine.dispose()
+
+
+def test_uninstall_deletes_registration_row(admin_client):
+    """Zombie-card regression: uninstall must also drop the
+    installed_apps registration row, or the catalog shows an immortal
+    'installed' card drifting to unreachable — nothing else ever
+    deletes that row (the reconciler only stops the container)."""
+    from models import InstalledApp as _IA
+
+    s = admin_client.session_factory()
+    try:
+        s.add(_IA(
+            id=REAL_APP_ID, name="Loitering", version="1.0.0",
+            url="http://loitering:9200", manifest_json={}, config_json={},
+        ))
+        s.commit()
+    finally:
+        s.close()
+
+    resp = admin_client.post(f"/apps/index/{REAL_APP_ID}/uninstall")
+    assert resp.status_code == 200
+
+    s = admin_client.session_factory()
+    try:
+        assert s.query(_IA).filter(_IA.id == REAL_APP_ID).first() is None
+    finally:
+        s.close()
+    # The intent row still exists with desired=absent (the reconciler
+    # tears the container down from it).
+    rows = _intents(admin_client)
+    assert len(rows) == 1 and rows[0].desired == "absent"

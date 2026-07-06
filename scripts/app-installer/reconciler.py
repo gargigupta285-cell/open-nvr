@@ -25,14 +25,27 @@ up/down for each intent, then writes back the reconcile ``status``.
 Design (desired-state + reconciler):
 
 * Read every intent row (id, image, image_digest, desired, status).
+* **Re-validate every install intent against the installer's OWN baked
+  copy of the curated index** (``apps_index.yml``, shipped in this
+  image). The DB row only selects *which curated app*; the image and
+  digest that actually deploy come from the index, never from the row.
+  An id that isn't kebab-case or isn't in the index is marked
+  ``failed`` without touching Docker. This is the trust boundary the
+  socket-split exists for: a compromised web app can write any row it
+  likes, but it cannot make this component run an uncurated image.
 * For a ``desired="installed"`` row that isn't already applied → run
-  ``docker compose ... up -d <id>`` and, when a digest is present, pin
-  the image to ``image@sha256:...``; on success mark ``status="applied"``,
-  on non-zero exit mark ``status="failed"`` with the stderr in
-  ``message``.
+  ``docker compose ... up -d <id>`` and, when the INDEX carries a
+  digest, pin the image to ``image@sha256:...``; on success mark
+  ``status="applied"``, on non-zero exit mark ``status="failed"`` with
+  the stderr in ``message``.
 * For a ``desired="absent"`` row → run ``docker compose ... down`` /
   ``stop+rm`` for that service and mark ``status="applied"`` (removed).
-* An ``image_digest`` of ``None`` means UNPINNED — a loud warning is
+  Teardown only needs the kebab-case id check (an app de-listed from
+  the index must still be uninstallable).
+* Status write-back is compare-and-swapped on the ``desired`` value the
+  sweep acted on, so an operator flipping install→uninstall mid-run is
+  never clobbered into a silently-lost request.
+* An index entry without a digest means UNPINNED — a loud warning is
   logged and the run is documented as dev-only (do not run unpinned in
   production).
 
@@ -46,11 +59,20 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Protocol
 
 logger = logging.getLogger("opennvr.app-installer")
+
+# App ids are kebab-case by construction (the index validator enforces it
+# at submission time); the reconciler re-checks because intent rows can be
+# written by a compromised web app, bypassing every server-side gate. A
+# non-kebab id is refused before it ever reaches a docker argv (defense
+# against leading-dash flag injection like ``--remove-orphans``).
+_KEBAB_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 # The compose files the reconciler drives, in overlay order. The apps
 # overlay carries the per-app service blocks; the base file carries the
@@ -101,8 +123,66 @@ class IntentStore(Protocol):
     def list_intents(self) -> list[Intent]:
         ...
 
-    def set_status(self, intent_id: str, status: str, message: str) -> None:
+    def set_status(
+        self, intent_id: str, status: str, message: str, *, desired: str
+    ) -> None:
+        """Write status/message for one intent, guarded on ``desired``:
+        the UPDATE must only apply if the row's desired value still equals
+        the one this sweep acted on. If the operator flipped the desired
+        state mid-reconcile, the guarded write matches nothing and the row
+        stays ``pending`` for the next sweep — the new request is never
+        clobbered by a stale completion."""
         ...
+
+
+# ── Curated index (the installer's own trust anchor) ───────────────────
+
+
+@dataclass(frozen=True)
+class CuratedApp:
+    """The only fields of an index entry the installer acts on."""
+
+    id: str
+    image: str
+    image_digest: str | None
+
+
+def load_curated_index(path: str | Path) -> dict[str, CuratedApp]:
+    """Load the installer's baked copy of ``apps_index.yml``.
+
+    This is the reconciler's trust anchor: intents from the DB are only
+    ever *selectors into this dict* — the image/digest that deploy come
+    from here, never from the row. The file is baked into the installer
+    image at build time (same release, same bytes as the server's copy),
+    so a compromised web app — which by design can write arbitrary intent
+    rows — still cannot choose what actually runs.
+
+    Fail-closed: a missing or unparseable index raises, and ``main()``
+    refuses to start; entries without an ``id``/``image`` are skipped
+    with a logged error rather than half-trusted.
+    """
+    import yaml  # local import: the pure reconcile core stays stdlib-only
+
+    raw = yaml.safe_load(Path(path).read_text())
+    if not isinstance(raw, list):
+        raise ValueError(f"curated index {path}: expected a top-level list")
+    index: dict[str, CuratedApp] = {}
+    for entry in raw:
+        if not isinstance(entry, dict):
+            logger.error("curated index: skipping non-mapping entry %r", entry)
+            continue
+        app_id, image = entry.get("id"), entry.get("image")
+        if not isinstance(app_id, str) or not isinstance(image, str):
+            logger.error("curated index: skipping entry without id/image: %r",
+                         entry.get("id"))
+            continue
+        digest = entry.get("image_digest")
+        index[app_id] = CuratedApp(
+            id=app_id,
+            image=image,
+            image_digest=digest if isinstance(digest, str) else None,
+        )
+    return index
 
 
 # ── The real docker runner (production only; never imported by tests) ──
@@ -126,7 +206,10 @@ def docker_runner(
     run_env: dict[str, str] | None = None
     if env:
         run_env = {**os.environ, **env}
-    proc = subprocess.run(  # noqa: S603 — argv is built from curated index data
+    # noqa: S603 — argv is a fixed compose template plus an app id that
+    # reconcile_intent has already checked against the kebab-case grammar
+    # AND the installer's baked curated index; env values never enter argv.
+    proc = subprocess.run(  # noqa: S603
         argv,
         capture_output=True,
         text=True,
@@ -225,6 +308,7 @@ def reconcile_intent(
     intent: Intent,
     runner: Runner,
     *,
+    index: dict[str, CuratedApp],
     compose_files: tuple[str, ...] = DEFAULT_COMPOSE_FILES,
     profile: str = DEFAULT_PROFILE,
 ) -> tuple[str, str]:
@@ -232,8 +316,47 @@ def reconcile_intent(
 
     Pure except for the injected ``runner`` — no Docker, no DB. This is
     the function the unit tests drive with a fake runner.
+
+    Trust boundary: the intent row only *selects* a curated app. Before
+    anything touches Docker the id must be kebab-case (no argv flag
+    injection) and, for installs, present in the installer's own baked
+    ``index`` — and the image/digest that deploy are taken from that
+    index entry, with the row's copies ignored (logged when divergent).
+    A compromised web app can therefore write any row it likes and still
+    only ever start/stop apps the curated index vouches for.
     """
+    if not _KEBAB_RE.fullmatch(intent.id or ""):
+        return "failed", (
+            f"refused: app id {intent.id!r} is not kebab-case — not a "
+            "curated app id (see server/config/apps_index.yml)"
+        )
+
     if intent.desired == "installed":
+        curated = index.get(intent.id)
+        if curated is None:
+            return "failed", (
+                f"refused: app id {intent.id!r} is not in the installer's "
+                "curated index — the DB row cannot select an uncurated app"
+            )
+        if intent.image != curated.image or (
+            intent.image_digest or None
+        ) != (curated.image_digest or None):
+            logger.warning(
+                "intent %r carries image %r@%r but the curated index says "
+                "%r@%r — IGNORING the row's copy (only the index is "
+                "trusted). A divergent row usually means a stale intent "
+                "after an index update, or a tampered DB.",
+                intent.id, intent.image, intent.image_digest,
+                curated.image, curated.image_digest,
+            )
+        # Deploy WHAT THE INDEX SAYS, never what the row says.
+        intent = Intent(
+            id=intent.id,
+            image=curated.image,
+            image_digest=curated.image_digest,
+            desired=intent.desired,
+            status=intent.status,
+        )
         pin = pinned_image_ref(intent)
         # The env override is what actually pins the deploy: when a digest
         # is present ``_run_env`` yields ``{<ID>_IMAGE: image@sha256:…}``,
@@ -280,6 +403,8 @@ def reconcile_once(
     store: IntentStore,
     runner: Runner,
     *,
+    index: dict[str, CuratedApp],
+    skip_ids: frozenset[str] = frozenset(),
     compose_files: tuple[str, ...] = DEFAULT_COMPOSE_FILES,
     profile: str = DEFAULT_PROFILE,
 ) -> list[tuple[str, str, str]]:
@@ -287,16 +412,28 @@ def reconcile_once(
 
     Skips rows already in their terminal ``applied`` state for the
     current desired value (the server resets ``status`` to ``pending`` on
-    every new request, so a re-request is always re-applied). Returns a
-    list of ``(id, status, message)`` for logging/observability.
+    every new request, so a re-request is always re-applied), plus any id
+    in ``skip_ids`` — the caller's failure-backoff set, so a poison
+    intent that always fails doesn't get retried every poll tick.
+
+    The status write-back is guarded on the ``desired`` value this sweep
+    acted on (see ``IntentStore.set_status``): if the operator flipped
+    install→uninstall while compose was running, the guarded UPDATE
+    matches nothing, the row stays ``pending``, and the NEW desired state
+    is reconciled next sweep instead of being silently lost.
+
+    Returns a list of ``(id, status, message)`` for observability.
     """
     outcomes: list[tuple[str, str, str]] = []
     for intent in store.list_intents():
         if intent.status == "applied":
             continue  # nothing to do until the server flips it to pending
+        if intent.id in skip_ids:
+            continue  # failure backoff — the caller will retry later
         status_, message = reconcile_intent(
-            intent, runner, compose_files=compose_files, profile=profile
+            intent, runner,
+            index=index, compose_files=compose_files, profile=profile,
         )
-        store.set_status(intent.id, status_, message)
+        store.set_status(intent.id, status_, message, desired=intent.desired)
         outcomes.append((intent.id, status_, message))
     return outcomes

