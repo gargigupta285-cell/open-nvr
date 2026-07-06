@@ -185,12 +185,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { app: home-assistant-relay, module: home_assistant_relay }
-          - { app: intrusion-detection,  module: intrusion_detection }
-          - { app: loitering-detection,  module: loitering_detection }
-          - { app: occupancy-counting,   module: occupancy_counting }
-          - { app: package-delivery,     module: package_delivery }
-          - { app: smart-doorbell,       module: smart_doorbell }
+          - { app: abandoned-object,           module: abandoned_object }
+          - { app: footage-search,             module: footage_search }
+          - { app: home-assistant-relay,       module: home_assistant_relay }
+          - { app: intrusion-detection,        module: intrusion_detection }
+          - { app: license-plate-recognition,  module: license_plate_recognition }
+          - { app: line-crossing,              module: line_crossing }
+          - { app: loitering-detection,        module: loitering_detection }
+          - { app: occupancy-counting,         module: occupancy_counting }
+          - { app: package-delivery,           module: package_delivery }
+          - { app: smart-doorbell,             module: smart_doorbell }
     steps:
       - uses: actions/checkout@v4
 

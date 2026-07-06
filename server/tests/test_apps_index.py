@@ -178,14 +178,23 @@ def _seed_installed(client, app_id: str, *, enabled: bool):
 # ─── apps_index.yml loads + validates against IndexEntry ────────────────
 
 # The installable apps — every listed entry MUST have a service block in
-# docker-compose.apps.yml (review finding: the original ten listed eight
+# docker-compose.apps.yml (a review found the original ten listed eight
 # apps with no service block, so 8/10 install attempts failed with "no
-# such service" on every path). The de-listed apps return as their
-# service blocks land; scripts/validate_apps_index.py now enforces the
-# cross-check so this can't drift again.
+# such service" on every path; all eight were then restored WITH their
+# service blocks). scripts/validate_apps_index.py enforces the
+# cross-check so this can't drift again. camera-agent is deliberately
+# excluded — it's the conversational front door, not a catalog app.
 _EXPECTED_IDS = {
     "loitering-detection",
     "occupancy-counting",
+    "line-crossing",
+    "abandoned-object",
+    "intrusion-detection",
+    "license-plate-recognition",
+    "smart-doorbell",
+    "package-delivery",
+    "footage-search",
+    "home-assistant-relay",
 }
 
 

@@ -8,7 +8,12 @@
 #   docker run --rm \
 #     -v $(pwd)/examples/intrusion-detection/config.yml:/app/config.yml:ro \
 #     --network host \
-#     opennvr/example-intrusion-detection:1.0.0
+#     opennvr/example-intrusion-detection:1.0.0 \
+#     --config /app/config.yml
+#
+# Or use the repo-root docker-compose.apps.yml overlay, which builds
+# this image, generates the config from config.docker.yml, and wires
+# KAI-C + registry self-registration automatically.
 
 FROM python:3.11-slim AS runtime
 
@@ -21,9 +26,13 @@ WORKDIR /app
 # Minimal runtime deps — httpx for KAI-C calls and snapshot fetches,
 # PyYAML for the config file. No cv2/PIL — frames go through KAI-C
 # as base64 JSON without any local image processing in this example.
+# websockets backs ``kaic_transport: "ws"`` (lazy-imported at first
+# poll) — without it the shipped http default works but flipping the
+# template to ws crashes with ModuleNotFoundError.
 RUN pip install --no-cache-dir \
         "httpx>=0.27,<1.0" \
-        "PyYAML>=6.0,<7.0"
+        "PyYAML>=6.0,<7.0" \
+        "websockets>=13.0"
 
 # The OpenNVR App SDK — this app's modules import opennvr_app_sdk
 # (geometry/alerts/frame_sources) at top level, so it must be installed
@@ -36,7 +45,12 @@ COPY examples/intrusion-detection/intrusion_detection.py ./intrusion_detection.p
 COPY examples/intrusion-detection/zone.py                ./zone.py
 COPY examples/intrusion-detection/alerts.py              ./alerts.py
 COPY examples/intrusion-detection/frame_sources.py       ./frame_sources.py
+COPY examples/intrusion-detection/config.example.yml     ./config.example.yml
 
 ENV PYTHONPATH=/app
 
-ENTRYPOINT ["python", "intrusion_detection.py", "--config", "/app/config.yml"]
+# Config path rides CMD (not ENTRYPOINT) so docker-compose.apps.yml
+# can point ``command`` at the generated /app/config/config.yml —
+# same contract as the other example-app images.
+ENTRYPOINT ["python", "intrusion_detection.py"]
+CMD ["--config", "config.yml"]

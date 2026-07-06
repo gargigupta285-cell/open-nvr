@@ -1,0 +1,75 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# smart-doorbell config consumed by docker-compose.apps.yml.
+#
+# Variables of the form ${VAR} are substituted by the
+# smart-doorbell-config-init container at compose-up time (busybox
+# sed, same pattern as the camera-agent overlay). Only the variables
+# listed in the init container are replaced — everything else is left
+# untouched.
+#
+# DO NOT edit the substituted values directly. To change the secret,
+# update .env and re-run ``docker compose up`` so the init container
+# re-templates the file.
+
+# ── KAI-C endpoint ─────────────────────────────────────────────────
+# This is a FrameApp: it DRIVES inference by POSTing polled frames to
+# KAI-C's contract proxy. KAI-C runs inside the opennvr-core container
+# (bound 0.0.0.0:8100, EXPOSEd) — reachable on the compose network as
+# the service name, NOT localhost.
+kaic_url: "http://opennvr-core:8100"
+kaic_api_key: "${INTERNAL_API_KEY}"
+
+# InsightFace adapter name as registered with KAI-C. NOTE: the
+# standard stack ships only the yolov8 adapter — you must deploy an
+# InsightFace adapter and register it with KAI-C under this name
+# before this app can recognise anyone (see this app's README).
+recognition_adapter: "insightface"
+
+# Direct URL to the InsightFace adapter for the /faces/* CRUD routes
+# (used by the ``enroll`` / ``list-faces`` / ``delete-face``
+# subcommands only — the daemon never calls it). KAI-C does not proxy
+# these routes. EDIT to wherever your InsightFace adapter runs on the
+# compose network; never localhost.
+adapter_url: "http://insightface-adapter:9005"
+adapter_token: ""
+
+# ── Cameras — EDIT: frame_url must be a JPEG snapshot endpoint ──────
+# file:// http:// https:// are supported. Point frame_url at your
+# doorbell camera's snapshot URL on the LAN — never localhost (that
+# would resolve inside this container).
+cameras:
+  - camera_id: "front-door"
+    frame_url: "http://192.168.1.50/snapshot.jpg"
+
+# ── Polling / recognition tuning ───────────────────────────────────
+poll_interval_seconds: 1.0
+request_timeout_seconds: 30.0
+# Cosine-similarity threshold for declaring a face "recognised".
+recognition_threshold: 0.5
+# Don't refire the same (camera, person-or-unknown) alert within this
+# window. 0 fires on every read.
+dedup_window_seconds: 60.0
+# Unknown-face alerts carry a base64 JPEG snapshot (capped so the
+# post-base64 envelope stays under NATS's default 1 MB max_payload).
+attach_snapshot_for_unknowns: true
+snapshot_max_bytes: 716800
+
+# ── Alert delivery ─────────────────────────────────────────────────
+# Alerts always go to stdout (``docker compose logs smart-doorbell``).
+webhook_url: null
+# Fan alerts back onto the bus so the operator-UI alerts inbox and any
+# other subscriber pick them up without per-app webhooks.
+nats_alerts_url: "nats://nats:4222"
+nats_alerts_token: "${INTERNAL_API_KEY}"
+
+# ── App contract (spec §03) — powers the App Catalog ───────────────
+# The SDK serves /health /manifest /state on contract_port and
+# self-registers with the OpenNVR app registry on boot. The
+# registration token comes from the OPENNVR_INTERNAL_API_KEY
+# environment variable set by the overlay, so it is not templated here.
+contract_port: 9206
+contract_bind_host: "0.0.0.0"
+contract_host: "smart-doorbell"   # the compose service name
+opennvr_url: "http://opennvr-core:8000"

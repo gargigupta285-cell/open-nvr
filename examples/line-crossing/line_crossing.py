@@ -92,7 +92,7 @@ MANIFEST = AppManifest(
     ),
     # Needs per-object identity on top of detection — chain a tracking
     # adapter (e.g. bytetrack) so detections carry ``track_id``.
-    requires_tasks=["object_detection", "object_tracking"],
+    requires_tasks=["object_detection", "multi_object_tracking"],
     subscribes="opennvr.inference.>",
     params=[
         Param("watch_labels", list, default=["person"]),

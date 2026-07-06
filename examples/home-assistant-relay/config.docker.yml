@@ -1,0 +1,73 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# home-assistant-relay config consumed by docker-compose.apps.yml.
+#
+# Variables of the form ${VAR} are substituted by the
+# home-assistant-relay-config-init container at compose-up time
+# (busybox sed, same pattern as the camera-agent overlay). Only the
+# variables listed in the init container are replaced — everything
+# else is left untouched.
+#
+# This app has NO safe out-of-the-box Home Assistant defaults — your
+# HA/MQTT endpoint and credentials are yours. Set HA_MQTT_HOST (and,
+# for the rest backend, HA_URL + HA_TOKEN) in the operator .env and
+# re-run ``docker compose up`` so the init container re-templates the
+# file. Until then the relay still boots cleanly and counts alerts;
+# each forward attempt fails with a logged warning.
+
+# ── NATS endpoint (the §11.5 alert fan-out, compose service ``nats``) ─
+nats_url: "nats://nats:4222"
+# The standard stack runs NATS with ``--auth INTERNAL_API_KEY``.
+nats_token: "${INTERNAL_API_KEY}"
+
+subject_pattern: "opennvr.alerts.>"
+
+# ── Backend — how alerts are pushed into Home Assistant ────────────
+# mqtt (default): HA auto-discovers entities via MQTT discovery.
+#   Point HA_MQTT_HOST in .env at your broker (HA's Mosquitto add-on
+#   or any standalone broker). REQUIRED for forwarding to work —
+#   unset, it falls back to 127.0.0.1 (the relay container itself)
+#   and every publish fails with a logged warning until you set it.
+# rest: POSTs to HA's /api/states/<entity_id>; see the block below.
+backend: "mqtt"
+
+mqtt:
+  # Substituted from HA_MQTT_HOST in .env — SET IT (empty ⇒ 127.0.0.1).
+  host: "${HA_MQTT_HOST}"
+  port: 1883
+  # Broker auth — leave unset for anonymous; edit here if your broker
+  # requires credentials (they are yours, not stack secrets).
+  # username: opennvr
+  # password: REPLACE_ME
+  discovery_prefix: "homeassistant"
+  auto_off_seconds: 30
+  qos: 1
+  retain: true
+
+# ── REST backend (only read when backend: "rest") ──────────────────
+# HA base URL + long-lived access token (Settings → Profile →
+# Long-Lived Access Tokens). NEVER hardcode the token here — set
+# HA_URL and HA_TOKEN in the operator .env; the init container
+# substitutes them at up time.
+# rest:
+#   url: "${HA_URL}"
+#   token: "${HA_TOKEN}"
+#   timeout_seconds: 5.0
+#   auto_off_seconds: 30
+
+# ── Mapping overrides — EDIT to taste (see config.example.yml) ─────
+# mappings:
+#   - source: smart-doorbell
+#     entity_id: binary_sensor.front_doorbell
+#     device_class: occupancy
+
+# ── App contract (spec §03) — powers the App Catalog ───────────────
+# The SDK serves /health /manifest /state on contract_port and
+# self-registers with the OpenNVR app registry on boot. The
+# registration token comes from the OPENNVR_INTERNAL_API_KEY
+# environment variable set by the overlay, so it is not templated here.
+contract_port: 9209
+contract_bind_host: "0.0.0.0"
+contract_host: "home-assistant-relay"   # the compose service name
+opennvr_url: "http://opennvr-core:8000"
