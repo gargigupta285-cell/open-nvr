@@ -37,10 +37,13 @@ Routes (mounted under ``/api/v1``):
 import ipaddress
 import secrets
 from datetime import UTC, datetime
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+import yaml
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
@@ -55,6 +58,56 @@ router = APIRouter(prefix="/apps", tags=["apps"])
 
 # Seconds allowed for each proxied call to the app's /health and /state.
 STATUS_PROBE_TIMEOUT_S = 3.0
+
+
+# ── App Store index (the "discover" half of the catalog) ───────────
+#
+# GET /apps/index reads a curated, product-owned YAML of installable
+# apps (server/config/apps_index.yml) — the browse-and-install door,
+# distinct from the installed_apps registry that /apps lists. The
+# loader mirrors ai_models._load_use_case_map exactly: curated yaml →
+# lru_cache → validated pydantic. Cross-referencing against
+# installed_apps happens per request in the route, not in the cache.
+
+APPS_INDEX_PATH = Path(__file__).resolve().parent.parent / "config" / "apps_index.yml"
+
+
+class InstallSpec(BaseModel):
+    """The exact copy-paste an operator runs to install one app: a
+    docker-compose service block and the ``docker compose ... up``
+    command that brings it up. No secrets — compose references
+    ``${INTERNAL_API_KEY}`` from the operator's .env."""
+
+    compose: str
+    command: str
+
+
+class IndexEntry(BaseModel):
+    """One installable app in the store index — seeded from a shipped
+    example's AppManifest (id/name/summary/category/version/
+    requires_tasks/emits) plus store-only fields (image, docs_url,
+    install). ``build_context`` is present while app images aren't yet
+    published to GHCR (see apps_index.yml header) and is optional so it
+    can drop out once they are; it is intentionally NOT part of the
+    frontend response contract below."""
+
+    id: str
+    name: str
+    summary: str
+    category: str
+    version: str
+    image: str
+    requires_tasks: list[str] = []
+    emits: list[str] = []
+    docs_url: str
+    install: InstallSpec
+    build_context: str | None = None
+
+
+@lru_cache(maxsize=1)
+def _load_apps_index() -> list[IndexEntry]:
+    raw = yaml.safe_load(APPS_INDEX_PATH.read_text()) or []
+    return [IndexEntry(**entry) for entry in raw]
 
 
 # ── Config validation (pure, reusable by the SDK conformance kit) ──
@@ -342,6 +395,63 @@ async def list_apps(
     """
     rows = db.query(InstalledApp).order_by(InstalledApp.id).all()
     return [_serialize_app(row) for row in rows]
+
+
+@router.get("/index")
+async def get_apps_index(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """
+    The App Store "discover" listing — the browse-and-install catalog.
+
+    Loads the curated ``apps_index.yml`` (product-owned editorial, one
+    entry per shipped example) and cross-references the ``installed_apps``
+    registry so each entry carries ``installed`` (an installed_apps row
+    with that id exists) and ``enabled`` (that row's flag, or ``null``
+    when not installed). The UI shows "installed" vs "available to
+    install" from this alone.
+
+    Never 404s — an entry that isn't installed simply has
+    ``installed=false, enabled=null``. The index yaml ships with the
+    server, so a load/validation failure is a 500 (a broken deploy),
+    not an empty list.
+
+    Requires authenticated user.
+    """
+    try:
+        entries = _load_apps_index()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load apps index: {e!s}",
+        )
+
+    installed = {row.id: row for row in db.query(InstalledApp).all()}
+
+    apps: list[dict[str, Any]] = []
+    for entry in entries:
+        row = installed.get(entry.id)
+        apps.append(
+            {
+                "id": entry.id,
+                "name": entry.name,
+                "summary": entry.summary,
+                "category": entry.category,
+                "version": entry.version,
+                "image": entry.image,
+                "requires_tasks": entry.requires_tasks,
+                "emits": entry.emits,
+                "docs_url": entry.docs_url,
+                "install": {
+                    "compose": entry.install.compose,
+                    "command": entry.install.command,
+                },
+                "installed": row is not None,
+                "enabled": bool(row.enabled) if row is not None else None,
+            }
+        )
+    return {"apps": apps}
 
 
 @router.post("/register")

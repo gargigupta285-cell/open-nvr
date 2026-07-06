@@ -22,6 +22,7 @@ import { api } from '../lib/api'
 // boot; the catalog enables/disables them and pushes manifest-driven config.
 export const appsService = {
   getApps: () => api.get('/api/v1/apps'),
+  getAppIndex: () => api.get('/api/v1/apps/index'),
   enableApp: (id: string) => api.post(`/api/v1/apps/${id}/enable`),
   disableApp: (id: string) => api.post(`/api/v1/apps/${id}/disable`),
   updateAppConfig: (id: string, config: Record<string, any>) =>

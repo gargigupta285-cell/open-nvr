@@ -1,0 +1,335 @@
+# Copyright (c) 2026 OpenNVR
+# This file is part of OpenNVR.
+#
+# OpenNVR is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenNVR is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
+#
+# ─────────────────────────────────────────────────────────────────────
+# OpenNVR App Store — the curated "discover" index of installable apps.
+#
+# Product-owned and editorial by design (same shape as use_case_map.yml):
+# this is the browse-and-install catalog the App Catalog UI reads via
+# GET /api/v1/apps/index. Each entry is seeded from a shipped example
+# under examples/<id>/ — id / name / summary / category / version /
+# requires_tasks / emits mirror that app's AppManifest, docs_url points
+# at its README, and `install` is the exact copy-paste an operator runs.
+#
+# IMAGES ARE NOT PUBLISHED YET. Unlike the adapters and core (which pull
+# from ghcr.io/open-nvr/*), the detector apps ship only as a build
+# overlay today (docker-compose.apps.yml uses `build:` +
+# opennvr/<id>:local-build). The `image` field below records the
+# CANONICAL intended GHCR ref (ghcr.io/open-nvr/<id>:latest) for when
+# publishing lands; until then the `install.compose` snippet carries a
+# `build.context: .` + `build.dockerfile: examples/<id>/Dockerfile` so
+# the copy-paste actually works, and `build_context` names the source
+# folder explicitly.
+#
+# NO SECRETS in this file — the compose snippets reference
+# ${INTERNAL_API_KEY} from the operator's .env, never a literal.
+# ─────────────────────────────────────────────────────────────────────
+
+- id: loitering-detection
+  name: Loitering Detection
+  summary: Alerts when a watched object dwells in a zone beyond a threshold.
+  category: perimeter
+  version: 1.0.0
+  image: ghcr.io/open-nvr/loitering-detection:latest
+  build_context: examples/loitering-detection
+  requires_tasks: [object_detection]
+  emits: [loitering]
+  docs_url: examples/loitering-detection/README.md
+  install:
+    compose: |
+      services:
+        loitering-detection:
+          profiles: [apps]
+          build:
+            context: .
+            dockerfile: examples/loitering-detection/Dockerfile
+          image: ghcr.io/open-nvr/loitering-detection:latest
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - NATS_URL=nats://nats:4222
+            - OPENNVR_URL=http://opennvr-core:8000
+          expose:
+            - "9200"
+          networks:
+            - opennvr_internal
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d loitering-detection
+
+- id: occupancy-counting
+  name: Occupancy Counting
+  summary: Alerts on zone occupancy threshold crossings (over / under / cleared).
+  category: analytics
+  version: 1.0.0
+  image: ghcr.io/open-nvr/occupancy-counting:latest
+  build_context: examples/occupancy-counting
+  requires_tasks: [object_detection]
+  emits: [occupancy_over, occupancy_under, occupancy_cleared]
+  docs_url: examples/occupancy-counting/README.md
+  install:
+    compose: |
+      services:
+        occupancy-counting:
+          profiles: [apps]
+          build:
+            context: .
+            dockerfile: examples/occupancy-counting/Dockerfile
+          image: ghcr.io/open-nvr/occupancy-counting:latest
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - NATS_URL=nats://nats:4222
+            - OPENNVR_URL=http://opennvr-core:8000
+          expose:
+            - "9201"
+          networks:
+            - opennvr_internal
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d occupancy-counting
+
+- id: line-crossing
+  name: Line Crossing
+  summary: Alerts when a tracked object crosses an oriented tripwire in a counted direction.
+  category: perimeter
+  version: 1.0.0
+  image: ghcr.io/open-nvr/line-crossing:latest
+  build_context: examples/line-crossing
+  requires_tasks: [object_detection, object_tracking]
+  emits: [line-crossing]
+  docs_url: examples/line-crossing/README.md
+  install:
+    compose: |
+      services:
+        line-crossing:
+          profiles: [apps]
+          build:
+            context: .
+            dockerfile: examples/line-crossing/Dockerfile
+          image: ghcr.io/open-nvr/line-crossing:latest
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - NATS_URL=nats://nats:4222
+            - OPENNVR_URL=http://opennvr-core:8000
+          expose:
+            - "9202"
+          networks:
+            - opennvr_internal
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d line-crossing
+
+- id: abandoned-object
+  name: Abandoned Object
+  summary: Alerts when a watched object sits stationary in a zone past a dwell threshold with no person nearby.
+  category: perimeter
+  version: 1.0.0
+  image: ghcr.io/open-nvr/abandoned-object:latest
+  build_context: examples/abandoned-object
+  requires_tasks: [object_detection, object_tracking]
+  emits: [abandoned-object]
+  docs_url: examples/abandoned-object/README.md
+  install:
+    compose: |
+      services:
+        abandoned-object:
+          profiles: [apps]
+          build:
+            context: .
+            dockerfile: examples/abandoned-object/Dockerfile
+          image: ghcr.io/open-nvr/abandoned-object:latest
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - NATS_URL=nats://nats:4222
+            - OPENNVR_URL=http://opennvr-core:8000
+          expose:
+            - "9203"
+          networks:
+            - opennvr_internal
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d abandoned-object
+
+- id: intrusion-detection
+  name: Intrusion Detection
+  summary: Alerts when a watched object enters a restricted zone during restricted hours.
+  category: perimeter
+  version: 1.0.0
+  image: ghcr.io/open-nvr/intrusion-detection:latest
+  build_context: examples/intrusion-detection
+  requires_tasks: [object_detection]
+  emits: [intrusion]
+  docs_url: examples/intrusion-detection/README.md
+  install:
+    compose: |
+      services:
+        intrusion-detection:
+          profiles: [apps]
+          build:
+            context: .
+            dockerfile: examples/intrusion-detection/Dockerfile
+          image: ghcr.io/open-nvr/intrusion-detection:latest
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - OPENNVR_URL=http://opennvr-core:8000
+          expose:
+            - "9204"
+          networks:
+            - opennvr_internal
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d intrusion-detection
+
+- id: license-plate-recognition
+  name: License Plate Recognition
+  summary: Reads license plates via a YOLOv8 to crop to fast-plate-ocr chain and routes severity through allow/deny watchlists.
+  category: vehicle
+  version: 1.0.0
+  image: ghcr.io/open-nvr/license-plate-recognition:latest
+  build_context: examples/license-plate-recognition
+  requires_tasks: [object_detection, ocr]
+  emits: [plate_read, plate_expected, plate_watchlist]
+  docs_url: examples/license-plate-recognition/README.md
+  install:
+    compose: |
+      services:
+        license-plate-recognition:
+          profiles: [apps]
+          build:
+            context: .
+            dockerfile: examples/license-plate-recognition/Dockerfile
+          image: ghcr.io/open-nvr/license-plate-recognition:latest
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - OPENNVR_URL=http://opennvr-core:8000
+          expose:
+            - "9205"
+          networks:
+            - opennvr_internal
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d license-plate-recognition
+
+- id: smart-doorbell
+  name: Smart Doorbell
+  summary: Recognises faces at the door via InsightFace through KAI-C; known visitors ride low-severity, strangers high with a snapshot.
+  category: doorstep
+  version: 1.0.0
+  image: ghcr.io/open-nvr/smart-doorbell:latest
+  build_context: examples/smart-doorbell
+  requires_tasks: [face_recognition]
+  emits: [known_visitor, unknown_visitor]
+  docs_url: examples/smart-doorbell/README.md
+  install:
+    compose: |
+      services:
+        smart-doorbell:
+          profiles: [apps]
+          build:
+            context: .
+            dockerfile: examples/smart-doorbell/Dockerfile
+          image: ghcr.io/open-nvr/smart-doorbell:latest
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - OPENNVR_URL=http://opennvr-core:8000
+          expose:
+            - "9206"
+          networks:
+            - opennvr_internal
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d smart-doorbell
+
+- id: package-delivery
+  name: Package Delivery
+  summary: Watches a porch ROI for package arrivals, lingering boxes, and pick-ups with an owner-vs-stranger severity heuristic.
+  category: doorstep
+  version: 1.0.0
+  image: ghcr.io/open-nvr/package-delivery:latest
+  build_context: examples/package-delivery
+  requires_tasks: [object_detection]
+  emits: [package_arrived, package_lingering, package_picked_up, package_taken]
+  docs_url: examples/package-delivery/README.md
+  install:
+    compose: |
+      services:
+        package-delivery:
+          profiles: [apps]
+          build:
+            context: .
+            dockerfile: examples/package-delivery/Dockerfile
+          image: ghcr.io/open-nvr/package-delivery:latest
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - OPENNVR_URL=http://opennvr-core:8000
+          expose:
+            - "9207"
+          networks:
+            - opennvr_internal
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d package-delivery
+
+- id: footage-search
+  name: Footage Search
+  summary: Indexes inference events (labels + captions) into SQLite and answers natural-language footage queries like 'red truck at the dock yesterday'.
+  category: forensics
+  version: 1.0.0
+  image: ghcr.io/open-nvr/footage-search:latest
+  build_context: examples/footage-search
+  requires_tasks: []
+  emits: []
+  docs_url: examples/footage-search/README.md
+  install:
+    compose: |
+      services:
+        footage-search:
+          profiles: [apps]
+          build:
+            context: .
+            dockerfile: examples/footage-search/Dockerfile
+          image: ghcr.io/open-nvr/footage-search:latest
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - NATS_URL=nats://nats:4222
+            - OPENNVR_URL=http://opennvr-core:8000
+          expose:
+            - "9208"
+          networks:
+            - opennvr_internal
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d footage-search
+
+- id: home-assistant-relay
+  name: Home Assistant Relay
+  summary: Bridges the opennvr.alerts.* fan-out into Home Assistant entities via MQTT discovery or the HA REST API, with auto-off windows so sensors read like an event log.
+  category: integration
+  version: 1.0.0
+  image: ghcr.io/open-nvr/home-assistant-relay:latest
+  build_context: examples/home-assistant-relay
+  requires_tasks: []
+  emits: []
+  docs_url: examples/home-assistant-relay/README.md
+  install:
+    compose: |
+      services:
+        home-assistant-relay:
+          profiles: [apps]
+          build:
+            context: .
+            dockerfile: examples/home-assistant-relay/Dockerfile
+          image: ghcr.io/open-nvr/home-assistant-relay:latest
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - NATS_URL=nats://nats:4222
+            - OPENNVR_URL=http://opennvr-core:8000
+          expose:
+            - "9209"
+          networks:
+            - opennvr_internal
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d home-assistant-relay

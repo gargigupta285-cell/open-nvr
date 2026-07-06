@@ -24,7 +24,7 @@
 
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, Boxes, RefreshCw, Settings2 } from 'lucide-react'
+import { Activity, Boxes, Check, Copy, Download, ExternalLink, RefreshCw, Settings2 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
 import { Modal } from '../components/Modal'
@@ -70,6 +70,23 @@ type AppStatusResp = {
   state?: any
 }
 
+// An entry from GET /api/v1/apps/index — the store listing. Entries with
+// installed=true are already registered and surface under "Installed" instead.
+type IndexApp = {
+  id: string
+  name: string
+  summary?: string
+  category: string
+  version: string
+  image?: string
+  requires_tasks?: string[]
+  emits?: string[]
+  docs_url?: string
+  install?: { compose?: string; command?: string }
+  installed: boolean
+  enabled: boolean | null
+}
+
 type CapabilitiesResp = { kai_c?: Record<string, any>; adapters?: Record<string, Record<string, any>> }
 
 function useApps() {
@@ -78,6 +95,20 @@ function useApps() {
     queryFn: async () => {
       const { data } = await apiService.getApps()
       return (Array.isArray(data) ? data : []) as RegisteredApp[]
+    },
+    retry: 0,
+  })
+}
+
+// The index is best-effort: if the endpoint 404s or errors, the Installed group
+// still renders. retry:0 keeps a missing endpoint from thrashing.
+function useAppIndex() {
+  return useQuery({
+    queryKey: ['apps-index'],
+    queryFn: async () => {
+      const { data } = await apiService.getAppIndex()
+      const apps = (data as { apps?: unknown })?.apps
+      return (Array.isArray(apps) ? apps : []) as IndexApp[]
     },
     retry: 0,
   })
@@ -380,55 +411,247 @@ function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<s
   )
 }
 
+/* -------------------------- Install modal ------------------------ */
+
+// Deliberate safe first cut: we only DISPLAY the install command/compose — no
+// POST, no auto-spawn. The operator runs it on their host and the app then
+// self-registers, appearing under Installed.
+function InstallModal({ app, onClose }: { app: IndexApp; onClose: () => void }) {
+  const { showSuccess, showError } = useSnackbar()
+  const [copied, setCopied] = useState<string | null>(null)
+
+  const copy = async (label: string, text: string) => {
+    try {
+      // navigator.clipboard is unavailable in non-secure (plain-HTTP) or
+      // sandboxed contexts — fall back to execCommand so an operator on a
+      // LAN http:// deployment can still copy the install command.
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text)
+      } else {
+        const ta = document.createElement('textarea')
+        ta.value = text
+        ta.style.position = 'fixed'
+        ta.style.opacity = '0'
+        document.body.appendChild(ta)
+        ta.select()
+        const ok = document.execCommand('copy')
+        document.body.removeChild(ta)
+        if (!ok) throw new Error('copy command rejected')
+      }
+      setCopied(label)
+      showSuccess('Copied to clipboard')
+      window.setTimeout(() => setCopied((c) => (c === label ? null : c)), 1500)
+    } catch {
+      showError('Copy failed — select the text and copy manually')
+    }
+  }
+
+  const command = app.install?.command?.trim()
+  const compose = app.install?.compose?.trim()
+
+  return (
+    <Modal open title={`Install ${app.name}`} onClose={onClose} widthClassName="w-[640px]">
+      <div className="space-y-4">
+        <div className="text-sm text-[var(--text-dim)]">
+          Run this on your OpenNVR host, then the app self-registers and appears under Installed.
+        </div>
+
+        {command && (
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs font-medium text-[var(--text-dim)]">Command</span>
+              <Button variant="ghost" className="text-xs px-2 py-1" onClick={() => copy('command', command)}>
+                {copied === 'command' ? <Check size={12} /> : <Copy size={12} />} Copy
+              </Button>
+            </div>
+            <pre className="w-full overflow-x-auto rounded border border-[var(--border)] bg-[var(--bg-2)] p-3 text-xs text-[var(--text)] font-mono whitespace-pre-wrap">
+              {command}
+            </pre>
+          </div>
+        )}
+
+        {compose && (
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs font-medium text-[var(--text-dim)]">docker-compose.yml</span>
+              <Button variant="ghost" className="text-xs px-2 py-1" onClick={() => copy('compose', compose)}>
+                {copied === 'compose' ? <Check size={12} /> : <Copy size={12} />} Copy
+              </Button>
+            </div>
+            <pre className="w-full max-h-72 overflow-auto rounded border border-[var(--border)] bg-[var(--bg-2)] p-3 text-xs text-[var(--text)] font-mono">
+              {compose}
+            </pre>
+          </div>
+        )}
+
+        {!command && !compose && (
+          <div className="text-sm text-[var(--text-dim)]">This entry provides no install instructions.</div>
+        )}
+      </div>
+
+      <div className="mt-4 flex justify-end">
+        <Button variant="primary" onClick={onClose}>Done</Button>
+      </div>
+    </Modal>
+  )
+}
+
+/* ------------------------ Available app card --------------------- */
+
+function AvailableAppCard({ app, tasks, onInstall }: { app: IndexApp; tasks: Set<string>; onInstall: () => void }) {
+  const requires = asStringList(app.requires_tasks)
+  const missing = requires.filter((t) => !tasks.has(t))
+
+  return (
+    <Card>
+      <CardHeader>
+        <Boxes size={16} className="text-[var(--text-dim)]" />
+        <CardTitle>{app.name}</CardTitle>
+        <Badge variant="info">{app.category}</Badge>
+        <span className="text-xs text-[var(--text-dim)]">v{app.version}</span>
+      </CardHeader>
+      <CardContent className="space-y-3 text-sm">
+        <div className="text-[var(--text-dim)]">{app.summary || 'No summary provided.'}</div>
+
+        {requires.length > 0 && (
+          <div>
+            {missing.length === 0 ? (
+              <Badge variant="success">● requires {requires.join(' + ')} — available</Badge>
+            ) : (
+              <Badge variant="warning">requires {missing.join(' + ')} — not installed</Badge>
+            )}
+          </div>
+        )}
+
+        <div className="flex items-center gap-2 pt-1">
+          <Button variant="primary" onClick={onInstall}>
+            <Download size={14} /> Install
+          </Button>
+          {app.docs_url && (
+            <a
+              href={app.docs_url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 text-sm text-[var(--text-dim)] hover:text-[var(--text)]"
+            >
+              <ExternalLink size={14} /> Docs
+            </a>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
 /* ----------------------------- View ------------------------------ */
+
+function SkeletonGrid({ count = 3 }: { count?: number }) {
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
+      {Array.from({ length: count }).map((_, i) => (
+        <Skeleton key={i} className="h-44" />
+      ))}
+    </div>
+  )
+}
+
+function GroupHeader({ title, count }: { title: string; count?: number }) {
+  return (
+    <h3 className="text-sm font-semibold text-[var(--text)] tracking-wide">
+      {title}
+      {typeof count === 'number' && count > 0 && (
+        <span className="ml-2 text-xs font-normal text-[var(--text-dim)]">{count}</span>
+      )}
+    </h3>
+  )
+}
 
 export function AppCatalog() {
   const appsQuery = useApps()
+  const indexQuery = useAppIndex()
   const capsQuery = useKaiCapabilities()
   const [configApp, setConfigApp] = useState<RegisteredApp | null>(null)
+  const [installApp, setInstallApp] = useState<IndexApp | null>(null)
 
   const tasks = useMemo(() => availableTasks(capsQuery.data), [capsQuery.data])
   const apps = appsQuery.data ?? []
 
+  // Available = index entries not yet installed. Entries with installed=true are
+  // already registered and render in the Installed group (deduped by id there).
+  const available = useMemo(
+    () => (indexQuery.data ?? []).filter((a) => !a.installed),
+    [indexQuery.data]
+  )
+
+  const refresh = () => {
+    appsQuery.refetch()
+    indexQuery.refetch()
+  }
+
   return (
-    <section className="space-y-4">
+    <section className="space-y-6">
       <PageHeader
-        title="App Catalog"
-        description="Detector apps built on the OpenNVR App SDK. Enable, configure, and monitor them here — each card checks its required AI tasks against the adapters registered with KAI-C."
+        title="App Store"
+        description="Detector apps built on the OpenNVR App SDK. Enable, configure, and monitor installed apps, or browse the index for more to install — each card checks its required AI tasks against the adapters registered with KAI-C."
         actions={
-          <Button onClick={() => appsQuery.refetch()} disabled={appsQuery.isPending}>
-            <RefreshCw size={14} className={appsQuery.isFetching ? 'animate-spin' : ''} /> Refresh
+          <Button onClick={refresh} disabled={appsQuery.isPending || indexQuery.isFetching}>
+            <RefreshCw size={14} className={appsQuery.isFetching || indexQuery.isFetching ? 'animate-spin' : ''} /> Refresh
           </Button>
         }
       />
 
-      {appsQuery.isPending ? (
-        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <Skeleton key={i} className="h-44" />
-          ))}
-        </div>
-      ) : appsQuery.isError ? (
-        <ErrorCard
-          title="App registry unavailable"
-          message={extractApiError(appsQuery.error, 'Could not load the app registry.')}
-          onRetry={() => appsQuery.refetch()}
-        />
-      ) : apps.length === 0 ? (
-        <EmptyState
-          icon={<Boxes size={28} />}
-          title="No apps registered"
-          description="Apps self-register on boot; see sdk/opennvr-app-sdk to build and run one."
-        />
-      ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
-          {apps.map((app) => (
-            <AppCard key={app.id} app={app} tasks={tasks} onConfigure={() => setConfigApp(app)} />
-          ))}
+      {/* --------------------------- Installed --------------------------- */}
+      <div className="space-y-3">
+        <GroupHeader title="Installed" count={apps.length} />
+        {appsQuery.isPending ? (
+          <SkeletonGrid count={6} />
+        ) : appsQuery.isError ? (
+          <ErrorCard
+            title="App registry unavailable"
+            message={extractApiError(appsQuery.error, 'Could not load the app registry.')}
+            onRetry={() => appsQuery.refetch()}
+          />
+        ) : apps.length === 0 ? (
+          <EmptyState
+            icon={<Boxes size={28} />}
+            title="No apps installed yet"
+            description="Apps self-register on boot; install one from the index below or see sdk/opennvr-app-sdk to build your own."
+          />
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
+            {apps.map((app) => (
+              <AppCard key={app.id} app={app} tasks={tasks} onConfigure={() => setConfigApp(app)} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ---------------------- Available to install --------------------- */}
+      {/* Best-effort: if the index endpoint errors, we simply omit this group
+          rather than blanking the page above. */}
+      {!indexQuery.isError && (
+        <div className="space-y-3">
+          <GroupHeader title="Available to install" count={available.length} />
+          {indexQuery.isPending ? (
+            <SkeletonGrid count={3} />
+          ) : available.length === 0 ? (
+            <EmptyState
+              icon={<Boxes size={28} />}
+              title="No additional apps available"
+              description="Every app in the index is already installed."
+            />
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
+              {available.map((app) => (
+                <AvailableAppCard key={app.id} app={app} tasks={tasks} onInstall={() => setInstallApp(app)} />
+              ))}
+            </div>
+          )}
         </div>
       )}
 
       {configApp && <AppConfigModal key={configApp.id} app={configApp} onClose={() => setConfigApp(null)} />}
+      {installApp && <InstallModal key={installApp.id} app={installApp} onClose={() => setInstallApp(null)} />}
     </section>
   )
 }
