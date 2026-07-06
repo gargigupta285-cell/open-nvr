@@ -466,3 +466,14 @@ The fastest path to a first-party example slot:
 
 Examples are first-class community contribution surface. If yours gets in,
 your name goes on it.
+
+### Getting it into the App Store
+
+An example is a template; the **App Store index** makes an app browsable and
+one-click installable in every deployment's App Catalog. That's a separate,
+documented, validated PR flow — build on the App SDK, publish + digest-pin
+your image, add one reviewed entry to
+[`server/config/apps_index.yml`](../server/config/apps_index.yml), and run
+`make validate-apps-index`. Full walkthrough (and the trust model behind the
+curated index) in
+**[docs/CONTRIBUTING_APPS.md](../docs/CONTRIBUTING_APPS.md)**.

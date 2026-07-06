@@ -166,6 +166,12 @@ warning above fires. Teardown (`desired="absent"`) passes no override —
 > should install only apps whose curated index entry carries an
 > `image_digest`.
 
+> **Submitting an app?** The curated index is populated by a reviewed,
+> validated, PR-based flow — publish + digest-pin your image, add one entry
+> to `apps_index.yml`, run `make validate-apps-index`, open a PR. That
+> pinned digest is exactly what makes one-click install of *your* app
+> trustworthy. See **[docs/CONTRIBUTING_APPS.md](CONTRIBUTING_APPS.md)**.
+
 ### Current state (be honest)
 
 Pinning is fully **wired and takes effect** the moment the curated index

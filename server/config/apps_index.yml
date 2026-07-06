@@ -36,6 +36,11 @@
 #
 # NO SECRETS in this file — the compose snippets reference
 # ${INTERNAL_API_KEY} from the operator's .env, never a literal.
+#
+# ADDING YOUR APP? This is a curated, reviewed index. Append ONE entry
+# (copy docs/apps-index-entry.template.yml), run `make validate-apps-index`,
+# and open a PR. Full submission flow + trust model:
+# docs/CONTRIBUTING_APPS.md.
 # ─────────────────────────────────────────────────────────────────────
 
 - id: loitering-detection
