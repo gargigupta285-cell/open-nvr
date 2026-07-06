@@ -61,8 +61,11 @@ live status dot and an auto-generated config form.
   [`sdk/opennvr-app-sdk/`](../sdk/opennvr-app-sdk/). Every app ships an
   [`AppManifest`](../sdk/opennvr-app-sdk/opennvr_app_sdk/manifest.py) — its
   declarative identity: `id`, `name`, `version`, `category`, `summary`,
-  `requires_tasks`, `params`, `emits`. **The index entry mirrors this
-  manifest** (see step 3), so decide these here first.
+  `requires_tasks`, `params`, `emits` — plus the optional surfaces that
+  make it a full citizen (agent skill, live config, state views, action
+  forms): see [**APP_SURFACES.md**](./APP_SURFACES.md). **The index
+  entry mirrors this manifest** (see step 3), so decide these here
+  first.
 - **Start from a shipped example.** Everything under
   [`examples/`](../examples/README.md) is a copy-as-template starting point.
   The examples README's grid (drives-inference vs subscribes;
@@ -78,9 +81,12 @@ live status dot and an auto-generated config form.
   free-text task names from the adapter contract —
   [`docs/AI_ADAPTER_CONTRACT.md` §4 (`tasks_advertised`)](AI_ADAPTER_CONTRACT.md).
   The vocabulary is deliberately open, but **prefer a canonical name** from
-  [`server/config/use_case_map.yml`](../server/config/use_case_map.yml) when
-  one fits — the catalog greys out an app whose tasks no installed adapter
-  advertises, so a task nobody provides makes your app un-runnable.
+  [`server/config/tasks.yml`](../server/config/tasks.yml) (the canonical
+  task registry; `use_case_map.yml` supplements it) when one fits — the
+  catalog greys out an app whose tasks no installed adapter advertises,
+  so a task nobody provides makes your app un-runnable, and non-canonical
+  spellings (`ocr`, `object_tracking`) won't match adapters advertising
+  the canonical ones.
 
 ## 2. Publish your image and get its digest
 
@@ -120,12 +126,12 @@ fill every field. Here it is inline for reference:
   name: My App                     # human title on the catalog card
   summary: Alerts when <the thing your app watches for> happens.
   category: perimeter              # perimeter | analytics | vehicle | doorstep | forensics | integration
-  version: 1.0.0                   # matches AppManifest.version (semver)
+  version: "1.0.0"                 # matches AppManifest.version — QUOTE IT (a bare 1.0 is a YAML float; rejected)
   image: ghcr.io/<you>/my-app:latest       # well-formed ref: ghcr.io/... or opennvr/...
   image_digest: sha256:3f8c...e91          # from step 2 — pins the exact bytes (supply-chain integrity)
   requires_tasks: [object_detection]       # mirrors AppManifest.requires_tasks; prefer canonical names
   emits: [my_alert]                        # mirrors AppManifest.emits
-  docs_url: examples/my-app/README.md      # your app's README
+  docs_url: https://github.com/<you>/<repo>/blob/main/README.md   # https:// URL (repo-relative paths are rejected)
   install:
     compose: |                     # the exact copy-paste an operator runs; secrets via ${VAR} ONLY
       services:

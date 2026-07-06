@@ -265,7 +265,9 @@ doors.
 
 ---
 
-*See also:* [`AI_ADAPTER_CONTRACT.md`](./AI_ADAPTER_CONTRACT.md) §4
+*See also:* [`APP_SURFACES.md`](./APP_SURFACES.md) (every declared
+surface an app gets — skill, live config, state views, actions) ·
+[`AI_ADAPTER_CONTRACT.md`](./AI_ADAPTER_CONTRACT.md) §4
 (`tasks_advertised`) and §8 (permissions vs tasks) ·
 [App SDK spec](./design/app-sdk-spec.html) §07 (the convergence) ·
 [`examples/camera-agent/AGENT_DESIGN.md`](../examples/camera-agent/AGENT_DESIGN.md)

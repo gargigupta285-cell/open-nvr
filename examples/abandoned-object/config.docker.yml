@@ -67,3 +67,12 @@ cameras:
 # environment variables set by the overlay are therefore inert for this
 # app today; the overlay still sets them so the app picks them up the
 # moment contract support lands here.
+
+# ── App contract (spec §03) — serves /health /manifest /state on
+# :9203; self-registers with the app registry so the catalog shows a
+# live status dot and the OpenNVR Agent's app door lists this app as a
+# conversational skill. The registration/config-poll token rides the
+# OPENNVR_INTERNAL_API_KEY env var the overlay sets.
+contract_port: 9203
+contract_host: "abandoned-object"
+opennvr_url: "http://opennvr-core:8000"

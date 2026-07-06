@@ -19,7 +19,7 @@
   category: perimeter              # REQUIRED. Grouping in the catalog, e.g.
                                    #   perimeter | analytics | vehicle | doorstep |
                                    #   forensics | integration. Reuse an existing one.
-  version: 1.0.0                   # REQUIRED. Matches your AppManifest.version (semver).
+  version: "1.0.0"                 # REQUIRED. Matches AppManifest.version. QUOTE IT — a bare 1.0 parses as a YAML float and the validator rejects it.
 
   image: ghcr.io/<you>/my-app:latest   # REQUIRED. Well-formed ref — ghcr.io/... or
                                        #   opennvr/... . This is the canonical pull ref
@@ -37,7 +37,7 @@
                                        #   image_captioning, ...). Must match AppManifest.
   emits: [my_alert]                # OPTIONAL. Alert names your app publishes; mirrors
                                    #   AppManifest.emits. Drives catalog documentation.
-  docs_url: examples/my-app/README.md  # REQUIRED. Path (or URL) to your app's README.
+  docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/my-app/README.md  # REQUIRED. https:// URL to your README (repo-relative paths 404 in the UI).
 
   # build_context is index-only and optional. Set it while your image is a
   # local build overlay (no published digest yet); drop it once you publish.

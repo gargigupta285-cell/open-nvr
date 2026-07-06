@@ -194,6 +194,9 @@ either door can actually open — is [`docs/TWO_DOORS.md`](TWO_DOORS.md).
 
 ## Related reading
 
+- [`docs/APP_SURFACES.md`](APP_SURFACES.md) — **the next step after this
+  guide**: make your app a full citizen — agent skill, live config,
+  state views, and action forms, all declared, no frontend.
 - [`docs/TWO_DOORS.md`](TWO_DOORS.md) — the two-doors model in full:
   catalog card + conversational skill from one `Detector`, and the task
   intersection behind both.

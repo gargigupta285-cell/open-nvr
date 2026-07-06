@@ -163,9 +163,8 @@ services:
 
   # ──────────────────────────────────────────────────────────────
   # Line crossing — tripwire alerts when a tracked object crosses
-  # an oriented line in a counted direction. Port :9202 reserved
-  # (no contract surface yet — the app's config has no contract_port
-  # key, so no /health server runs and it does not self-register).
+  # an oriented line in a counted direction. Contract surface on
+  # :9202 (health/state + registration → catalog dot + agent skill).
   # ──────────────────────────────────────────────────────────────
   line-crossing-config-init:
     profiles: [apps]
@@ -208,12 +207,11 @@ services:
       opennvr-core:
         condition: service_healthy
     environment:
-      # Inert for this app today (its AppConfig has no contract fields) —
-      # kept so contract support lands without an overlay change.
+      # The SDK's registration/config-poll token rides this env var.
       - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - NATS_URL=nats://nats:4222
       - OPENNVR_URL=http://opennvr-core:8000
-    # Reserved contract port (:9202) — nothing listens yet.
+    # Contract surface (/health /manifest /state) — internal-only.
     expose:
       - "9202"
     volumes:
@@ -226,8 +224,8 @@ services:
 
   # ──────────────────────────────────────────────────────────────
   # Abandoned object — unattended-item alerts when a watched object
-  # sits stationary in a zone with no person nearby. Port :9203
-  # reserved (no contract surface yet — same note as line-crossing).
+  # sits stationary in a zone with no person nearby. Contract surface
+  # on :9203 (health/state + registration → catalog dot + agent skill).
   # ──────────────────────────────────────────────────────────────
   abandoned-object-config-init:
     profiles: [apps]
@@ -267,12 +265,11 @@ services:
       opennvr-core:
         condition: service_healthy
     environment:
-      # Inert today (no contract fields in this app's config) — kept so
-      # contract support lands without an overlay change.
+      # The SDK's registration/config-poll token rides this env var.
       - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - NATS_URL=nats://nats:4222
       - OPENNVR_URL=http://opennvr-core:8000
-    # Reserved contract port (:9203) — nothing listens yet.
+    # Contract surface (/health /manifest /state) — internal-only.
     expose:
       - "9203"
     volumes:
