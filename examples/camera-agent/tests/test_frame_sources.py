@@ -48,6 +48,29 @@ def test_scrub_creds_removes_userinfo_anywhere():
 # ── the leak regression: ffmpeg stderr must be scrubbed ───────────────
 
 
+def test_rtsp_grab_requests_a_keyframe(monkeypatch):
+    """Regression: long-GOP H.265 cameras (CPplus) returned a grey wash
+    because ffmpeg handed back the first *decodable* frame, which mid-GOP is
+    a reference-less P/B-frame. The grab must ask for a keyframe via
+    `-skip_frame nokey`, and it must be an INPUT option (before `-i`) so it
+    applies to the decoder, not the (nonexistent) output encoder."""
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd, capture_output=True, timeout=None):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=b"\xff\xd8jpeg", stderr=b"")
+
+    monkeypatch.setattr(fs.subprocess, "run", fake_run)
+    src = fs.RtspFrameSource(camera_id="cam1", url="rtsp://h:554/cam-1", timeout_seconds=1)
+    assert src.fetch() == b"\xff\xd8jpeg"
+
+    cmd = captured["cmd"]
+    assert "-skip_frame" in cmd
+    assert cmd[cmd.index("-skip_frame") + 1] == "nokey"
+    # must come before -i (input/decoder option), else it's a no-op
+    assert cmd.index("-skip_frame") < cmd.index("-i")
+
+
 def test_rtsp_error_message_does_not_leak_credentials(monkeypatch):
     url = "rtsp://admin:hunter2@10.0.0.9:554/Streaming/Channels/101"
 
