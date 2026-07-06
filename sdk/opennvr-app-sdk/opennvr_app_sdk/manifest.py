@@ -74,6 +74,38 @@ class AlertType:
 
 
 @dataclass
+class StateView:
+    """One declarative view over the app's ``GET /state`` payload.
+
+    The catalog renders these with ZERO app-specific UI code — the same
+    bet as ``params`` → config form. An app that exposes richer live
+    state (occupancy per zone, plates deduped, tracks active) declares
+    how to show it instead of shipping a frontend:
+
+    ``kind="metric"``
+        A single scalar at ``path`` rendered as a stat chip
+        (e.g. ``path="denylist_size"`` → "Denylist · 4").
+    ``kind="table"``
+        A list at ``path``; ``columns`` names the keys to show when the
+        rows are dicts. A list of scalars renders as one column.
+
+    ``path`` is a dot-path into the ``/state`` dict (``"zones"``,
+    ``"counters.in"``). A missing path renders as an em-dash, never an
+    error — ``/state`` is live data and may not have filled in yet.
+    """
+
+    name: str
+    label: str
+    kind: str = "metric"  # "metric" | "table"
+    path: str = ""
+    columns: list[str] = field(default_factory=list)
+    description: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class AppManifest:
     """The static identity + schema of one app.
 
@@ -92,6 +124,10 @@ class AppManifest:
     subscribes: str | None = None
     params: list[Param] = field(default_factory=list)
     emits: list[AlertType] = field(default_factory=list)
+    # Declarative live-state views (optional) — how the catalog renders
+    # this app's GET /state payload. Empty ⇒ the catalog shows raw
+    # state JSON as before.
+    state_schema: list[StateView] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """The ``GET /manifest`` payload (and the ``manifest_json``
@@ -106,4 +142,5 @@ class AppManifest:
             "subscribes": self.subscribes,
             "params": [p.to_dict() for p in self.params],
             "emits": [a.to_dict() for a in self.emits],
+            "state_schema": [v.to_dict() for v in self.state_schema],
         }

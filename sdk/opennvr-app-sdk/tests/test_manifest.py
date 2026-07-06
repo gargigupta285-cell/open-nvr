@@ -71,3 +71,26 @@ def test_to_dict_is_json_serializable():
 
 def test_alert_type_default_severity_is_medium():
     assert AlertType("thing").severity == "medium"
+
+
+def test_state_view_serializes_and_defaults_empty():
+    from opennvr_app_sdk import AppManifest, StateView
+
+    # Absent → empty list on the wire (older catalogs just ignore it).
+    bare = AppManifest(id="x", name="X", version="1", category="test")
+    assert bare.to_dict()["state_schema"] == []
+
+    m = AppManifest(
+        id="x", name="X", version="1", category="test",
+        state_schema=[
+            StateView(name="n", label="N", kind="metric", path="a.b"),
+            StateView(name="t", label="T", kind="table", path="rows",
+                      columns=["id", "count"], description="d"),
+        ],
+    )
+    wire = m.to_dict()["state_schema"]
+    assert wire[0] == {
+        "name": "n", "label": "N", "kind": "metric", "path": "a.b",
+        "columns": [], "description": "",
+    }
+    assert wire[1]["columns"] == ["id", "count"]

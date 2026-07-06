@@ -50,6 +50,16 @@ type AppManifest = {
   subscribes?: string[]
   params?: ManifestParam[]
   emits?: { name: string; severity?: string; description?: string }[]
+  // Declarative live-state views (SDK StateView.to_dict()) — rendered
+  // generically by LiveStateViews below; absent for older manifests.
+  state_schema?: {
+    name: string
+    label: string
+    kind: 'metric' | 'table'
+    path?: string
+    columns?: string[]
+    description?: string
+  }[]
 }
 
 type RegisteredApp = {
@@ -434,6 +444,126 @@ function AppStatusChip({ appId }: { appId: string }) {
   )
 }
 
+/* ----------------------- Declarative state views ------------------ */
+
+// Manifest-declared views over GET /state (SDK StateView) — the same
+// zero-app-specific-UI bet as params → config form. Rendered from the
+// SAME react-query cache entry the status chip fills, so the live state
+// appears when the operator clicks "Check" and refreshes with it.
+type StateViewSpec = {
+  name: string
+  label: string
+  kind: 'metric' | 'table'
+  path?: string
+  columns?: string[]
+  description?: string
+}
+
+function getStatePath(obj: any, path?: string): any {
+  if (!path) return obj
+  return path.split('.').reduce((acc: any, key: string) => (acc == null ? undefined : acc[key]), obj)
+}
+
+function MetricView({ view, value }: { view: StateViewSpec; value: any }) {
+  let display: string
+  if (value == null) display = '—'
+  else if (Array.isArray(value)) display = String(value.length)
+  else if (typeof value === 'object') display = String(Object.keys(value).length)
+  else display = String(value)
+  return (
+    <div
+      className="rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-xs"
+      title={view.description || view.name}
+    >
+      <span className="text-[var(--text-dim)]">{view.label}</span>{' '}
+      <span className="font-semibold">{display}</span>
+    </div>
+  )
+}
+
+function TableView({ view, value }: { view: StateViewSpec; value: any }) {
+  // Accept a list of dicts, a list of scalars, or a dict-of-dicts
+  // (rendered with the key as a leading "id" column) — /state shapes
+  // vary and the renderer must never crash on live data.
+  let rows: Record<string, any>[] = []
+  if (Array.isArray(value)) {
+    rows = value.map((v) => (v != null && typeof v === 'object' ? v : { value: v }))
+  } else if (value != null && typeof value === 'object') {
+    rows = Object.entries(value).map(([k, v]) => ({
+      id: k,
+      ...(v != null && typeof v === 'object' ? (v as Record<string, any>) : { value: v }),
+    }))
+  }
+  if (rows.length === 0) return null
+  const columns =
+    view.columns && view.columns.length > 0
+      ? view.columns.filter((c) => rows.some((r) => c in r))
+      : Array.from(new Set(rows.flatMap((r) => Object.keys(r)))).slice(0, 6)
+  if (columns.length === 0) return null
+  return (
+    <div className="overflow-x-auto" title={view.description || view.name}>
+      <div className="text-xs text-[var(--text-dim)] mb-1">{view.label}</div>
+      <table className="w-full text-xs border-collapse">
+        <thead>
+          <tr>
+            {columns.map((c) => (
+              <th key={c} className="text-left px-2 py-1 border-b border-[var(--border)] text-[var(--text-dim)] font-normal">
+                {c}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.slice(0, 25).map((row, i) => (
+            <tr key={i}>
+              {columns.map((c) => (
+                <td key={c} className="px-2 py-1 border-b border-[var(--border)]">
+                  {row[c] == null ? '—' : typeof row[c] === 'object' ? JSON.stringify(row[c]) : String(row[c])}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {rows.length > 25 && (
+        <div className="text-xs text-[var(--text-dim)] mt-1">…and {rows.length - 25} more</div>
+      )}
+    </div>
+  )
+}
+
+function LiveStateViews({ appId, views }: { appId: string; views: StateViewSpec[] }) {
+  // Same key as AppStatusChip; enabled:false — this component only
+  // OBSERVES the cache the chip's "Check" fills (no extra fan-out).
+  const statusQuery = useQuery({
+    queryKey: ['app-status', appId],
+    queryFn: async () => {
+      const { data } = await apiService.getAppStatus(appId)
+      return data as AppStatusResp
+    },
+    enabled: false,
+    retry: 0,
+  })
+  const state = statusQuery.data?.state
+  if (state == null) return null
+  const metrics = views.filter((v) => v.kind === 'metric')
+  const tables = views.filter((v) => v.kind === 'table')
+  return (
+    <div className="space-y-2 pt-1">
+      {metrics.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {metrics.map((v) => (
+            <MetricView key={v.name} view={v} value={getStatePath(state, v.path)} />
+          ))}
+        </div>
+      )}
+      {tables.map((v) => (
+        <TableView key={v.name} view={v} value={getStatePath(state, v.path)} />
+      ))}
+    </div>
+  )
+}
+
 /* ---------------------------- App card --------------------------- */
 
 function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<string>; onConfigure: () => void }) {
@@ -514,6 +644,10 @@ function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<s
               <Badge variant="warning">requires {missing.join(' + ')} — not installed</Badge>
             )}
           </div>
+        )}
+
+        {Array.isArray(app.manifest?.state_schema) && app.manifest.state_schema.length > 0 && (
+          <LiveStateViews appId={app.id} views={app.manifest.state_schema as StateViewSpec[]} />
         )}
 
         <div className="flex items-center gap-2 pt-1">

@@ -60,7 +60,7 @@ from alerts import (
     build_dispatcher,
 )
 from frame_sources import FrameSource, FrameSourceError, build_frame_source
-from opennvr_app_sdk import AlertType, AppManifest, FrameApp, Param
+from opennvr_app_sdk import AlertType, AppManifest, FrameApp, Param, StateView
 from opennvr_app_sdk.frame_sources import DictFrameSource
 from plate_pipeline import (
     PlatePipeline,
@@ -110,6 +110,18 @@ MANIFEST = AppManifest(
                   description="Info-severity read for unlisted plates."),
         AlertType("plate_expected", severity="low"),
         AlertType("plate_watchlist", severity="high"),
+    ],
+    # Declarative live-state views over state_snapshot (GET /state) —
+    # rendered generically by the catalog. Sizes update live as the
+    # registry watchlists apply through on_config_update.
+    state_schema=[
+        StateView(name="allowlist_size", label="Allowlist",
+                  kind="metric", path="allowlist_size"),
+        StateView(name="denylist_size", label="Denylist",
+                  kind="metric", path="denylist_size"),
+        StateView(name="deduped", label="Plates deduped",
+                  kind="metric", path="deduped_plates_tracked",
+                  description="Distinct (camera, plate) pairs in the dedup window."),
     ],
 )
 
