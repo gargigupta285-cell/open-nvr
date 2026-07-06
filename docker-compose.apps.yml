@@ -531,9 +531,9 @@ services:
 
   # ──────────────────────────────────────────────────────────────
   # Footage search — indexes inference events (labels + captions)
-  # into SQLite; natural-language search via ``docker compose exec``.
-  # No contract surface (the app's config has no contract_port key);
-  # :9208 is its reserved catalog port.
+  # into SQLite; natural-language search from the App Catalog (the
+  # manifest-declared "search" action) or ``docker compose exec``.
+  # Contract surface on :9208 (health/state/actions + registration).
   # ──────────────────────────────────────────────────────────────
   footage-search-config-init:
     profiles: [apps]

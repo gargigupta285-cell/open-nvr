@@ -123,6 +123,44 @@ class _ContractRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(200, body)
 
+    def do_POST(self) -> None:  # noqa: N802 — http.server API
+        """``POST /actions/{name}`` — the only POST surface. Routed to
+        the action dispatcher the mixin installs; declared-but-unknown
+        names are the dispatcher's KeyError → 404, bad params its
+        ValueError → 400, anything else a 500. The server itself never
+        interprets action semantics."""
+        path = self.path.split("?", 1)[0].rstrip("/")
+        action = getattr(self.server, "action", None)
+        if action is None or not path.startswith("/actions/"):
+            self._send_json(404, {"error": f"unknown path {path!r}"})
+            return
+        name = path[len("/actions/"):]
+        if not name or "/" in name:
+            self._send_json(404, {"error": f"unknown action path {path!r}"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if length else b"{}"
+            params = json.loads(raw.decode("utf-8") or "{}")
+            if not isinstance(params, dict):
+                raise ValueError("action body must be a JSON object")
+        except ValueError as exc:
+            self._send_json(400, {"error": f"bad action body: {exc}"})
+            return
+        try:
+            result = action(name, params)
+        except KeyError:
+            self._send_json(404, {"error": f"unknown action {name!r}"})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except Exception:
+            logger.exception("action %s failed", name)
+            self._send_json(500, {"error": "internal error"})
+            return
+        self._send_json(200, result if result is not None else {})
+
     def _send_json(self, status: int, body: Any) -> None:
         payload = json.dumps(body).encode("utf-8")
         self.send_response(status)
@@ -140,6 +178,8 @@ class _ContractRequestHandler(BaseHTTPRequestHandler):
 class _ContractHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     routes: dict[str, Callable[[], Any]]
+    # Optional POST /actions/{name} dispatcher: (name, params) -> result.
+    action: "Callable[[str, dict[str, Any]], Any] | None"
 
 
 class ContractServer:
@@ -157,12 +197,14 @@ class ContractServer:
         health: Callable[[], dict[str, Any]],
         manifest: Callable[[], dict[str, Any]],
         state: Callable[[], dict[str, Any]],
+        action: "Callable[[str, dict[str, Any]], Any] | None" = None,
         host: str = "0.0.0.0",
         port: int = 0,
     ) -> None:
         self._host = host
         self._requested_port = int(port)
         self._routes = {"/health": health, "/manifest": manifest, "/state": state}
+        self._action = action
         self._server: _ContractHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -180,6 +222,7 @@ class ContractServer:
             (self._host, self._requested_port), _ContractRequestHandler
         )
         server.routes = self._routes
+        server.action = self._action
         self._server = server
         self._thread = threading.Thread(
             target=server.serve_forever,
@@ -267,6 +310,32 @@ class ContractMixin:
         apps (mid-migration) rather than a 500."""
         return self.manifest.to_dict() if self.manifest is not None else {}
 
+    def on_action(self, name: str, params: dict[str, Any]) -> Any:
+        """Override to implement the verbs the manifest ``actions``
+        declare (search footage, enroll a face, …). Called from the
+        contract server's thread with the operator's params — the
+        server-side proxy has already checked the caller is a user
+        (JWT, never the service key) and validated params against the
+        declared ``Action.params``.
+
+        Raise ``KeyError(name)`` for names you don't handle (→ 404) and
+        ``ValueError`` for bad params (→ 400). Return a JSON-serializable
+        result; a list-of-dicts under ``"results"`` renders as a table
+        in the catalog."""
+        raise KeyError(name)
+
+    def _dispatch_action(self, name: str, params: dict[str, Any]) -> Any:
+        """Gate + dispatch: only manifest-DECLARED actions reach
+        on_action — an undeclared name 404s even if a handler would
+        have matched, so the manifest stays the single source of truth
+        for what operators can invoke."""
+        declared = {
+            a.name for a in getattr(self.manifest, "actions", None) or ()
+        }
+        if name not in declared:
+            raise KeyError(name)
+        return self.on_action(name, dict(params))
+
     # ── Lifecycle ──────────────────────────────────────────────────
 
     def start_contract_server(self) -> ContractServer | None:
@@ -283,6 +352,7 @@ class ContractMixin:
             health=self.health_snapshot,
             manifest=self.manifest_snapshot,
             state=self.state_snapshot,
+            action=self._dispatch_action,
             host=bind_host,
             port=int(port),
         )

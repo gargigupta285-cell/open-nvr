@@ -13,11 +13,13 @@ import httpx
 import pytest
 
 from opennvr_app_sdk import (
+    Action,
     Alert,
     AlertDispatcher,
     AppManifest,
     Detector,
     FrameApp,
+    Param,
 )
 from opennvr_app_sdk import contract as contract_mod
 
@@ -515,3 +517,102 @@ def test_default_hook_logs_restart_needed_once(monkeypatch, caplog):
         det._config_poll_once(url, headers)
     restarts = [r for r in caplog.records if "restart" in r.message]
     assert len(restarts) == 1  # warned once, not per change
+
+
+# ── POST /actions/{name} (manifest-declared operator verbs) ────────
+
+
+ACTION_MANIFEST = AppManifest(
+    id="action-echo",
+    name="Action Echo",
+    version="1.0.0",
+    category="test",
+    actions=[
+        Action("greet", "Greet", params=[Param("who", str, required=True)]),
+        Action("boom", "Boom"),
+    ],
+)
+
+
+class _ActionDetector(_EchoDetector):
+    manifest = ACTION_MANIFEST
+
+    def on_action(self, name, params):
+        if name == "greet":
+            who = str(params.get("who") or "").strip()
+            if not who:
+                raise ValueError("'who' must be non-empty")
+            return {"results": [{"greeting": f"hello {who}"}]}
+        if name == "boom":
+            raise RuntimeError("kaboom")
+        raise KeyError(name)
+
+
+def _action_detector():
+    det = _ActionDetector(_cfg(), AlertDispatcher([_RecorderChannel()]))
+    server = det.start_contract_server()
+    assert server is not None
+    return det, server.port
+
+
+def _post(port: int, path: str, body) -> httpx.Response:
+    return httpx.post(
+        f"http://127.0.0.1:{port}{path}", json=body, timeout=2.0, trust_env=False
+    )
+
+
+def test_action_dispatches_and_returns_result():
+    det, port = _action_detector()
+    try:
+        resp = _post(port, "/actions/greet", {"who": "ops"})
+        assert resp.status_code == 200
+        assert resp.json() == {"results": [{"greeting": "hello ops"}]}
+    finally:
+        det.stop_contract_server()
+
+
+def test_undeclared_action_is_404_even_with_a_handler():
+    """The manifest is the single source of truth: _dispatch_action
+    refuses names the manifest doesn't declare, even though the
+    subclass's on_action would happily raise KeyError anyway — and more
+    importantly, even if it WOULD have handled the name."""
+    det, port = _action_detector()
+    try:
+        resp = _post(port, "/actions/not-declared", {})
+        assert resp.status_code == 404
+    finally:
+        det.stop_contract_server()
+
+
+def test_action_value_error_is_400_and_crash_is_500():
+    det, port = _action_detector()
+    try:
+        bad = _post(port, "/actions/greet", {"who": "  "})
+        assert bad.status_code == 400
+        assert "non-empty" in bad.json()["error"]
+        crash = _post(port, "/actions/boom", {})
+        assert crash.status_code == 500
+        assert crash.json() == {"error": "internal error"}
+    finally:
+        det.stop_contract_server()
+
+
+def test_action_body_must_be_json_object():
+    det, port = _action_detector()
+    try:
+        resp = _post(port, "/actions/greet", ["not", "an", "object"])
+        assert resp.status_code == 400
+    finally:
+        det.stop_contract_server()
+
+
+def test_actionless_manifest_has_no_post_surface():
+    """The original echo detector declares no actions — every POST 404s
+    (the dispatcher's declared-set is empty)."""
+    det = _detector()
+    server = det.start_contract_server()
+    try:
+        resp = _post(server.port, "/actions/greet", {"who": "x"})
+        assert resp.status_code == 404
+    finally:
+        det.stop_contract_server()

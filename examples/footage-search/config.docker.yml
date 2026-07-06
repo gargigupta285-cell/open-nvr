@@ -50,3 +50,12 @@ ollama:
   enabled: false
   url: "http://ollama:11434"
   model: "llama3.2"
+
+# ── App contract (spec §03) — serves /health /manifest /state and the
+# POST /actions search surface on :9208; self-registers with the app
+# registry so the catalog shows a live status dot, state views, and
+# the "Search footage" action form. The registration/config-poll token
+# rides the OPENNVR_INTERNAL_API_KEY env var the overlay sets.
+contract_port: 9208
+contract_host: "footage-search"
+opennvr_url: "http://opennvr-core:8000"

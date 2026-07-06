@@ -60,6 +60,17 @@ type AppManifest = {
     columns?: string[]
     description?: string
   }[]
+  // Declarative operator actions (SDK Action.to_dict()) — generic forms
+  // POSTed through the server's user-JWT-only proxy.
+  actions?: ManifestAction[]
+}
+
+type ManifestAction = {
+  name: string
+  label: string
+  params?: ManifestParam[]
+  description?: string
+  confirm?: boolean
 }
 
 type RegisteredApp = {
@@ -406,6 +417,168 @@ function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: () => v
   )
 }
 
+/* --------------------------- Action modal ------------------------ */
+
+// Generic form for one manifest-declared action — the same
+// params-to-form mechanics as the config modal, POSTed through the
+// server's user-JWT-only proxy to the app's /actions/{name}. Results
+// with a list under "results" reuse the TableView renderer; anything
+// else pretty-prints.
+function AppActionModal({
+  app,
+  action,
+  onClose,
+}: {
+  app: RegisteredApp
+  action: ManifestAction
+  onClose: () => void
+}) {
+  const params = action.params ?? []
+  const [values, setValues] = useState<Record<string, string | boolean>>(() =>
+    Object.fromEntries(
+      params.map((p) => [
+        p.name,
+        (p.type || '').toLowerCase() === 'bool'
+          ? Boolean(p.default)
+          : p.default == null
+            ? ''
+            : typeof p.default === 'object'
+              ? JSON.stringify(p.default)
+              : String(p.default),
+      ])
+    )
+  )
+  const [error, setError] = useState<string | null>(null)
+  const [result, setResult] = useState<any>(null)
+
+  const runMutation = useMutation({
+    mutationFn: (payload: Record<string, any>) =>
+      apiService.invokeAppAction(app.id, action.name, payload),
+    onSuccess: ({ data }) => {
+      setError(null)
+      setResult(data)
+    },
+    onError: (e) => setError(extractApiError(e, `${action.label} failed.`)),
+  })
+
+  const submit = () => {
+    setError(null)
+    const payload: Record<string, any> = {}
+    for (const p of params) {
+      const raw = values[p.name]
+      const t = (p.type || '').toLowerCase()
+      const text = String(raw ?? '').trim()
+      if (t === 'bool') {
+        payload[p.name] = Boolean(raw)
+      } else if (t === 'int' || t === 'float') {
+        if (!text) {
+          if (p.required) return setError(`"${p.name}" is required.`)
+          continue
+        }
+        const num = Number(text)
+        if (!Number.isFinite(num) || (t === 'int' && !Number.isInteger(num))) {
+          return setError(`"${p.name}" must be a valid ${t === 'int' ? 'integer' : 'number'}.`)
+        }
+        payload[p.name] = num
+      } else if (t === 'list' || t === 'dict') {
+        if (!text) {
+          if (p.required) return setError(`"${p.name}" is required.`)
+          continue
+        }
+        try {
+          payload[p.name] = JSON.parse(text)
+        } catch {
+          return setError(`"${p.name}" is not valid JSON.`)
+        }
+      } else {
+        if (!text && p.required) return setError(`"${p.name}" is required.`)
+        if (text || !p.required) payload[p.name] = text
+      }
+    }
+    if (action.confirm && !window.confirm(`Run "${action.label}" on ${app.name}?`)) return
+    runMutation.mutate(payload)
+  }
+
+  const resultsList = Array.isArray(result?.results) ? result.results : null
+
+  return (
+    <Modal open title={`${action.label} — ${app.name}`} onClose={onClose} widthClassName="w-[640px]">
+      <div className="space-y-3">
+        {action.description && (
+          <div className="text-sm text-[var(--text-dim)]">{action.description}</div>
+        )}
+        {params.map((p) => {
+          const t = (p.type || '').toLowerCase()
+          const value = values[p.name]
+          return (
+            <div key={p.name}>
+              <label className="block text-sm mb-1">
+                <span className="font-medium">{p.name}</span>
+                <span className="ml-2 text-xs text-[var(--text-dim)]">
+                  {p.type}
+                  {p.required ? ' · required' : ''}
+                </span>
+              </label>
+              {p.description && (
+                <div className="text-xs text-[var(--text-dim)] mb-1">{p.description}</div>
+              )}
+              {t === 'bool' ? (
+                <label className="inline-flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(value)}
+                    onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.checked }))}
+                  />
+                  Enabled
+                </label>
+              ) : (
+                <input
+                  type={t === 'int' || t === 'float' ? 'number' : 'text'}
+                  step={t === 'float' ? 'any' : undefined}
+                  className="w-full px-2 py-1.5 text-sm rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+                  value={String(value ?? '')}
+                  onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.value }))}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') submit()
+                  }}
+                />
+              )}
+            </div>
+          )
+        })}
+
+        {error && <div className="text-sm text-red-400">{error}</div>}
+
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose}>Close</Button>
+          <Button variant="primary" onClick={submit} disabled={runMutation.isPending}>
+            {runMutation.isPending ? 'Running…' : action.label}
+          </Button>
+        </div>
+
+        {result != null && (
+          <div className="pt-2 border-t border-[var(--border)] space-y-2">
+            {resultsList ? (
+              resultsList.length === 0 ? (
+                <div className="text-sm text-[var(--text-dim)]">No results.</div>
+              ) : (
+                <TableView
+                  view={{ name: 'results', label: `Results (${resultsList.length})`, kind: 'table' }}
+                  value={resultsList}
+                />
+              )
+            ) : (
+              <pre className="text-xs bg-[var(--bg-2)] border border-[var(--border)] rounded p-2 overflow-x-auto">
+                {JSON.stringify(result, null, 2)}
+              </pre>
+            )}
+          </div>
+        )}
+      </div>
+    </Modal>
+  )
+}
+
 /* -------------------------- Status chip -------------------------- */
 
 // Lazy: only fetched after the operator clicks "Check" — the registry list is
@@ -571,9 +744,12 @@ function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<s
   const { showSuccess, showError } = useSnackbar()
   const [uninstallPollActive, setUninstallPollActive] = useState(false)
   const [uninstallNote, setUninstallNote] = useState<string | null>(null)
+  // Manifest-declared operator action currently open in its form modal.
+  const [activeAction, setActiveAction] = useState<ManifestAction | null>(null)
 
   const requires = asStringList(app.manifest?.requires_tasks)
   const missing = requires.filter((t) => !tasks.has(t))
+  const manifestActions = (app.manifest?.actions ?? []).filter((a) => a && a.name && a.label)
 
   const toggleMutation = useMutation({
     mutationFn: () => (app.enabled ? apiService.disableApp(app.id) : apiService.enableApp(app.id)),
@@ -662,6 +838,17 @@ function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<s
           <Button variant="outline" onClick={onConfigure}>
             <Settings2 size={14} /> Configure
           </Button>
+          {manifestActions.map((a) => (
+            <Button
+              key={a.name}
+              variant="outline"
+              onClick={() => setActiveAction(a)}
+              disabled={!app.enabled}
+              title={a.description || a.name}
+            >
+              {a.label}
+            </Button>
+          ))}
           <Button variant="danger" onClick={confirmUninstall} disabled={uninstallInFlight}>
             <Trash2 size={14} /> {uninstallInFlight ? 'Uninstalling…' : 'Uninstall'}
           </Button>
@@ -679,6 +866,9 @@ function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<s
           </div>
         )}
       </CardContent>
+      {activeAction && (
+        <AppActionModal app={app} action={activeAction} onClose={() => setActiveAction(null)} />
+      )}
     </Card>
   )
 }

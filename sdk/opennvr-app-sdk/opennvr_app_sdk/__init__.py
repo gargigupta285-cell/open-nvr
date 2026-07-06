@@ -49,7 +49,7 @@ from .frame_sources import (
     dict_frame_source,
 )
 from .geometry import Point, Tripwire, Zone, bbox_center
-from .manifest import AlertType, AppManifest, Param, StateView
+from .manifest import Action, AlertType, AppManifest, Param, StateView
 from .state import KeyedState, StateRecord, keyed_state
 
 __version__ = "0.1.0"
@@ -80,6 +80,7 @@ __all__ = [
     "Param",
     "AlertType",
     "StateView",
+    "Action",
     # Keyed TTL state
     "keyed_state",
     "KeyedState",

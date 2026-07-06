@@ -106,6 +106,39 @@ class StateView:
 
 
 @dataclass
+class Action:
+    """One operator-invokable action on the app's contract surface.
+
+    Declared like params, rendered like params: the catalog builds a
+    generic form from ``params`` and POSTs it to
+    ``/actions/{name}`` on the app — proxied through the server's
+    ``POST /api/v1/apps/{id}/actions/{name}``, which is **user-JWT
+    only**. The governance boundary is deliberate: actions are operator
+    verbs (search footage, enroll a face); the OpenNVR Agent's service
+    key can read state but can NEVER invoke an action.
+
+    ``confirm=True`` makes the catalog ask before invoking (for actions
+    with side effects). The app implements the verb by overriding
+    :meth:`ContractMixin.on_action`.
+    """
+
+    name: str
+    label: str
+    params: list[Param] = field(default_factory=list)
+    description: str = ""
+    confirm: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "label": self.label,
+            "params": [p.to_dict() for p in self.params],
+            "description": self.description,
+            "confirm": self.confirm,
+        }
+
+
+@dataclass
 class AppManifest:
     """The static identity + schema of one app.
 
@@ -128,6 +161,10 @@ class AppManifest:
     # this app's GET /state payload. Empty ⇒ the catalog shows raw
     # state JSON as before.
     state_schema: list[StateView] = field(default_factory=list)
+    # Declarative operator actions (optional) — verbs the catalog can
+    # invoke on the app's contract surface via the server's JWT-only
+    # proxy. Empty ⇒ no Actions section renders.
+    actions: list[Action] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """The ``GET /manifest`` payload (and the ``manifest_json``
@@ -143,4 +180,5 @@ class AppManifest:
             "params": [p.to_dict() for p in self.params],
             "emits": [a.to_dict() for a in self.emits],
             "state_schema": [v.to_dict() for v in self.state_schema],
+            "actions": [a.to_dict() for a in self.actions],
         }

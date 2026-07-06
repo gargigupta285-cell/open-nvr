@@ -115,3 +115,57 @@ def test_time_window_excludes_old_rows():
     ids = {r.correlation_id for r in results}
     assert ids == {"new"}
     store.close()
+
+
+# ── The "search" action (manifest-declared, catalog-invoked) ────────────
+
+
+def test_search_action_end_to_end(tmp_path):
+    """on_action("search") — the UI query path — opens a FRESH read
+    connection on the db_path (the indexer's own connection belongs to
+    the NATS loop thread) and returns catalog-renderable rows."""
+    from footage_search import AppConfig, Indexer, OllamaConfig
+
+    db = str(tmp_path / "idx.sqlite3")
+    seed = FootageStore(db)
+    seed.add(Keyframe(
+        camera_id="cam-dock", ts=_ts(NOW - _dt.timedelta(hours=2)),
+        correlation_id="c1", adapter="blip",
+        labels=["truck"], caption="a red truck at the dock",
+    ))
+    seed.close()
+
+    cfg = AppConfig(
+        db_path=db, nats_url="nats://x", nats_token=None,
+        subject_pattern="opennvr.inference.>", extra_labels=[],
+        camera_aliases={"dock": "cam-dock"}, ollama=OllamaConfig(),
+        result_limit=25,
+    )
+    indexer = Indexer(cfg, FootageStore(db))
+
+    out = indexer.on_action("search", {"query": "red truck", "limit": 5})
+    assert out["query"] == "red truck"
+    assert len(out["results"]) == 1
+    row = out["results"][0]
+    assert row["camera"] == "cam-dock"
+    assert "red truck" in row["caption"]
+    assert row["when"].endswith("+00:00")  # ISO, UTC
+
+
+def test_search_action_validates_params():
+    from footage_search import AppConfig, Indexer, OllamaConfig
+
+    cfg = AppConfig(
+        db_path=":memory:", nats_url="nats://x", nats_token=None,
+        subject_pattern="s", extra_labels=[], camera_aliases={},
+        ollama=OllamaConfig(), result_limit=25,
+    )
+    indexer = Indexer(cfg, FootageStore(":memory:"))
+
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="non-empty"):
+        indexer.on_action("search", {"query": "   "})
+    with _pytest.raises(ValueError, match="between 1 and 200"):
+        indexer.on_action("search", {"query": "x", "limit": 0})
+    with _pytest.raises(KeyError):
+        indexer.on_action("enroll-face", {})

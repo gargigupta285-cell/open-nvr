@@ -217,6 +217,7 @@ def auth_client(monkeypatch):
     session.close()
 
     with TestClient(app) as test_client:
+        test_client.session_factory = session_factory
         yield test_client
     engine.dispose()
 
@@ -953,3 +954,147 @@ def test_get_config_requires_a_credential(auth_client):
         headers={"X-Internal-Api-Key": "not-the-key"},
     )
     assert wrong.status_code in (401, 403)
+
+
+# ── Manifest-declared actions (user-JWT-only proxy) ─────────────────
+
+
+def _manifest_with_action(**overrides) -> dict:
+    m = _manifest(**overrides)
+    m["actions"] = [
+        {
+            "name": "search",
+            "label": "Search footage",
+            "params": [
+                {"name": "query", "type": "str", "required": True,
+                 "default": None, "per_camera": False, "description": ""},
+                {"name": "limit", "type": "int", "required": False,
+                 "default": 10, "per_camera": False, "description": ""},
+            ],
+            "description": "", "confirm": False,
+        }
+    ]
+    return m
+
+
+def _register_action_app(auth_client, enabled=True):
+    reg = auth_client.post(
+        "/apps/register",
+        json={"url": "http://loitering:9200", "manifest": _manifest_with_action()},
+        headers={"X-Internal-Api-Key": _effective_internal_key()},
+    )
+    assert reg.status_code == 200
+    if enabled:
+        en = auth_client.post("/apps/loitering-detection/enable")
+        assert en.status_code == 200
+    return reg
+
+
+class _ActionClient:
+    """Fake httpx.AsyncClient recording the proxied POST."""
+
+    calls: list = []
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, json=None):
+        type(self).calls.append((url, json))
+
+        class _R:
+            status_code = 200
+
+            def json(self):
+                return {"results": [{"camera": "cam-1", "caption": "red truck"}]}
+
+        return _R()
+
+
+def test_action_invoke_happy_path(auth_client, monkeypatch):
+    _register_action_app(auth_client)
+    _ActionClient.calls = []
+    monkeypatch.setattr(apps_router.httpx, "AsyncClient", _ActionClient)
+
+    resp = auth_client.post(
+        "/apps/loitering-detection/actions/search",
+        json={"query": "red truck", "limit": 5},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["results"][0]["caption"] == "red truck"
+    # Proxied to the app's contract surface with the validated params.
+    assert _ActionClient.calls == [
+        ("http://loitering:9200/actions/search", {"query": "red truck", "limit": 5})
+    ]
+    # Audited with param KEYS only — never operator search terms.
+    s = auth_client.session_factory()
+    try:
+        audits = [
+            a for a in s.query(AuditLog).all()
+            if a.action == "app.action.invoke"
+        ]
+    finally:
+        s.close()
+    assert len(audits) == 1
+    details = audits[0].details
+    if isinstance(details, str):
+        import json as _json
+        details = _json.loads(details)
+    assert details["param_keys"] == ["limit", "query"]
+    assert "red truck" not in str(audits[0].details)
+
+
+def test_action_internal_key_cannot_invoke(monkeypatch):
+    """GOVERNANCE: actions are operator verbs — the service key (which
+    the OpenNVR Agent holds) must NEVER invoke one. A prompt-injected
+    agent must not be able to act on an app. Uses a client with REAL
+    auth (no get_current_active_user override): the key alone bounces
+    at the door, before any registry lookup or proxying."""
+    _ActionClient.calls = []
+    monkeypatch.setattr(apps_router.httpx, "AsyncClient", _ActionClient)
+    app, _sf, engine = _make_app()
+    with TestClient(app) as tc:
+        resp = tc.post(
+            "/apps/loitering-detection/actions/search",
+            json={"query": "x"},
+            headers={"X-Internal-Api-Key": _effective_internal_key()},
+        )
+    engine.dispose()
+    assert resp.status_code in (401, 403)
+    assert _ActionClient.calls == []  # never reached the app
+
+
+def test_action_undeclared_is_404(auth_client, monkeypatch):
+    _register_action_app(auth_client)
+    monkeypatch.setattr(apps_router.httpx, "AsyncClient", _ActionClient)
+    resp = auth_client.post(
+        "/apps/loitering-detection/actions/enroll-face", json={}
+    )
+    assert resp.status_code == 404
+    assert "declares no action" in resp.json()["detail"]
+
+
+def test_action_bad_params_is_400(auth_client, monkeypatch):
+    _register_action_app(auth_client)
+    _ActionClient.calls = []
+    monkeypatch.setattr(apps_router.httpx, "AsyncClient", _ActionClient)
+    resp = auth_client.post(
+        "/apps/loitering-detection/actions/search",
+        json={"query": "x", "limit": "ten"},
+    )
+    assert resp.status_code == 400
+    assert _ActionClient.calls == []
+
+
+def test_action_disabled_app_is_409(auth_client, monkeypatch):
+    _register_action_app(auth_client, enabled=False)
+    monkeypatch.setattr(apps_router.httpx, "AsyncClient", _ActionClient)
+    resp = auth_client.post(
+        "/apps/loitering-detection/actions/search", json={"query": "x"}
+    )
+    assert resp.status_code == 409

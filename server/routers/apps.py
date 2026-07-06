@@ -68,6 +68,9 @@ logger = logging.getLogger(__name__)
 
 # Seconds allowed for each proxied call to the app's /health and /state.
 STATUS_PROBE_TIMEOUT_S = 3.0
+# Actions can do real work (a footage query over SQLite); more generous
+# than a health probe, still bounded so a hung app can't pin a worker.
+ACTION_PROXY_TIMEOUT_S = 10.0
 
 
 # ── App Store index (the "discover" half of the catalog) ───────────
@@ -753,6 +756,112 @@ async def update_app_config(
         details={"config_keys": sorted(effective)},
     )
     return _serialize_app(row)
+
+
+@router.post("/{app_id}/actions/{action_name}")
+async def invoke_app_action(
+    app_id: str,
+    action_name: str,
+    params: dict[str, Any] = Body(default_factory=dict),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Invoke one manifest-declared action on the app's contract surface.
+
+    GOVERNANCE: **user-JWT only** — deliberately NOT ``get_read_principal``.
+    Actions are operator verbs (search footage, enroll a face); the
+    OpenNVR Agent's service key can read app state but must never be
+    able to invoke an action, so a prompt-injected agent cannot act on
+    an app. Do not widen this dependency.
+
+    Gates, in order: the app must be registered AND enabled; the action
+    must be DECLARED in the stored manifest (404 otherwise — the
+    manifest is the single source of truth for operator verbs); params
+    are validated against the declared ``Action.params`` exactly like
+    ``PUT /config`` validates against ``params``; the stored URL is
+    re-checked against :func:`validate_app_url` before any fetch. Every
+    invocation writes an audit row. The app's response is returned
+    verbatim (its 4xx/5xx map to 502 with the app's error detail).
+    """
+    row = _get_app_or_404(db, app_id)
+    if not row.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"App '{app_id}' is disabled — enable it first",
+        )
+    manifest = row.manifest_json or {}
+    declared = {
+        a.get("name"): a
+        for a in (manifest.get("actions") or [])
+        if isinstance(a, dict) and a.get("name")
+    }
+    action = declared.get(action_name)
+    if action is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"App '{app_id}' declares no action '{action_name}' "
+                "(manifest.actions is the source of truth)"
+            ),
+        )
+    # Param validation — same typed-manifest mechanics as PUT /config.
+    errors = validate_app_config({"params": action.get("params") or []}, params)
+    if errors:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid action params: {'; '.join(errors)}",
+        )
+
+    base_url = row.url.rstrip("/")
+    if validate_app_url(base_url) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="App URL is blocked by the registry's URL policy",
+        )
+
+    write_audit_log(
+        db,
+        action="app.action.invoke",
+        user_id=current_user.id,
+        entity_type="app",
+        entity_id=app_id,
+        details={
+            "actor": current_user.username,
+            "action": action_name,
+            # Param KEYS only — values may hold operator search terms
+            # or personal data that doesn't belong in the audit log.
+            "param_keys": sorted(params.keys()),
+        },
+    )
+
+    async with httpx.AsyncClient(timeout=ACTION_PROXY_TIMEOUT_S) as client:
+        try:
+            resp = await client.post(
+                f"{base_url}/actions/{action_name}", json=params
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"App unreachable: {exc}",
+            )
+    if resp.status_code >= 400:
+        detail: Any
+        try:
+            detail = resp.json()
+        except Exception:  # noqa: BLE001
+            detail = resp.text[:300]
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"app_status": resp.status_code, "app_error": detail},
+        )
+    try:
+        return resp.json()
+    except Exception:  # noqa: BLE001
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="App returned a non-JSON action response",
+        )
 
 
 @router.get("/{app_id}/status")
