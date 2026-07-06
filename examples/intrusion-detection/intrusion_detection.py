@@ -81,7 +81,7 @@ MANIFEST = AppManifest(
     params=[
         Param("watch_labels", list, default=["person"]),
         Param("poll_interval_seconds", float, default=5.0),
-        Param("restricted_hours", dict,
+        Param("restricted_hours", "time_range",
               description="Daily {start, end} window; cross-midnight supported."),
         Param("kaic_transport", str, default="http",
               description="'http' polls per frame; 'ws' streams per camera (§6)."),

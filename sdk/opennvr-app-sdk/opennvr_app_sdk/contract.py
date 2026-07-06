@@ -89,11 +89,13 @@ REGISTER_TIMEOUT_SECONDS = 5.0
 CONFIG_POLL_DEFAULT_SECONDS = 10.0
 CONFIG_POLL_TIMEOUT_SECONDS = 5.0
 
-# Ceiling on an action POST body. Action params are operator form
-# fields (a search query, a plate number) — kilobytes, never megabytes.
-# Without a cap, a forged Content-Length forces an arbitrary-size read
-# into memory on this (internal-network) surface.
-ACTION_BODY_MAX_BYTES = 64 * 1024
+# Ceiling on an action POST body. Most action params are small operator
+# form fields (a search query, a plate number), but some carry an
+# uploaded image (smart-doorbell's face enrollment) — a base64 photo is
+# a few MB. 8 MB accommodates that while still bounding a forged
+# Content-Length from forcing an arbitrary-size read into memory on this
+# (internal-network) surface.
+ACTION_BODY_MAX_BYTES = 8 * 1024 * 1024
 
 # Captured at import so the contract counters keep reading the REAL
 # clock even when an app's tests monkeypatch ``time.monotonic`` to

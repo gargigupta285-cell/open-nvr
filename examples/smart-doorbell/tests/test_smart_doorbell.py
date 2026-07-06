@@ -288,3 +288,99 @@ def test_alert_evidence_carries_recognition_metadata():
     assert e["similarity"] == pytest.approx(0.91, rel=1e-3)
     assert e["face_bbox"] == [100, 80, 240, 240]
     assert e["threshold"] == pytest.approx(0.5)
+
+
+# ── Face-enrollment actions (catalog UI → adapter /faces/*) ─────────────
+
+
+def _doorbell_with_faces_stub(monkeypatch, *, calls):
+    """A doorbell whose _FaceAdminClient is replaced by a recorder."""
+    doorbell, _p, _d = _build_doorbell([])
+
+    class _FakeAdmin:
+        def register(self, **kw):
+            calls.append(("register", kw))
+            return {"person_id": kw["person_id"], "status": "ok"}
+
+        def list_faces(self, category=None):
+            calls.append(("list", category))
+            return {"faces": [
+                {"person_id": "alex-rivera", "name": "Alex Rivera", "category": "known"},
+                {"person_id": "sam-lee", "name": "Sam Lee", "category": "family"},
+            ]}
+
+        def delete_face(self, person_id):
+            calls.append(("delete", person_id))
+            return {"deleted": person_id}
+
+    monkeypatch.setattr(doorbell, "_face_admin", lambda: _FakeAdmin())
+    return doorbell
+
+
+def test_enroll_face_decodes_image_and_registers(monkeypatch):
+    import base64 as _b64
+
+    calls: list = []
+    doorbell = _doorbell_with_faces_stub(monkeypatch, calls=calls)
+    img = _b64.b64encode(b"\xff\xd8realish-jpeg-bytes").decode()
+
+    out = doorbell.on_action("enroll_face", {"name": "Alex Rivera", "image": img})
+
+    assert out["enrolled"]["person_id"] == "alex-rivera"       # slug of the name
+    assert out["enrolled"]["category"] == "known"              # default
+    (verb, kw) = calls[0]
+    assert verb == "register"
+    assert kw["name"] == "Alex Rivera"
+    assert kw["image_bytes"] == b"\xff\xd8realish-jpeg-bytes"  # decoded
+
+
+def test_enroll_face_strips_data_url_prefix(monkeypatch):
+    import base64 as _b64
+
+    calls: list = []
+    doorbell = _doorbell_with_faces_stub(monkeypatch, calls=calls)
+    raw = _b64.b64encode(b"jpegbytes").decode()
+    out = doorbell.on_action("enroll_face", {
+        "name": "Sam", "image": f"data:image/jpeg;base64,{raw}",
+    })
+    assert out["enrolled"]["person_id"] == "sam"
+    assert calls[0][1]["image_bytes"] == b"jpegbytes"
+
+
+def test_enroll_face_validation_errors(monkeypatch):
+    import pytest as _pytest
+
+    doorbell = _doorbell_with_faces_stub(monkeypatch, calls=[])
+    with _pytest.raises(ValueError, match="'name' is required"):
+        doorbell.on_action("enroll_face", {"image": "x"})
+    with _pytest.raises(ValueError, match="'image' is required"):
+        doorbell.on_action("enroll_face", {"name": "A"})
+    with _pytest.raises(ValueError, match="not valid base64"):
+        doorbell.on_action("enroll_face", {"name": "A", "image": "!!!not base64!!!"})
+
+
+def test_list_faces_returns_table_rows(monkeypatch):
+    calls: list = []
+    doorbell = _doorbell_with_faces_stub(monkeypatch, calls=calls)
+    out = doorbell.on_action("list_faces", {})
+    assert [r["person_id"] for r in out["results"]] == ["alex-rivera", "sam-lee"]
+    assert out["results"][0]["name"] == "Alex Rivera"
+
+
+def test_delete_face(monkeypatch):
+    import pytest as _pytest
+
+    calls: list = []
+    doorbell = _doorbell_with_faces_stub(monkeypatch, calls=calls)
+    assert doorbell.on_action("delete_face", {"person_id": "alex-rivera"})["deleted"] == "alex-rivera"
+    assert calls[0] == ("delete", "alex-rivera")
+    with _pytest.raises(ValueError, match="'person_id' is required"):
+        doorbell.on_action("delete_face", {})
+
+
+def test_unknown_action_raises_keyerror(monkeypatch):
+    import pytest as _pytest
+
+    doorbell = _doorbell_with_faces_stub(monkeypatch, calls=[])
+    with _pytest.raises(KeyError):
+        doorbell.on_action("nope", {})

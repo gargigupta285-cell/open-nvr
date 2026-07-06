@@ -31,6 +31,8 @@ import { Modal } from '../components/Modal'
 import { useSnackbar } from '../components/Snackbar'
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, EmptyState, ErrorCard, PageHeader, Skeleton, type BadgeVariant } from '../components/ui'
 import { GeometryEditor } from './apps/GeometryEditor'
+import { ChipListEditor } from './apps/ChipListEditor'
+import { TimeWindowEditor } from './apps/TimeWindowEditor'
 
 type ManifestParam = {
   name: string
@@ -272,7 +274,7 @@ function statusVariant(status?: string): BadgeVariant {
 /** Params whose values aren't scalar edit as JSON in the generated form. */
 function isJsonParam(p: ManifestParam): boolean {
   const t = (p.type || '').toLowerCase()
-  return p.per_camera === true || t === 'list' || t.startsWith('geometry.') || t === 'dict' || t === 'json'
+  return p.per_camera === true || t === 'list' || t.startsWith('geometry.') || t === 'dict' || t === 'json' || t === 'time_range'
 }
 
 function initialFormValue(p: ManifestParam, config: Record<string, any> | null | undefined): string | boolean {
@@ -388,6 +390,17 @@ function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: () => v
                     value={String(value ?? '')}
                     onChange={(json) => setValues((v) => ({ ...v, [p.name]: json }))}
                   />
+                ) : t === 'list' && !p.per_camera ? (
+                  <ChipListEditor
+                    value={String(value ?? '')}
+                    placeholder={`add ${p.name} value, Enter`}
+                    onChange={(json) => setValues((v) => ({ ...v, [p.name]: json }))}
+                  />
+                ) : t === 'time_range' ? (
+                  <TimeWindowEditor
+                    value={String(value ?? '')}
+                    onChange={(range) => setValues((v) => ({ ...v, [p.name]: range }))}
+                  />
                 ) : isJsonParam(p) ? (
                   <textarea
                     className="w-full h-28 px-2 py-1.5 text-sm font-mono rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
@@ -430,6 +443,48 @@ function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: () => v
         )}
       </div>
     </Modal>
+  )
+}
+
+/* ------------------- Image param (action forms) ------------------ */
+
+// A file picker for `image`/`file` action params. Reads the chosen
+// image as RAW base64 (data: prefix stripped) into the param value and
+// shows a thumbnail. Used by smart-doorbell's face enrollment.
+function ImageParamInput({ hasValue, onPick }: { hasValue: boolean; onPick: (b64: string) => void }) {
+  const [preview, setPreview] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const MAX_BYTES = 6 * 1024 * 1024 // under the SDK's 8MB action-body cap after base64
+
+  const onFile = (file: File | undefined) => {
+    setErr(null)
+    if (!file) return
+    if (!file.type.startsWith('image/')) return setErr('Please choose an image file.')
+    if (file.size > MAX_BYTES) return setErr('Image is too large (max ~6 MB).')
+    const reader = new FileReader()
+    reader.onload = () => {
+      const dataUrl = String(reader.result || '')
+      setPreview(dataUrl)
+      onPick(dataUrl.includes(',') ? dataUrl.split(',', 2)[1] : dataUrl) // raw base64
+    }
+    reader.onerror = () => setErr('Could not read the file.')
+    reader.readAsDataURL(file)
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <input
+        type="file"
+        accept="image/*"
+        className="block w-full text-sm text-[var(--text-dim)] file:mr-2 file:px-2 file:py-1 file:rounded file:border file:border-[var(--border)] file:bg-[var(--bg-2)] file:text-[var(--text)]"
+        onChange={(e) => onFile(e.target.files?.[0])}
+      />
+      {preview && (
+        <img src={preview} alt="selected" className="h-24 rounded border border-[var(--border)] object-cover" />
+      )}
+      {!preview && hasValue && <div className="text-xs text-[var(--text-dim)]">image selected</div>}
+      {err && <div className="text-xs text-red-400">{err}</div>}
+    </div>
   )
 }
 
@@ -547,6 +602,11 @@ function AppActionModal({
                   />
                   Enabled
                 </label>
+              ) : t === 'image' || t === 'file' ? (
+                <ImageParamInput
+                  hasValue={Boolean(String(value ?? ''))}
+                  onPick={(b64) => setValues((v) => ({ ...v, [p.name]: b64 }))}
+                />
               ) : (
                 <input
                   type={t === 'int' || t === 'float' ? 'number' : 'text'}

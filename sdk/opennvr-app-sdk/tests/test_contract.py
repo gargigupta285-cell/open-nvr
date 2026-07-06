@@ -679,6 +679,19 @@ def test_action_body_size_cap(monkeypatch):
         det.stop_contract_server()
 
 
+def test_action_body_accepts_image_sized_payload(monkeypatch):
+    """A ~1MB body (a base64 face photo) is UNDER the 8MB cap and
+    dispatches normally — the cap must not block face enrollment."""
+    monkeypatch.delenv("OPENNVR_INTERNAL_API_KEY", raising=False)
+    det, port = _action_detector()
+    try:
+        big = {"who": "x" * (1024 * 1024)}  # ~1 MB
+        resp = _post(port, "/actions/greet", big)
+        assert resp.status_code == 200
+    finally:
+        det.stop_contract_server()
+
+
 def test_action_deeply_nested_body_is_400_not_thread_death(monkeypatch):
     """RecursionError from json.loads is the bad-body class (review L3)
     — 400, and the server keeps serving."""
