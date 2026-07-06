@@ -59,6 +59,7 @@ class EventRecord:
     adapter: str
     summary: str  # short human-readable summary the tool emits to the LLM
     raw: dict[str, Any] = field(default_factory=dict)
+    seq: int = 0  # insertion order, stamped by CameraContext.record_event
 
 
 class CameraContext:
@@ -85,6 +86,11 @@ class CameraContext:
         # grow memory unboundedly.
         self._event_ring_size = max(1, int(event_ring_size))
         self._events: dict[str, deque[EventRecord]] = {}
+        # Monotonic insertion counter — a stable tiebreak for newest-first
+        # ordering when events share a received_at (same-tick bursts, or a
+        # clock with coarse resolution). Without it, equal timestamps sort
+        # nondeterministically and the LLM sees a scrambled recent-events list.
+        self._event_seq = 0
 
     # ── Cameras ────────────────────────────────────────────────────
 
@@ -167,6 +173,8 @@ class CameraContext:
         ring = self._events.setdefault(
             event.camera_id, deque(maxlen=self._event_ring_size)
         )
+        event.seq = self._event_seq
+        self._event_seq += 1
         ring.append(event)
 
     def recent_events(
@@ -189,9 +197,10 @@ class CameraContext:
             for ev in ring:
                 if ev.received_at >= cutoff:
                     out.append(ev)
-        # Newest-first so the LLM sees the most relevant context
-        # before the prompt-token budget runs out.
-        out.sort(key=lambda e: e.received_at, reverse=True)
+        # Newest-first so the LLM sees the most relevant context before the
+        # prompt-token budget runs out. The seq tiebreak keeps ordering
+        # deterministic when events share a received_at.
+        out.sort(key=lambda e: (e.received_at, e.seq), reverse=True)
         return out
 
 
