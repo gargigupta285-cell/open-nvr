@@ -197,6 +197,14 @@ it never flips the switch. This mirrors the greyed-skill on-ramp in §2: the
 agent names the action and points at the operator's screen, but the operator
 acts.
 
+The same boundary covers **manifest-declared actions** (an app's operator
+verbs — footage-search's "Search footage" form, a future face-enroll): the
+server's `POST /api/v1/apps/{id}/actions/{name}` proxy is **user-JWT
+only** — deliberately not the read principal — so the agent's service key
+can read an app's `/state` but can never invoke a verb on it. Declarative
+**state views** (`state_schema`) ride the read side and are fair game for
+both the catalog and the agent.
+
 On the server, this is one thin seam: `GET /api/v1/apps` and
 `GET /apps/{id}/status` accept the deployment's `X-Internal-Api-Key` (a
 read-only service principal, constant-time compared) as an alternative to a

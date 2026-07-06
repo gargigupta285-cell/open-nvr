@@ -1004,8 +1004,8 @@ class _ActionClient:
     async def __aexit__(self, *exc):
         return False
 
-    async def post(self, url, json=None):
-        type(self).calls.append((url, json))
+    async def post(self, url, json=None, headers=None):
+        type(self).calls.append((url, json, dict(headers or {})))
 
         class _R:
             status_code = 200
@@ -1027,10 +1027,13 @@ def test_action_invoke_happy_path(auth_client, monkeypatch):
     )
     assert resp.status_code == 200
     assert resp.json()["results"][0]["caption"] == "red truck"
-    # Proxied to the app's contract surface with the validated params.
-    assert _ActionClient.calls == [
-        ("http://loitering:9200/actions/search", {"query": "red truck", "limit": 5})
-    ]
+    # Proxied to the app's contract surface with the validated params
+    # AND the deployment key (the app's action POST is key-gated).
+    assert len(_ActionClient.calls) == 1
+    url, payload, headers = _ActionClient.calls[0]
+    assert url == "http://loitering:9200/actions/search"
+    assert payload == {"query": "red truck", "limit": 5}
+    assert headers.get("X-Internal-Api-Key") == _effective_internal_key()
     # Audited with param KEYS only — never operator search terms.
     s = auth_client.session_factory()
     try:

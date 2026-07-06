@@ -218,13 +218,12 @@ def test_on_config_update_swaps_watchlists_live():
     recognizer, _pipeline, _dispatcher = _build_recognizer(
         [], config=_app_config(allowlist=["OLD1"], denylist=[])
     )
-    assert recognizer._allowlist == {"OLD1"}
+    assert recognizer._watchlists == ({"OLD1"}, set())
 
     recognizer.on_config_update(
         {"allowlist": [" abc123 ", ""], "denylist": ["evil1", "EVIL1"]}
     )
-    assert recognizer._allowlist == {"ABC123"}
-    assert recognizer._denylist == {"EVIL1"}
+    assert recognizer._watchlists == ({"ABC123"}, {"EVIL1"})
 
 
 def test_on_config_update_is_idempotent_noop_on_same_values():
@@ -233,14 +232,13 @@ def test_on_config_update_is_idempotent_noop_on_same_values():
     recognizer, _pipeline, _dispatcher = _build_recognizer(
         [], config=_app_config(allowlist=["AAA111"], denylist=["BBB222"])
     )
-    before_allow = recognizer._allowlist
-    before_deny = recognizer._denylist
+    before = recognizer._watchlists
     recognizer.on_config_update(
         {"allowlist": ["aaa111"], "denylist": ["bbb222"]}
     )
-    # Equal → early return → the exact same set objects still bound.
-    assert recognizer._allowlist is before_allow
-    assert recognizer._denylist is before_deny
+    # Equal → early return → the exact same tuple still bound (one
+    # rebind for BOTH lists — a reader can never see a mixed pair).
+    assert recognizer._watchlists is before
 
 
 def test_on_config_update_severity_routing_follows_live_lists():

@@ -771,9 +771,11 @@ async def invoke_app_action(
 
     GOVERNANCE: **user-JWT only** — deliberately NOT ``get_read_principal``.
     Actions are operator verbs (search footage, enroll a face); the
-    OpenNVR Agent's service key can read app state but must never be
-    able to invoke an action, so a prompt-injected agent cannot act on
-    an app. Do not widen this dependency.
+    OpenNVR Agent's service key must never satisfy THIS route. The full
+    boundary is layered (see ``Action`` in the SDK's manifest module):
+    this JWT gate on the proxy, the deployment-key check on the app's
+    own POST surface, and the agent shipping no HTTP-POST tool at all.
+    Do not widen this dependency.
 
     Gates, in order: the app must be registered AND enabled; the action
     must be DECLARED in the stored manifest (404 otherwise — the
@@ -835,10 +837,23 @@ async def invoke_app_action(
         },
     )
 
+    # The app's action surface is key-gated (the SDK requires the
+    # deployment token on its only write endpoint) — forward it. The
+    # JWT gate above remains the operator check; this key is transport
+    # auth between server and app.
+    from core.config import settings
+
+    headers = (
+        {"X-Internal-Api-Key": settings.internal_api_key}
+        if settings.internal_api_key
+        else {}
+    )
     async with httpx.AsyncClient(timeout=ACTION_PROXY_TIMEOUT_S) as client:
         try:
             resp = await client.post(
-                f"{base_url}/actions/{action_name}", json=params
+                f"{base_url}/actions/{action_name}",
+                json=params,
+                headers=headers,
             )
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(

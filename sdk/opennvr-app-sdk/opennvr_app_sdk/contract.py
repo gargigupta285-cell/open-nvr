@@ -89,6 +89,12 @@ REGISTER_TIMEOUT_SECONDS = 5.0
 CONFIG_POLL_DEFAULT_SECONDS = 10.0
 CONFIG_POLL_TIMEOUT_SECONDS = 5.0
 
+# Ceiling on an action POST body. Action params are operator form
+# fields (a search query, a plate number) — kilobytes, never megabytes.
+# Without a cap, a forged Content-Length forces an arbitrary-size read
+# into memory on this (internal-network) surface.
+ACTION_BODY_MAX_BYTES = 64 * 1024
+
 # Captured at import so the contract counters keep reading the REAL
 # clock even when an app's tests monkeypatch ``time.monotonic`` to
 # drive their domain state machines (package-delivery's linger test
@@ -124,11 +130,18 @@ class _ContractRequestHandler(BaseHTTPRequestHandler):
         self._send_json(200, body)
 
     def do_POST(self) -> None:  # noqa: N802 — http.server API
-        """``POST /actions/{name}`` — the only POST surface. Routed to
-        the action dispatcher the mixin installs; declared-but-unknown
-        names are the dispatcher's KeyError → 404, bad params its
-        ValueError → 400, anything else a 500. The server itself never
-        interprets action semantics."""
+        """``POST /actions/{name}`` — the only POST surface, and the
+        only WRITE this server exposes (health/manifest/state are
+        reads). When the app knows the deployment token it REQUIRES it
+        (``X-Internal-Api-Key``, constant-time compared): the server's
+        JWT-gated proxy forwards it, and an arbitrary process on the
+        internal network without the key gets a 401 instead of a free
+        verb. See the module docstring for the full (layered) boundary.
+
+        Routed to the action dispatcher the mixin installs;
+        declared-but-unknown names are the dispatcher's KeyError → 404,
+        bad params its ValueError → 400, anything else a 500. The
+        server itself never interprets action semantics."""
         path = self.path.split("?", 1)[0].rstrip("/")
         action = getattr(self.server, "action", None)
         if action is None or not path.startswith("/actions/"):
@@ -138,13 +151,31 @@ class _ContractRequestHandler(BaseHTTPRequestHandler):
         if not name or "/" in name:
             self._send_json(404, {"error": f"unknown action path {path!r}"})
             return
+        expected_token = getattr(self.server, "action_token", None)
+        if expected_token:
+            import hmac
+
+            presented = self.headers.get("X-Internal-Api-Key") or ""
+            if not hmac.compare_digest(str(presented), str(expected_token)):
+                self._send_json(
+                    401, {"error": "action requires X-Internal-Api-Key"}
+                )
+                return
         try:
             length = int(self.headers.get("Content-Length") or 0)
+            if length < 0 or length > ACTION_BODY_MAX_BYTES:
+                self._send_json(
+                    413,
+                    {"error": f"action body over {ACTION_BODY_MAX_BYTES}B cap"},
+                )
+                return
             raw = self.rfile.read(length) if length else b"{}"
             params = json.loads(raw.decode("utf-8") or "{}")
             if not isinstance(params, dict):
                 raise ValueError("action body must be a JSON object")
-        except ValueError as exc:
+        except (ValueError, RecursionError) as exc:
+            # RecursionError: json.loads on absurdly nested input — the
+            # same "bad body" class, and it must not kill the handler.
             self._send_json(400, {"error": f"bad action body: {exc}"})
             return
         try:
@@ -180,6 +211,8 @@ class _ContractHTTPServer(ThreadingHTTPServer):
     routes: dict[str, Callable[[], Any]]
     # Optional POST /actions/{name} dispatcher: (name, params) -> result.
     action: "Callable[[str, dict[str, Any]], Any] | None"
+    # When set, POST /actions requires this X-Internal-Api-Key value.
+    action_token: "str | None"
 
 
 class ContractServer:
@@ -198,6 +231,7 @@ class ContractServer:
         manifest: Callable[[], dict[str, Any]],
         state: Callable[[], dict[str, Any]],
         action: "Callable[[str, dict[str, Any]], Any] | None" = None,
+        action_token: "str | None" = None,
         host: str = "0.0.0.0",
         port: int = 0,
     ) -> None:
@@ -205,6 +239,7 @@ class ContractServer:
         self._requested_port = int(port)
         self._routes = {"/health": health, "/manifest": manifest, "/state": state}
         self._action = action
+        self._action_token = action_token
         self._server: _ContractHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -223,6 +258,7 @@ class ContractServer:
         )
         server.routes = self._routes
         server.action = self._action
+        server.action_token = self._action_token
         self._server = server
         self._thread = threading.Thread(
             target=server.serve_forever,
@@ -348,11 +384,19 @@ class ContractMixin:
         if port is None:
             return None
         bind_host = getattr(self.cfg, "contract_bind_host", None) or "0.0.0.0"
+        # The action POST is key-gated with the same deployment token the
+        # app registers with. When neither the config key nor the env var
+        # is present (bare dev runs) the surface stays open — compose
+        # deployments always set OPENNVR_INTERNAL_API_KEY.
+        action_token = getattr(self.cfg, "opennvr_token", None) or os.environ.get(
+            "OPENNVR_INTERNAL_API_KEY"
+        )
         server = ContractServer(
             health=self.health_snapshot,
             manifest=self.manifest_snapshot,
             state=self.state_snapshot,
             action=self._dispatch_action,
+            action_token=action_token,
             host=bind_host,
             port=int(port),
         )

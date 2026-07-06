@@ -393,8 +393,14 @@ class LicensePlateRecognizer(FrameApp):
         # actually-fired", never refreshes on suppression, and its
         # shape is pinned by this app's test suite.
         self._last_fired: dict[tuple[str, str], float] = {}
-        self._allowlist = {p for p in config.allowlist if p}
-        self._denylist = {p for p in config.denylist if p}
+        # BOTH watchlists live in ONE tuple attribute so a live config
+        # swap is a single rebind: a reader can never observe new-allow
+        # with old-deny mid-update (the alert-severity routing reads
+        # both sets per plate).
+        self._watchlists: tuple[set[str], set[str]] = (
+            {p for p in config.allowlist if p},
+            {p for p in config.denylist if p},
+        )
 
     def request_stop(self) -> None:
         """Historical name — the SDK base spells it ``stop()``."""
@@ -442,8 +448,8 @@ class LicensePlateRecognizer(FrameApp):
         return {
             "cameras": [cam.camera_id for cam in self.config.cameras],
             "deduped_plates_tracked": len(self._last_fired),
-            "allowlist_size": len(self._allowlist),
-            "denylist_size": len(self._denylist),
+            "allowlist_size": len(self._watchlists[0]),
+            "denylist_size": len(self._watchlists[1]),
         }
 
     def on_config_update(self, config: dict[str, Any]) -> None:
@@ -451,11 +457,13 @@ class LicensePlateRecognizer(FrameApp):
         edits from the catalog's config form WITHOUT a restart.
 
         Called from the SDK's poll thread; idempotent by construction
-        (set equality short-circuits the no-change case, including the
-        first fetch that re-delivers the boot config). The swap is a
-        single attribute rebind of a freshly built set — atomic under
-        the GIL against the frame loop's membership reads, mirroring
-        how ``load_config`` normalizes plates (upper + strip).
+        (tuple equality short-circuits the no-change case, including the
+        first fetch that re-delivers the boot config). The swap is ONE
+        rebind of a single ``(allow, deny)`` tuple — a reader in the
+        frame loop sees either wholly-old or wholly-new lists, never a
+        mixed pair (a plate moving allow→deny can't transiently match
+        neither). Plates normalize exactly like ``load_config``
+        (upper + strip).
 
         Only the watchlists apply live: they are pure per-read lookups.
         Camera topology / adapter / interval edits still need a restart
@@ -472,10 +480,9 @@ class LicensePlateRecognizer(FrameApp):
             for p in (config.get("denylist") or [])
             if str(p).strip()
         }
-        if allow == self._allowlist and deny == self._denylist:
+        if (allow, deny) == self._watchlists:
             return
-        self._allowlist = allow
-        self._denylist = deny
+        self._watchlists = (allow, deny)
         logger.info(
             "watchlists updated live from the registry: "
             "allowlist=%d denylist=%d",
@@ -485,10 +492,13 @@ class LicensePlateRecognizer(FrameApp):
 
     def _build_alert(self, cam: CameraConfig, read: PlateRead) -> Alert:
         plate_upper = read.plate_text.upper()
-        if plate_upper in self._denylist:
+        # ONE read of the tuple → both membership tests see the same
+        # generation of the watchlists even mid-config-swap.
+        allowlist, denylist = self._watchlists
+        if plate_upper in denylist:
             severity = "high"
             title = f"Watchlist plate {plate_upper} seen"
-        elif plate_upper in self._allowlist:
+        elif plate_upper in allowlist:
             severity = "low"
             title = f"Expected plate {plate_upper} seen"
         else:
@@ -513,8 +523,8 @@ class LicensePlateRecognizer(FrameApp):
                 "vehicle_confidence": round(read.vehicle_confidence, 4),
                 "vehicle_bbox": list(read.vehicle_bbox),
                 "model_id": read.model_id,
-                "in_allowlist": plate_upper in self._allowlist,
-                "in_denylist": plate_upper in self._denylist,
+                "in_allowlist": plate_upper in allowlist,
+                "in_denylist": plate_upper in denylist,
             },
         )
 

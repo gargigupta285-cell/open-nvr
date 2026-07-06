@@ -202,7 +202,13 @@ either door can actually open — is [`docs/TWO_DOORS.md`](TWO_DOORS.md).
 - [`docs/CONTRIBUTING_APPS.md`](CONTRIBUTING_APPS.md) — the App Store
   submission flow and the curated-index trust model.
 - [`sdk/opennvr-app-sdk/`](../sdk/opennvr-app-sdk/) — the SDK: `Detector`,
-  `AppManifest` / `Param` / `AlertType`, `keyed_state`, `geometry`.
+  `AppManifest` / `Param` / `AlertType` / `StateView` / `Action`,
+  `keyed_state`, `geometry`. Beyond params→config-form, a manifest can
+  declare **state views** (the catalog renders your `GET /state` live —
+  no UI code) and **actions** (operator verbs like footage-search's
+  "Search footage" form, proxied user-JWT-only); with `opennvr_url` set,
+  registry config edits are **delivered live** to your running app via
+  `on_config_update` — see the LPR watchlists for the pattern.
 - [`docs/AI_ADAPTER_CONTRACT.md`](AI_ADAPTER_CONTRACT.md) — the inference
   event shape your rule consumes and the `tasks_advertised` vocabulary
   behind `requires_tasks`.

@@ -298,8 +298,13 @@ class Indexer(Detector):
             raise ValueError("'limit' must be between 1 and 200")
 
         read_store = FootageStore(self.cfg.db_path)
-        cfg = dataclasses.replace(self.cfg, result_limit=limit)
-        results = run_search(cfg, read_store, query)
+        try:
+            cfg = dataclasses.replace(self.cfg, result_limit=limit)
+            results = run_search(cfg, read_store, query)
+        finally:
+            # One fresh connection PER ACTION — it must close with the
+            # request or N searches leak N file descriptors (review H1).
+            read_store.close()
         return {
             "query": query,
             "results": [

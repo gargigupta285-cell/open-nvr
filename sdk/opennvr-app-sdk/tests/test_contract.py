@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import os
+
 import httpx
 import pytest
 
@@ -549,6 +551,9 @@ class _ActionDetector(_EchoDetector):
 
 
 def _action_detector():
+    # Key-less on purpose: these tests exercise dispatch semantics; the
+    # key gate has its own test. Shield against a leaked env var.
+    os.environ.pop("OPENNVR_INTERNAL_API_KEY", None)
     det = _ActionDetector(_cfg(), AlertDispatcher([_RecorderChannel()]))
     server = det.start_contract_server()
     assert server is not None
@@ -614,5 +619,82 @@ def test_actionless_manifest_has_no_post_surface():
     try:
         resp = _post(server.port, "/actions/greet", {"who": "x"})
         assert resp.status_code == 404
+    finally:
+        det.stop_contract_server()
+
+
+def test_action_post_requires_deployment_key_when_configured(monkeypatch):
+    """The app's own action surface is key-gated (review M1): with the
+    deployment token known, an internal-network caller WITHOUT the key
+    gets 401 and the dispatcher is never reached; presenting the key
+    (as the server proxy does) works."""
+    monkeypatch.setenv("OPENNVR_INTERNAL_API_KEY", "deploy-sekrit")
+    det = _ActionDetector(_cfg(), AlertDispatcher([_RecorderChannel()]))
+    server = det.start_contract_server()
+    try:
+        bare = _post(server.port, "/actions/greet", {"who": "x"})
+        assert bare.status_code == 401
+        ok = httpx.post(
+            f"http://127.0.0.1:{server.port}/actions/greet",
+            json={"who": "x"},
+            headers={"X-Internal-Api-Key": "deploy-sekrit"},
+            timeout=2.0, trust_env=False,
+        )
+        assert ok.status_code == 200
+        wrong = httpx.post(
+            f"http://127.0.0.1:{server.port}/actions/greet",
+            json={"who": "x"},
+            headers={"X-Internal-Api-Key": "guess"},
+            timeout=2.0, trust_env=False,
+        )
+        assert wrong.status_code == 401
+        # Reads stay open — health polls don't need the key.
+        assert _get(server.port, "/health").status_code == 200
+    finally:
+        det.stop_contract_server()
+
+
+def test_action_body_size_cap(monkeypatch):
+    """A forged/huge Content-Length is refused up front (review M2) —
+    no arbitrary-size read into memory on this surface. Raw socket:
+    the server answers 413 WITHOUT reading the body, which well-behaved
+    HTTP clients treat as a protocol violation mid-send — exactly the
+    point."""
+    import socket
+
+    monkeypatch.delenv("OPENNVR_INTERNAL_API_KEY", raising=False)
+    det, port = _action_detector()
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=2.0) as s:
+            s.sendall(
+                b"POST /actions/greet HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: 524288000\r\n"
+                b"\r\n"
+            )
+            status_line = s.recv(4096).split(b"\r\n", 1)[0]
+        assert b"413" in status_line, status_line
+    finally:
+        det.stop_contract_server()
+
+
+def test_action_deeply_nested_body_is_400_not_thread_death(monkeypatch):
+    """RecursionError from json.loads is the bad-body class (review L3)
+    — 400, and the server keeps serving."""
+    monkeypatch.delenv("OPENNVR_INTERNAL_API_KEY", raising=False)
+    det, port = _action_detector()
+    try:
+        nested = b"[" * 10000 + b"]" * 10000
+        resp = httpx.post(
+            f"http://127.0.0.1:{port}/actions/greet",
+            content=nested,
+            headers={"Content-Type": "application/json"},
+            timeout=5.0, trust_env=False,
+        )
+        assert resp.status_code == 400
+        # Still alive after the recursion bomb.
+        ok = _post(port, "/actions/greet", {"who": "ops"})
+        assert ok.status_code == 200
     finally:
         det.stop_contract_server()
