@@ -41,6 +41,11 @@
 #   aliases:     non-canonical spellings that MEAN this task; the
 #                canonicalizer and skill-mapping fold these in so an
 #                adapter advertising an alias is treated as the canonical.
+#   suggested_adapters: reference adapter(s) from the v0.1 set that
+#                provide this task — editorial, consistent with
+#                use_case_map.yml. The OpenNVR Agent uses these to tell an
+#                operator which adapter to enable when a skill is greyed
+#                out (guidance only; the agent never enables one itself).
 
 - task: object_detection
   label: Object Detection
@@ -49,6 +54,7 @@
   tags: [person, vehicle, bag, perimeter, bbox]
   agent_skill: count
   aliases: [detect_objects, object-detection]
+  suggested_adapters: [yolov8]
 
 - task: face_recognition
   label: Face Recognition
@@ -57,6 +63,7 @@
   tags: [face, identity, watchlist, doorbell]
   agent_skill: faces
   aliases: []
+  suggested_adapters: [insightface]
 
 - task: image_captioning
   label: Image Captioning
@@ -68,6 +75,7 @@
   # (an adapter shipped it that way); folding it in here resolves the
   # duplication so both count as backing the agent's "see" skill.
   aliases: [scene_caption, image-captioning]
+  suggested_adapters: [blip, moondream]
 
 - task: vqa
   label: Visual Question Answering
@@ -76,6 +84,7 @@
   tags: [vqa, vlm, question, moondream]
   agent_skill: see
   aliases: [visual_question_answering]
+  suggested_adapters: [moondream]
 
 - task: face_detection
   label: Face Detection
@@ -100,6 +109,7 @@
   tags: [plate, anpr, lpr, vehicle, ocr]
   agent_skill: null
   aliases: [lpr, anpr]
+  suggested_adapters: [fast-plate-ocr]
 
 - task: multi_object_tracking
   label: Multi-Object Tracking
@@ -108,6 +118,7 @@
   tags: [tracking, bytetrack, crossing, counting]
   agent_skill: null
   aliases: [tracking, mot]
+  suggested_adapters: [bytetrack]
 
 - task: speech_to_text
   label: Speech to Text
@@ -116,6 +127,7 @@
   tags: [asr, whisper, transcription, voice]
   agent_skill: null
   aliases: [asr, stt, transcription]
+  suggested_adapters: [whisper]
 
 - task: text_to_speech
   label: Text to Speech
@@ -124,3 +136,4 @@
   tags: [tts, piper, voice, synthesis]
   agent_skill: null
   aliases: [tts, speech_synthesis]
+  suggested_adapters: [piper]

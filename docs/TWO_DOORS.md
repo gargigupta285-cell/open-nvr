@@ -110,6 +110,18 @@ canonical spelling, but nothing is ever blocked — a brand-new task string
 still registers and works, just uncategorized until it's promoted into
 `tasks.yml`.
 
+**The greyed-skill → install-adapter on-ramp.** Each entry can also name
+`suggested_adapters` — the reference adapter(s) that provide the task
+(editorial, mirroring `use_case_map.yml`). When a skill greys out because
+no live adapter advertises a backing task, the agent doesn't just say "no":
+its skills panel names the suggested adapter(s) (e.g. *"needs an adapter
+advertising object_detection — suggested: YOLOv8"*) and, when the agent is
+configured with the main UI's base URL (`opennvr_ui_url`), renders an
+**"Enable →"** link straight to the **AI Adapters** view. That link is
+navigation only — the agent **guides** the operator to the right screen; it
+never enables or approves an adapter itself. Enabling stays an operator
+action behind OpenNVR's permission gate.
+
 ## 3. The decision flow
 
 What actually happens when you ask the agent about something,

@@ -220,6 +220,74 @@ def test_skills_payload_alias_and_canonical_both_back_see():
         assert _by_id(rt)["see"]["tasks_available"] is True, advertised
 
 
+# ── greyed skills → suggested_adapters + enable_url (guidance on-ramp) ──
+
+
+def test_greyed_skill_names_suggested_adapters():
+    # count is greyed (no object_detection advertised): it must name the
+    # suggested adapter(s) from tasks.yml so the operator knows what to enable.
+    rt = _runtime()
+    rt.kaic_capabilities = _StubCaps({"image_captioning"})   # only captioning
+    skills = _by_id(rt)
+    assert skills["count"]["tasks_available"] is False
+    assert skills["count"]["suggested_adapters"] == ["yolov8"]
+    # see's backing tasks (image_captioning + vqa) union blip+moondream.
+    assert skills["faces"]["suggested_adapters"] == ["insightface"]
+    # watch inherits count's backing → count's suggested adapter.
+    assert skills["watch"]["suggested_adapters"] == ["yolov8"]
+
+
+def test_greyed_see_unions_deduped_adapters_across_backing_tasks():
+    rt = _runtime()
+    rt.kaic_capabilities = _StubCaps(set())                  # nothing advertised
+    see = _by_id(rt)["see"]
+    assert see["tasks_available"] is False
+    # image_captioning → [blip, moondream], vqa → [moondream]; union deduped,
+    # order preserved.
+    assert see["suggested_adapters"] == ["blip", "moondream"]
+
+
+def test_enable_url_present_only_when_ui_url_set():
+    cfg = AppConfig(
+        kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+        opennvr_ui_url="https://nvr.example/",
+        cameras=[CameraSpec(camera_id="cam1", frame_url="http://x/1.jpg", role="front door")],
+    )
+    rt = CameraAgentRuntime(cfg)
+    rt.kaic_capabilities = _StubCaps(set())
+    count = {s["id"]: s for s in rt.skills_payload()}["count"]
+    # trailing slash on the base URL is normalized away.
+    assert count["enable_url"] == "https://nvr.example/ai-adapters"
+
+
+def test_enable_url_none_when_ui_url_unset():
+    rt = _runtime()                                          # no opennvr_ui_url
+    rt.kaic_capabilities = _StubCaps(set())
+    count = {s["id"]: s for s in rt.skills_payload()}["count"]
+    assert count["enable_url"] is None
+
+
+def test_not_greyed_skill_omits_suggestion_fields():
+    # When a skill is available (not greyed) the additive fields are absent —
+    # the guidance only appears where there's something to guide.
+    rt = _runtime()
+    rt.kaic_capabilities = _StubCaps({"object_detection"})   # count is served
+    count = {s["id"]: s for s in rt.skills_payload()}["count"]
+    assert count["tasks_available"] is True
+    assert "suggested_adapters" not in count
+    assert "enable_url" not in count
+
+
+def test_derive_skill_suggested_adapters_from_bundled_registry():
+    import camera_agent
+
+    derived = camera_agent._derive_skill_suggested_adapters()
+    assert derived["count"] == ["yolov8"]
+    assert derived["faces"] == ["insightface"]
+    assert derived["see"] == ["blip", "moondream"]
+    assert derived["watch"] == ["yolov8"]                    # inherits count
+
+
 # ── decoupling: a new agent_skill in tasks.yml needs no agent code edit ─
 
 

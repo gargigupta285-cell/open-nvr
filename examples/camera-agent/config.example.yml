@@ -116,6 +116,14 @@ event_ring_size: 256
 # opennvr_cameras_url: http://127.0.0.1:8000/api/v1/internal/camera-agent/cameras
 # opennvr_api_key: REPLACE_WITH_INTERNAL_API_KEY
 
+# Base URL of the main OpenNVR UI. Used ONLY to deep-link the operator to
+# the AI Adapters view when a skill is greyed out for want of a backing
+# adapter — the skills panel then shows an "Enable →" link next to the
+# suggested adapter(s). The agent guides you there; it never enables or
+# approves an adapter itself (that stays your action, behind the permission
+# gate). When unset, no link is shown — just the suggestion text.
+# opennvr_ui_url: https://nvr.example
+
 # HTTP listen address for the agent. Public if you put it behind
 # your reverse proxy; localhost only by default.
 host: 127.0.0.1

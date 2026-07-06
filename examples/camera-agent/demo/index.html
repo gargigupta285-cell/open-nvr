@@ -145,6 +145,8 @@
     .brow .b-nm{flex:1;min-width:0;}.brow .b-nm small{display:block;color:var(--muted);font-size:.66rem;}
     .brow .b-add{background:var(--accent);color:#fff;border:none;border-radius:6px;font-weight:700;font-size:.72rem;padding:.28rem .55rem;pointer-events:none;}
     .brow .b-need{font-size:.66rem;color:var(--muted);text-align:right;max-width:52%;}
+    .brow .b-enable{flex:0 0 auto;font-size:.66rem;font-weight:700;color:var(--accent);text-decoration:none;border:1px solid var(--accent);border-radius:6px;padding:.2rem .4rem;white-space:nowrap;}
+    .brow .b-enable:hover{background:var(--accent);color:#fff;}
     /* Add-list rows: the whole row is clickable when the skill can be enabled;
        greyed (with the reason on the right) when it can't be yet. */
     .brow.addable{cursor:pointer;}
@@ -704,6 +706,12 @@
         d.querySelector(".sk-x").addEventListener("click",()=>toggleSkill(s.id,"disable"));
         el.appendChild(d); }
       renderBrowse(); }
+    // Pretty display names for the reference adapters named in tasks.yml's
+    // suggested_adapters. Falls back to the raw id for anything unlisted.
+    const ADAPTER_LABELS={yolov8:"YOLOv8",moondream:"Moondream",blip:"BLIP",
+      insightface:"InsightFace","fast-plate-ocr":"Fast Plate OCR",
+      bytetrack:"ByteTrack",whisper:"Whisper",piper:"Piper"};
+    const adapterLabel=a=>ADAPTER_LABELS[a]||a;
     function renderBrowse(){ const el=$("skillBrowseList"); if(!el) return;
       const q=(($("skillSearch")||{}).value||"").toLowerCase();
       const add=_skills.filter(s=>!s.enabled && (s.name.toLowerCase().includes(q)||s.id.includes(q)));
@@ -712,16 +720,28 @@
         // Grey the row with a reason when the skill can't be enabled yet:
         // either its backend requirement is unmet (server hint), or no adapter
         // currently advertises a task that could back it (live KAI-C view).
-        let reason="";
+        // For the latter, GUIDE the operator: name the suggested adapter(s)
+        // and, when the server knows the OpenNVR UI URL, offer an "Enable →"
+        // link into the AI Adapters view. It's a navigation link only — the
+        // agent never enables/approves an adapter (operator action, gated).
+        let reason="",suggested=[];
         if(!s.available) reason=s.hint||"needs setup";
-        else if(s.tasks_available===false)
+        else if(s.tasks_available===false){
           reason="needs an adapter advertising "+((s.backing_tasks&&s.backing_tasks.length)?s.backing_tasks.join(" / "):"a backing task");
+          suggested=(s.suggested_adapters||[]);
+          if(suggested.length) reason+=" — suggested: "+suggested.map(adapterLabel).join(", ");
+        }
+        const enableUrl=(reason&&s.tasks_available===false)?(s.enable_url||""):"";
         const d=document.createElement("div"); d.className="brow"+(reason?" off":" addable");
         d.innerHTML=`<span class="b-ic">${s.icon}</span><span class="b-nm"><span></span><small></small></span>`+
-          (reason?'<span class="b-need"></span>':'<span class="b-add">Add</span>');
+          (reason?'<span class="b-need"></span>':'<span class="b-add">Add</span>')+
+          (enableUrl?'<a class="b-enable" target="_blank" rel="noopener">Enable →</a>':'');
         d.querySelector(".b-nm span").textContent=s.name;
         d.querySelector(".b-nm small").textContent="uses "+s.uses;
-        if(reason){ d.querySelector(".b-need").textContent=reason; d.title=reason; }
+        if(reason){ d.querySelector(".b-need").textContent=reason; d.title=reason;
+          if(enableUrl){ const a=d.querySelector(".b-enable"); a.href=enableUrl;
+            a.title="Enable an adapter in OpenNVR's AI Adapters view";
+            a.addEventListener("click",e=>e.stopPropagation()); } }
         else { d.title="Enable "+s.name; d.addEventListener("click",()=>toggleSkill(s.id,"enable")); }
         el.appendChild(d); } }
     async function toggleSkill(id,action){

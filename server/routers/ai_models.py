@@ -84,6 +84,10 @@ class TaskEntry(BaseModel):
     them in, and the OpenNVR Agent's skill mapping treats an adapter
     advertising an alias exactly like the canonical. ``agent_skill`` names
     the Agent skill id (see/count/faces/watch) this task backs, or None.
+    ``suggested_adapters`` names the reference adapter(s) that provide this
+    task (editorial, consistent with ``use_case_map.yml``) — the OpenNVR
+    Agent surfaces these to guide an operator to enable one when a skill is
+    greyed out.
     """
 
     task: str
@@ -93,6 +97,7 @@ class TaskEntry(BaseModel):
     tags: list[str] = []
     agent_skill: str | None = None
     aliases: list[str] = []
+    suggested_adapters: list[str] = []
 
 
 TASKS_REGISTRY_PATH = Path(__file__).resolve().parent.parent / "config" / "tasks.yml"

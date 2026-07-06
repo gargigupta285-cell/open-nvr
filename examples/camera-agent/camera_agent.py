@@ -157,6 +157,14 @@ class AppConfig:
     opennvr_cameras_url: str | None = None
     opennvr_api_key: str | None = None
 
+    # Optional base URL of the main OpenNVR UI (e.g. "https://nvr.example"),
+    # used only to build a deep link into the AI Adapters view when a skill is
+    # greyed out for want of a backing adapter. The agent GUIDES the operator
+    # there — it never enables or approves an adapter itself (that stays an
+    # operator action behind OpenNVR's permission gate). Unset → no link, the
+    # skills panel just names the suggested adapter(s) in text.
+    opennvr_ui_url: str | None = None
+
     # Optional emergency contacts for alarms, keyed by alarm target/name
     # (e.g. {"fire": "+1-555-0100"}). The actual call-out is a documented
     # future integration (see ALARMS.md); for now an armed alarm with a
@@ -355,6 +363,45 @@ def _derive_skill_backing_tasks() -> dict[str, list[str]]:
 
 
 _SKILL_BACKING_TASKS: dict[str, list[str]] = _derive_skill_backing_tasks()
+
+
+def _derive_skill_suggested_adapters() -> dict[str, list[str]]:
+    """Union the ``suggested_adapters`` of every task backing each skill,
+    from the bundled task registry — ``skill id -> [adapter names]``, order
+    preserved and deduped.
+
+    This is the editorial "which adapter provides this skill" answer the
+    agent surfaces when a skill is greyed out (no live adapter advertises a
+    backing task). It's GUIDANCE ONLY: it names adapters for the operator to
+    enable in the AI Adapters view; the agent never enables one. Inherited
+    skills (``_SKILL_TASK_INHERITS``) pick up their source's adapters. On any
+    error the map is simply empty — a missing suggestion never breaks the UI."""
+    try:
+        raw = yaml.safe_load(TASKS_REGISTRY_PATH.read_text()) or []
+        by_task: dict[str, list[str]] = {}
+        for entry in raw:
+            names = [entry["task"], *(entry.get("aliases") or [])]
+            adapters = entry.get("suggested_adapters") or []
+            for name in names:
+                by_task[name] = list(adapters)
+        derived: dict[str, list[str]] = {}
+        for skill, tasks in _SKILL_BACKING_TASKS.items():
+            seen: list[str] = []
+            for task in tasks:
+                for adapter in by_task.get(task, []):
+                    if adapter not in seen:
+                        seen.append(adapter)
+            derived[skill] = seen
+        return derived
+    except Exception:                          # pragma: no cover - defensive
+        logger.warning(
+            "could not derive skill suggested adapters from %s",
+            TASKS_REGISTRY_PATH, exc_info=True,
+        )
+        return {}
+
+
+_SKILL_SUGGESTED_ADAPTERS: dict[str, list[str]] = _derive_skill_suggested_adapters()
 
 
 # Phrases Whisper commonly hallucinates from silence / background noise / the
@@ -1883,6 +1930,7 @@ def load_config(path: str | Path) -> AppConfig:
         footage_index_path=raw.get("footage_index_path"),
         opennvr_cameras_url=raw.get("opennvr_cameras_url"),
         opennvr_api_key=raw.get("opennvr_api_key"),
+        opennvr_ui_url=raw.get("opennvr_ui_url"),
         emergency_contacts=(
             dict(raw["emergency_contacts"])
             if isinstance(raw.get("emergency_contacts"), dict) else None
@@ -2178,6 +2226,19 @@ class CameraAgentRuntime:
                 "hint": "" if available else (hints.get(req, "Not enabled in config.")),
                 "backing_tasks": backing, "tasks_available": tasks_available,
             }
+            # When a skill is greyed out for want of a backing adapter, GUIDE
+            # the operator: name the suggested adapter(s) and, if we know the
+            # main UI's base URL, deep-link them to the AI Adapters view to
+            # enable one. Guidance only — no auto-enable path exists here; the
+            # link is a plain navigation target and enabling stays an operator
+            # action behind OpenNVR's permission gate. Additive: not-greyed
+            # skills omit both fields.
+            if not tasks_available:
+                entry["suggested_adapters"] = _SKILL_SUGGESTED_ADAPTERS.get(sid, [])
+                entry["enable_url"] = (
+                    f"{self.cfg.opennvr_ui_url.rstrip('/')}/ai-adapters"
+                    if self.cfg.opennvr_ui_url else None
+                )
             if sid == "watch":
                 # The converged monitors: which SDK rule classes back the
                 # count/crossing kinds (spec §07 "one rule library, two doors").

@@ -488,6 +488,7 @@ the free-text one — without closing it. Each entry is:
   tags: [caption, description, search, vlm]
   agent_skill: see                # OpenNVR Agent skill it backs, or null
   aliases: [scene_caption, image-captioning]   # non-canonical spellings
+  suggested_adapters: [blip, moondream]        # reference adapter(s) that provide it
 ```
 
 - **`task`** is the canonical name an adapter SHOULD advertise.
@@ -503,6 +504,12 @@ the free-text one — without closing it. Each entry is:
   `image_captioning` satisfies the `see` skill — and a *new* task with an
   `agent_skill` set becomes an agent skill backing with **no agent code
   change**.
+- **`suggested_adapters`** (optional) names the reference adapter(s) that
+  provide the task — editorial, consistent with `use_case_map.yml`. When a
+  skill greys out because no live adapter advertises a backing task, the
+  agent surfaces these to tell the operator which adapter to enable (and
+  deep-links to the AI Adapters view when configured with the UI URL). It's
+  guidance only — the agent never enables or approves an adapter itself.
 
 **The lint.** Two pure helpers ship alongside the registry
 (`canonicalize_task`, `lint_task_names` in `server/routers/ai_models.py`)
