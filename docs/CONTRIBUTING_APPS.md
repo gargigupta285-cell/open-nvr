@@ -50,6 +50,13 @@ serves the SDK's HTTP endpoints (`/health` `/manifest` `/state`), and
 `INTERNAL_API_KEY`. Once registered it shows up in the App Catalog with a
 live status dot and an auto-generated config form.
 
+> **New to the SDK? Start with the on-ramp.**
+> [`docs/FIRST_DETECTOR.md`](FIRST_DETECTOR.md) — "Your first OpenNVR detector
+> in 15 minutes" — scaffolds a runnable app with `scripts/create_opennvr_app.py`,
+> walks you through filling in the rule and getting its tests green, and lands
+> you right back here at step 3 to publish. Come back once you have a working
+> app under `examples/<id>/`.
+
 - **SDK + manifest.** Build on
   [`sdk/opennvr-app-sdk/`](../sdk/opennvr-app-sdk/). Every app ships an
   [`AppManifest`](../sdk/opennvr-app-sdk/opennvr_app_sdk/manifest.py) — its
@@ -199,6 +206,9 @@ on it.
 
 ## Related reading
 
+- [`docs/FIRST_DETECTOR.md`](FIRST_DETECTOR.md) — the on-ramp: scaffold a
+  runnable app with the generator, fill in the rule, get its tests green, run
+  it against the stack — then land here to publish it.
 - [`docs/APPS_INSTALL.md`](APPS_INSTALL.md) — the install security model:
   desired-state + reconciler, RBAC, digest pinning, audit. Explains *why*
   the pinned digest in your entry matters.

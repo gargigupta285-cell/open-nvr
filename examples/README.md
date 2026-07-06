@@ -4,6 +4,10 @@ Every example here is a **copy-as-template** starting point — minimal, readabl
 and opinionated. Pick one that's close to what you want to build, copy the
 folder, and edit the predicate.
 
+> **Building a brand-new app?** Skip the copy-and-delete. A generator
+> scaffolds a minimal, runnable Detector app and you fill in one method —
+> the rule. Follow **[Your first OpenNVR detector in 15 minutes](../docs/FIRST_DETECTOR.md)**.
+
 The thirteen shipped examples cover two orthogonal axes of the OpenNVR pipeline:
 *driving* inference vs *subscribing* to it, and *inference events* vs *alerts*.
 
@@ -453,8 +457,10 @@ The fastest path to a first-party example slot:
 1. Open a [discussion](https://github.com/open-nvr/open-nvr/discussions) with
    your idea, the camera setup you'll demo on, and the adapter(s) you'll
    chain.
-2. Fork, branch, and copy one of the thirteen shipped examples as your starting
-   template.
+2. Scaffold a working app — `python scripts/create_opennvr_app.py my-app` —
+   or fork and copy one of the thirteen shipped examples as your starting
+   template. The generator gives you a runnable, test-green Detector to fill
+   in; see **[docs/FIRST_DETECTOR.md](../docs/FIRST_DETECTOR.md)**.
 3. Replace the predicate (`zone.contains?`, the dwell-time state machine,
    etc.) with your domain logic.
 4. Keep the file layout, the config shape, the alert dispatcher pattern, and
