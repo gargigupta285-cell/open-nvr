@@ -78,6 +78,19 @@ class AppConfig:
     # KAI-C (for the vision tool calls — auditable).
     kaic_url: str
     kaic_api_key: str
+
+    # Optional single BASE URL for the OpenNVR deployment. When set, any UNSET
+    # sibling URL that points at the SAME deployment is derived from it, so a
+    # typical single-deployment install only has to configure one address:
+    #   opennvr_api_url ← opennvr_base_url   (the server API origin)
+    #   opennvr_ui_url  ← opennvr_base_url   (the main OpenNVR web UI)
+    # kaic_url and nats_inference_url are DELIBERATELY not derived — the KAI-C
+    # inference gateway and the NATS event bus are separate services on their
+    # own ports, so they stay explicit even when they live in the same
+    # deployment. Any per-field value set explicitly always wins over the base
+    # (the base only fills in the blanks). Unset → each sibling keeps its own
+    # value / stays None, i.e. fully backward-compatible.
+    opennvr_base_url: str | None = None
     detection_adapter: str = "yolov8"
     recognition_adapter: str = "insightface"
     caption_adapter: str = "blip"
@@ -2056,9 +2069,20 @@ def load_config(path: str | Path) -> AppConfig:
             "transcribes reliably and add the spellings it emits to wake_words "
             "(watch the 'wake score' log line while testing).", _name)
 
+    # Single-base-URL ergonomics: when opennvr_base_url is set, DERIVE any unset
+    # sibling that points at the same deployment (opennvr_api_url, opennvr_ui_url)
+    # from it. Explicit per-field values always win — the base only fills blanks.
+    # kaic_url and nats_inference_url are intentionally NOT derived (separate
+    # services / ports); the relationship is documented on AppConfig.
+    _base = raw.get("opennvr_base_url")
+    _base = str(_base).rstrip("/") if _base else None
+    _opennvr_api_url = raw.get("opennvr_api_url") or _base
+    _opennvr_ui_url = raw.get("opennvr_ui_url") or _base
+
     return AppConfig(
         kaic_url=str(raw["kaic_url"]),
         kaic_api_key=str(raw["kaic_api_key"]),
+        opennvr_base_url=_base,
         detection_adapter=_str("detection_adapter", "yolov8"),
         recognition_adapter=_str("recognition_adapter", "insightface"),
         caption_adapter=_str("caption_adapter", "blip"),
@@ -2096,8 +2120,8 @@ def load_config(path: str | Path) -> AppConfig:
         footage_index_path=raw.get("footage_index_path"),
         opennvr_cameras_url=raw.get("opennvr_cameras_url"),
         opennvr_api_key=raw.get("opennvr_api_key"),
-        opennvr_api_url=raw.get("opennvr_api_url"),
-        opennvr_ui_url=raw.get("opennvr_ui_url"),
+        opennvr_api_url=_opennvr_api_url,
+        opennvr_ui_url=_opennvr_ui_url,
         emergency_contacts=(
             dict(raw["emergency_contacts"])
             if isinstance(raw.get("emergency_contacts"), dict) else None
