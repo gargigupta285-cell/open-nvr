@@ -24,6 +24,13 @@ RUN pip install --no-cache-dir \
         "PyYAML>=6.0,<7.0" \
         "nats-py>=2.6"
 
+# The OpenNVR App SDK — this app's modules import opennvr_app_sdk
+# (alerts/frame_sources) at top level, so it must be installed into the
+# image or the container crashes on startup with ModuleNotFoundError.
+# Installed from the in-repo package.
+COPY sdk/opennvr-app-sdk /opt/opennvr-app-sdk
+RUN pip install --no-cache-dir /opt/opennvr-app-sdk
+
 COPY examples/smart-doorbell/__init__.py        ./__init__.py
 COPY examples/smart-doorbell/alerts.py          ./alerts.py
 COPY examples/smart-doorbell/frame_sources.py   ./frame_sources.py

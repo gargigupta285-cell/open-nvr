@@ -1,0 +1,216 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Docker build + boot smoke for the example APP images.
+#
+# Why this exists
+# ---------------
+# ci.yml runs pytest for every example and builds the frontend, and
+# publish-images.yml build-and-boots the opennvr-core image on PRs.
+# Nothing, until now, actually BUILT the example app container images —
+# so a Dockerfile that forgot to COPY a new module, or forgot to install
+# the SDK, passed every unit test and then crash-looped on the tester's
+# machine with `ModuleNotFoundError: No module named 'monitor_host'`.
+# That is the exact class of "green tests, crashes on deploy" bug this
+# workflow closes: it builds each app image and proves the container's
+# import graph resolves inside the real /app layout (not the dev tree),
+# and for the camera-agent it goes one step further and boots the HTTP
+# server to /health.
+#
+# What it catches
+#   - a module added to the source tree but not to the Dockerfile COPY list
+#   - a missing `pip install` of the in-repo SDK
+#   - an ImportError / side-effect-at-import regression in an app module
+#   - (camera-agent) the rule libraries not resolving from OPENNVR_RULES_DIR
+#   - (camera-agent) the FastAPI server failing to bind / serve /health
+#
+# What it does NOT do
+#   - full end-to-end against a live KAI-C + adapters + NATS (that needs
+#     the whole stack; these images are booted with unreachable deps and
+#     are designed to start anyway — background-retry, never block boot)
+#   - push images (publish-images.yml owns publishing)
+
+name: app-images-smoke
+
+on:
+  # Path-filtered: only run when an app image, the SDK it bundles, or
+  # this workflow itself changes. Docker builds are the expensive part
+  # of CI, so we don't pay them on a docs-only or server-only PR.
+  pull_request:
+    paths:
+      - "examples/**"
+      - "sdk/**"
+      - ".github/workflows/app-images-smoke.yml"
+  # Build on integration branches too, so a bad merge that only shows up
+  # at image-build time surfaces on main rather than on the next PR.
+  push:
+    branches: [main, arch-rev]
+    paths:
+      - "examples/**"
+      - "sdk/**"
+      - ".github/workflows/app-images-smoke.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: app-images-smoke-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # ── camera-agent: build + import + boot ──────────────────────────
+  # The heaviest and most complex app image (multi-module + monitor_host
+  # convergence + two bundled rule libraries + pipecat/torch), and the
+  # one that actually broke. It gets the full treatment: build, an
+  # in-image import smoke that reproduces the reported crash exactly,
+  # then a real boot to /health.
+  camera-agent:
+    name: camera-agent (build + boot)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build only (no push, load into the local daemon so the smoke
+      # steps below can `docker run` it). GHA cache keeps the torch /
+      # pipecat layers warm across runs — a clean build is ~several
+      # minutes, a cache hit is well under one.
+      - name: Build camera-agent image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: examples/camera-agent/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: opennvr/camera-agent:ci
+          cache-from: type=gha,scope=camera-agent
+          cache-to: type=gha,scope=camera-agent,mode=max
+
+      # Import smoke — the precise regression guard for the reported
+      # `ModuleNotFoundError: No module named 'monitor_host'`. Runs the
+      # image's own python against the real /app layout with no config
+      # and no network: it imports every agent module AND loads both
+      # bundled rule libraries the way the app does (via monitor_host,
+      # resolving from OPENNVR_RULES_DIR). If any file wasn't COPYed or
+      # the SDK wasn't installed, this fails deterministically in ~1s.
+      - name: Import smoke (reproduces the startup crash)
+        run: |
+          set -euo pipefail
+          docker run --rm -i --entrypoint python opennvr/camera-agent:ci - <<'PY'
+          import importlib
+
+          modules = [
+              "camera_agent", "monitor_host", "adapter_clients", "context",
+              "tools", "services", "frame_sources", "serializer", "footage_index",
+          ]
+          for name in modules:
+              importlib.import_module(name)
+              print(f"  import {name}: ok")
+
+          import monitor_host as mh
+          for rule in mh.RULES:
+              mod = mh._load_rule_module(rule)
+              print(f"  rule {rule!r} -> {mod.__name__}: ok")
+
+          print("OK: all agent modules + rule libraries import inside the image")
+          PY
+
+      # Boot smoke — start the FastAPI server and prove /health answers.
+      # The config omits nats_inference_url (so startup() skips the NATS
+      # subscriber) and points kaic_url at a dead port; the agent is
+      # built to boot anyway and background-retry, and /health is served
+      # from static config, so it does not depend on any dep being up.
+      # host MUST be 0.0.0.0 (default is 127.0.0.1) for the port publish
+      # to be reachable from the runner.
+      - name: Boot smoke (server serves /health)
+        run: |
+          set -euo pipefail
+
+          cat > ci-config.yml <<'YML'
+          host: "0.0.0.0"
+          port: 9100
+          kaic_url: "http://127.0.0.1:9"
+          kaic_api_key: "ci-smoke-not-a-real-key"
+          cameras: []
+          YML
+
+          cleanup() {
+            echo "----- camera-agent container logs -----" >&2
+            docker logs ca 2>&1 | tail -200 >&2 || true
+            docker rm -f ca >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker run -d --name ca \
+            -p 127.0.0.1:9100:9100 \
+            -v "$PWD/ci-config.yml:/app/config.yml:ro" \
+            opennvr/camera-agent:ci
+
+          # ~40s budget: cold container start + uvicorn bind. An import
+          # crash exits in ~1s, so a dead container short-circuits the
+          # wait instead of burning the whole budget.
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:9100/health -o health.json; then
+              echo "camera-agent healthy after ${i}x2s:"
+              cat health.json
+              # Assert the payload is the real /health contract, not some
+              # proxy/error page that happened to return 200.
+              python3 -c "import json,sys; d=json.load(open('health.json')); sys.exit(0 if d.get('status')=='ok' else 1)"
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' ca 2>/dev/null)" != "true" ]; then
+              echo "::error::camera-agent container exited before serving /health" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "::error::camera-agent never served /health within 40s" >&2
+          exit 1
+
+  # ── example app images: build + import ───────────────────────────
+  # The rest of the shipped app images. All are python:3.11-slim + SDK
+  # with no heavy deps, so build-and-import is fast. build-only would
+  # miss runtime import errors (exactly how camera-agent broke), so each
+  # image also runs an in-image `import <module>` — the app's entry
+  # module imports cleanly against the real /app layout or the job fails.
+  # To add a new app image: append {app, module} here.
+  example-images:
+    name: example/${{ matrix.app }} (build + import)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { app: home-assistant-relay, module: home_assistant_relay }
+          - { app: intrusion-detection,  module: intrusion_detection }
+          - { app: loitering-detection,  module: loitering_detection }
+          - { app: occupancy-counting,   module: occupancy_counting }
+          - { app: package-delivery,     module: package_delivery }
+          - { app: smart-doorbell,       module: smart_doorbell }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.app }} image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: examples/${{ matrix.app }}/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: opennvr/${{ matrix.app }}:ci
+          cache-from: type=gha,scope=${{ matrix.app }}
+          cache-to: type=gha,scope=${{ matrix.app }},mode=max
+
+      - name: Import smoke
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint python "opennvr/${{ matrix.app }}:ci" \
+            -c "import ${{ matrix.module }}; print('OK: ${{ matrix.module }} imports inside the image')"
