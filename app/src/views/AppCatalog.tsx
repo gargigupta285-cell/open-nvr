@@ -30,6 +30,7 @@ import { extractApiError } from '../lib/apiError'
 import { Modal } from '../components/Modal'
 import { useSnackbar } from '../components/Snackbar'
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, EmptyState, ErrorCard, PageHeader, Skeleton, type BadgeVariant } from '../components/ui'
+import { GeometryEditor } from './apps/GeometryEditor'
 
 type ManifestParam = {
   name: string
@@ -353,7 +354,16 @@ function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: () => v
   }
 
   return (
-    <Modal open title={`Configure ${app.name}`} onClose={onClose} widthClassName="w-[560px]">
+    <Modal
+      open
+      title={`Configure ${app.name}`}
+      onClose={onClose}
+      widthClassName={
+        params.some((p) => (p.type || '').toLowerCase().startsWith('geometry.'))
+          ? 'w-[720px]'
+          : 'w-[560px]'
+      }
+    >
       {params.length === 0 ? (
         <div className="text-sm text-[var(--text-dim)]">This app declares no configurable parameters.</div>
       ) : (
@@ -372,7 +382,13 @@ function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: () => v
                   </span>
                 </label>
                 {p.description && <div className="text-xs text-[var(--text-dim)] mb-1">{p.description}</div>}
-                {isJsonParam(p) ? (
+                {t === 'geometry.polygon' || t === 'geometry.tripwire' ? (
+                  <GeometryEditor
+                    kind={t === 'geometry.tripwire' ? 'tripwire' : 'polygon'}
+                    value={String(value ?? '')}
+                    onChange={(json) => setValues((v) => ({ ...v, [p.name]: json }))}
+                  />
+                ) : isJsonParam(p) ? (
                   <textarea
                     className="w-full h-28 px-2 py-1.5 text-sm font-mono rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
                     value={String(value ?? '')}

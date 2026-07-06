@@ -410,3 +410,50 @@ def test_load_config_rejects_zero_poll_interval(tmp_path: Path):
     """))
     with pytest.raises(ValueError, match="poll_interval_seconds"):
         load_config(str(cfg))
+
+
+# ── App Catalog geometry editor → running rule (normalized zones) ──────
+
+
+def test_registry_zones_override_scaled_to_pixels(tmp_path: Path):
+    """The catalog zone editor stores a top-level normalized `zones`
+    dict keyed by camera_id; load_config must apply it (scaled to the
+    camera's pixels), overriding the nested zone."""
+    import yaml as _yaml
+
+    cfg = tmp_path / "c.yml"
+    cfg.write_text(_yaml.safe_dump({
+        "kaic_url": "http://k", "kaic_api_key": "x",
+        "cameras": [{
+            "camera_id": "cam-1",
+            "frame_url": "file:///x.jpg",
+            "frame_width": 1000, "frame_height": 800,
+            # legacy nested zone that must be OVERRIDDEN:
+            "zone": [[0, 0], [10, 0], [10, 10]],
+        }],
+        # operator-drawn, normalized 0-1:
+        "zones": {"cam-1": [[0.1, 0.2], [0.9, 0.2], [0.9, 0.8], [0.1, 0.8]]},
+    }))
+    parsed = load_config(cfg)
+    zone = parsed.cameras[0].zone
+    pts = [(p.x, p.y) for p in zone.polygon]
+    assert pts == [(100.0, 160.0), (900.0, 160.0), (900.0, 640.0), (100.0, 640.0)]
+
+
+def test_nested_zone_still_works_without_registry_zones(tmp_path: Path):
+    """No top-level `zones` → the nested pixel zone is used unchanged
+    (backward compatibility)."""
+    import yaml as _yaml
+
+    cfg = tmp_path / "c.yml"
+    cfg.write_text(_yaml.safe_dump({
+        "kaic_url": "http://k", "kaic_api_key": "x",
+        "cameras": [{
+            "camera_id": "cam-1", "frame_url": "file:///x.jpg",
+            "frame_width": 1920, "frame_height": 1080,
+            "zone": [[200, 400], [1720, 400], [100, 900]],
+        }],
+    }))
+    parsed = load_config(cfg)
+    pts = [(p.x, p.y) for p in parsed.cameras[0].zone.polygon]
+    assert pts == [(200.0, 400.0), (1720.0, 400.0), (100.0, 900.0)]

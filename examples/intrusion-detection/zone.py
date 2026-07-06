@@ -17,4 +17,5 @@ from opennvr_app_sdk.geometry import (  # noqa: F401
     Point,
     Zone,
     bbox_center,
+    scale_vertices,
 )

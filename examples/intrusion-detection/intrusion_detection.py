@@ -62,7 +62,7 @@ from alerts import Alert, AlertDispatcher, build_dispatcher
 from frame_sources import FrameSource, FrameSourceError, build_frame_source
 from opennvr_app_sdk import AlertType, AppManifest, FrameApp, Param
 from opennvr_app_sdk.frame_sources import DictFrameSource
-from zone import Point, Zone, bbox_center
+from zone import Point, Zone, bbox_center, scale_vertices
 
 logger = logging.getLogger("intrusion-detection")
 
@@ -212,20 +212,36 @@ def load_config(path: str) -> AppConfig:
     cameras_raw = raw.get("cameras") or []
     if not cameras_raw:
         raise ValueError("config: at least one camera entry is required")
+    # The App Catalog's zone editor stores geometry as a top-level
+    # ``zones`` dict keyed by camera_id, in NORMALIZED 0-1 coords. When
+    # present it OVERRIDES the per-camera ``zone`` (the operator's drawn
+    # zone wins), scaled to that camera's pixels. The nested ``zone:``
+    # form still works for hand-written / legacy config.
+    zones_override = raw.get("zones")
+    zones_map = zones_override if isinstance(zones_override, dict) else {}
     cameras: list[CameraWatch] = []
     for idx, c in enumerate(cameras_raw):
         try:
+            camera_id = str(c["camera_id"])
+            frame_width = int(c.get("frame_width", 1920))
+            frame_height = int(c.get("frame_height", 1080))
+            drawn = zones_map.get(camera_id)
+            zone_vertices = (
+                scale_vertices(drawn, frame_width, frame_height)
+                if isinstance(drawn, list) and drawn
+                else c["zone"]
+            )
             zone = Zone.from_config(
                 name=str(c.get("zone_name", f"zone-{idx}")),
-                vertices=c["zone"],
+                vertices=zone_vertices,
             )
             cameras.append(
                 CameraWatch(
-                    camera_id=str(c["camera_id"]),
+                    camera_id=camera_id,
                     frame_url=str(c["frame_url"]),
                     zone=zone,
-                    frame_width=int(c.get("frame_width", 1920)),
-                    frame_height=int(c.get("frame_height", 1080)),
+                    frame_width=frame_width,
+                    frame_height=frame_height,
                 )
             )
         except (KeyError, TypeError, ValueError) as exc:

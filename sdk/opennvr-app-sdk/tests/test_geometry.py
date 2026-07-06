@@ -71,3 +71,27 @@ def test_bbox_center_missing_keys_default_to_zero():
 def test_bbox_center_non_numeric_values_default_to_zero():
     center = bbox_center({"x": "junk", "y": None, "w": 0.2, "h": 0.2}, 100, 100)
     assert center == Point(10.0, 10.0)
+
+
+# ── scale_vertices: the App Catalog editor's normalized→pixel bridge ───
+
+
+def test_scale_vertices_normalized_scales_to_pixels():
+    from opennvr_app_sdk.geometry import scale_vertices
+
+    out = scale_vertices([[0.1, 0.2], [0.5, 0.5], [0.9, 0.8]], 1920, 1080)
+    assert out == [[192.0, 216.0], [960.0, 540.0], [1728.0, 864.0]]
+
+
+def test_scale_vertices_pixels_pass_through():
+    from opennvr_app_sdk.geometry import scale_vertices
+
+    # Any coord > 1 marks the whole set as literal pixels (legacy config).
+    out = scale_vertices([[200, 400], [1720, 400], [100, 900]], 1920, 1080)
+    assert out == [[200.0, 400.0], [1720.0, 400.0], [100.0, 900.0]]
+
+
+def test_scale_vertices_empty_is_empty():
+    from opennvr_app_sdk.geometry import scale_vertices
+
+    assert scale_vertices([], 1920, 1080) == []

@@ -242,3 +242,23 @@ def bbox_center(bbox_normalized: dict, frame_width: int, frame_height: int) -> P
         x=(x + w / 2.0) * frame_width,
         y=(y + h / 2.0) * frame_height,
     )
+
+
+def scale_vertices(
+    vertices: Sequence[Sequence[float]], frame_width: int, frame_height: int
+) -> list[list[float]]:
+    """Return pixel-space ``[[x, y], …]`` for geometry that may be either
+    NORMALIZED (0–1) or already in pixels.
+
+    The App Catalog geometry editor emits normalized 0–1 coordinates
+    (resolution-independent). Hand-written legacy config uses literal
+    pixels. This resolves both: if EVERY coordinate is within [0, 1] the
+    input is treated as normalized and scaled by the frame dims;
+    otherwise it's taken as literal pixels and passed through. The
+    ambiguous all-in-[0,1] pixel case (a zone in the top-left few pixels)
+    is not a real ROI, so treating it as normalized is safe.
+    """
+    pts = [(float(v[0]), float(v[1])) for v in vertices]
+    if pts and all(0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 for x, y in pts):
+        return [[x * frame_width, y * frame_height] for x, y in pts]
+    return [[x, y] for x, y in pts]

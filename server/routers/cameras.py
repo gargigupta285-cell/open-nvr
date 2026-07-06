@@ -1430,3 +1430,54 @@ async def set_camera_transport_security(
         "transport_security_operator_set": config.transport_security_operator_set,
         "previous": previous,
     }
+
+
+@router.get("/{camera_id}/snapshot")
+async def get_camera_snapshot(
+    camera_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """One JPEG still of the camera's CURRENT view.
+
+    Backs the App Catalog's geometry editors: an operator draws a
+    restricted zone / tripwire directly on what the camera actually
+    sees, instead of hand-typing pixel coordinates. Served from the
+    same persistent capture pool inference uses (in-memory JPEG, no
+    disk round-trip), including the MediaMTX tap-URL resolution and
+    stale-JWT self-heal.
+
+    Ownership-checked like every camera read (owner or superuser);
+    404 for unknown/unowned, 503 when no frame can be captured (camera
+    offline / stream down) — the editor falls back to a plain grid.
+    """
+    from fastapi.responses import Response
+
+    from services.kai_c_service import get_kai_c_service
+
+    camera = CameraService.get_camera_by_id(db, camera_id, current_user.id)
+    if not camera:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found"
+        )
+    if not camera.rtsp_url:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Camera has no stream URL configured",
+        )
+
+    jpeg = await get_kai_c_service().capture_frame_bytes(
+        camera.rtsp_url, camera.id
+    )
+    if not jpeg:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not capture a frame (camera offline?)",
+        )
+    return Response(
+        content=jpeg,
+        media_type="image/jpeg",
+        # Always-fresh: the editor wants the current view, and browsers
+        # aggressively cache image GETs otherwise.
+        headers={"Cache-Control": "no-store"},
+    )

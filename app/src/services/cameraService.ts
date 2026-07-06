@@ -28,6 +28,10 @@ export const cameraService = {
   // Camera Management
   getCameras: (params: Record<string, any> = {}) => api.get('/api/v1/cameras/', { params }),
   getCamera: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}`),
+  // A single JPEG still of the camera's current view — backs the App
+  // Catalog geometry editors (draw a zone/tripwire on the real scene).
+  getCameraSnapshot: (cameraId: number) =>
+    api.get(`/api/v1/cameras/${cameraId}/snapshot`, { responseType: 'blob' }),
   createCamera: (payload: any) => api.post('/api/v1/cameras/', payload),
   updateCamera: (cameraId: number, payload: any) => api.put(`/api/v1/cameras/${cameraId}`, payload),
   deleteCamera: (cameraId: number) => api.delete(`/api/v1/cameras/${cameraId}`),

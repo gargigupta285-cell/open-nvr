@@ -75,7 +75,7 @@ from opennvr_app_sdk import (
     app,
 )
 from opennvr_app_sdk.config import load_yaml
-from opennvr_app_sdk.geometry import Point, Tripwire, bbox_center
+from opennvr_app_sdk.geometry import Point, Tripwire, bbox_center, scale_vertices
 from opennvr_app_sdk.state import keyed_state
 
 logger = logging.getLogger("line-crossing")
@@ -177,15 +177,16 @@ def load_config(path: str) -> AppConfig:
     cameras_raw = raw.get("cameras") or []
     if not cameras_raw:
         raise ValueError("config: at least one camera entry is required")
+    # The App Catalog's tripwire editor stores a top-level ``line`` dict
+    # keyed by camera_id ({a, b, count_direction}) in NORMALIZED 0-1
+    # coords. When present it OVERRIDES the nested ``line:`` for that
+    # camera, scaled to pixels. Hand-written nested config still works.
+    line_override = raw.get("line")
+    line_map = line_override if isinstance(line_override, dict) else {}
     cameras: dict[str, CameraWire] = {}
     for idx, c in enumerate(cameras_raw):
         try:
-            wire = Tripwire.from_config(
-                name=str(c.get("wire_name", f"wire-{idx}")),
-                a=c["line"]["a"],
-                b=c["line"]["b"],
-                count_direction=str(c["line"].get("count_direction", "both")),
-            )
+            camera_id = str(c["camera_id"])
             frame_width = int(c.get("frame_width", 1920))
             frame_height = int(c.get("frame_height", 1080))
             if frame_width <= 0 or frame_height <= 0:
@@ -193,8 +194,25 @@ def load_config(path: str) -> AppConfig:
                     f"frame_width and frame_height must be > 0; got "
                     f"frame_width={frame_width}, frame_height={frame_height}"
                 )
+            drawn = line_map.get(camera_id)
+            if isinstance(drawn, dict) and "a" in drawn and "b" in drawn:
+                (pa, pb) = scale_vertices(
+                    [drawn["a"], drawn["b"]], frame_width, frame_height
+                )
+                wire = Tripwire.from_config(
+                    name=str(c.get("wire_name", f"wire-{idx}")),
+                    a=pa, b=pb,
+                    count_direction=str(drawn.get("count_direction", "both")),
+                )
+            else:
+                wire = Tripwire.from_config(
+                    name=str(c.get("wire_name", f"wire-{idx}")),
+                    a=c["line"]["a"],
+                    b=c["line"]["b"],
+                    count_direction=str(c["line"].get("count_direction", "both")),
+                )
             cam = CameraWire(
-                camera_id=str(c["camera_id"]),
+                camera_id=camera_id,
                 wire=wire,
                 frame_width=frame_width,
                 frame_height=frame_height,
