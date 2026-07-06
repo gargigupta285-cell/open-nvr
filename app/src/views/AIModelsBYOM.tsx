@@ -63,7 +63,12 @@ type CloudModel = {
 }
 
 const AVAILABLE_MODELS = [
-  { value: 'yolov8', label: 'YOLOv8' },
+  // The standard stack registers its single object-detection adapter under the
+  // KAI-C slot name "default" (see kai-c ADAPTER_REGISTRY / compose ADAPTER_URL).
+  // In governed mode the backend routes POST /api/v1/infer/{model_name}, so the
+  // value MUST be the adapter slot name, not the model family. Label stays
+  // "YOLOv8" for the operator; value is the slot the YOLOv8 adapter occupies.
+  { value: 'default', label: 'YOLOv8' },
   { value: 'yolov11', label: 'YOLOv11' },
   { value: 'blip', label: 'BLIP (Image Captioning)' },
   { value: 'insightface', label: 'InsightFace (Face Recognition)' },
@@ -93,7 +98,7 @@ export function AIModelsBYOM() {
   // Form state
   const [formData, setFormData] = useState({
     name: '',
-    model_name: 'yolov8',
+    model_name: 'default',
     task: 'person_detection',
     config: '',
     enabled: true,
@@ -425,7 +430,7 @@ export function AIModelsBYOM() {
       // Reset form
       setFormData({
         name: '',
-        model_name: 'yolov8',
+        model_name: 'default',
         task: 'person_detection',
         config: '',
         enabled: true,
@@ -487,7 +492,7 @@ export function AIModelsBYOM() {
     setEditingId(null)
     setFormData({
       name: '',
-      model_name: 'yolov8',
+      model_name: 'default',
       task: 'person_detection',
       config: '',
       enabled: true,

@@ -21,21 +21,29 @@ info() { printf '  %s\n' "$*"; }
 ok() { printf '  ✓ %s\n' "$*"; }
 warn() { printf '  ⚠ %s\n' "$*"; }
 die() { printf '  ✗ %s\n' "$*" >&2; exit 1; }
+# NOTE on `|| true` after every interactive `read`: this script runs under
+# `set -e`. A `read` returns non-zero when it hits EOF (stdin closed, or a
+# non-interactive/piped invocation that ran out of answers). Without the
+# `|| true`, that non-zero status trips errexit and the installer exits
+# SILENTLY mid-prompt — e.g. it bailed right after the camera-agent
+# voice/chat question. Tolerating the failure lets us fall back to the
+# default instead, matching the PowerShell installer (Read-Host has no
+# errexit equivalent, which is why start.ps1 never had this bug).
 ask_yes_no() {
     local prompt="$1" default="${2:-n}" answer hint
     [[ "$default" == "y" ]] && hint="Y/n" || hint="y/N"
-    read -r -p "  $prompt [$hint]: " answer
+    read -r -p "  $prompt [$hint]: " answer || true
     answer="${answer:-$default}"
     [[ "$answer" =~ ^[Yy] ]]
 }
 ask_value() {
     local prompt="$1" default="$2" answer
-    read -r -p "  $prompt [$default]: " answer
+    read -r -p "  $prompt [$default]: " answer || true
     REPLY="${answer:-$default}"
 }
 ask_secret() {
     local prompt="$1" answer
-    read -r -s -p "  $prompt: " answer
+    read -r -s -p "  $prompt: " answer || true
     printf '\n'
     REPLY="$answer"
 }
@@ -235,7 +243,7 @@ choose_example() {
         index=$((index + 1))
     done
     printf '   0. Core stack only\n\n'
-    read -r -p "  Select an example [0]: " choice
+    read -r -p "  Select an example [0]: " choice || true  # EOF-safe under set -e (see ask_* note)
     choice="${choice:-0}"
     [[ "$choice" =~ ^[0-9]+$ ]] || die "Invalid selection"
     (( choice == 0 )) && return 0
