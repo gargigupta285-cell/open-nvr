@@ -703,10 +703,18 @@ function AppStatusChip({ appId }: { appId: string }) {
 export type StateViewSpec = {
   name: string
   label: string
-  kind: 'metric' | 'table'
+  kind: 'metric' | 'table' | 'gauge' | 'log' | 'gallery'
   path?: string
   columns?: string[]
   description?: string
+  // gauge
+  min?: number
+  max?: number
+  unit?: string
+  warn?: number
+  danger?: number
+  // log / gallery
+  limit?: number
 }
 
 function getStatePath(obj: any, path?: string): any {
@@ -782,6 +790,137 @@ function TableView({ view, value }: { view: StateViewSpec; value: any }) {
   )
 }
 
+// A single horizontal gauge: value against min..max with warn/danger
+// thresholds coloring the fill. Used for occupancy, queue depth, etc.
+function GaugeBar({ label, value, view }: { label: string; value: number; view: StateViewSpec }) {
+  const min = view.min ?? 0
+  const max = view.max ?? 100
+  const span = max - min || 1
+  const pct = Math.max(0, Math.min(100, ((value - min) / span) * 100))
+  const danger = view.danger != null && value >= view.danger
+  const warn = !danger && view.warn != null && value >= view.warn
+  const color = danger ? 'var(--danger,#ef4444)' : warn ? 'var(--warning,#f59e0b)' : 'var(--success,#22c55e)'
+  return (
+    <div title={view.description || view.name}>
+      <div className="flex items-baseline justify-between text-xs mb-1">
+        <span className="text-[var(--text-dim)]">{label}</span>
+        <span className="font-semibold tabular-nums">
+          {value}
+          {view.unit ? <span className="text-[var(--text-dim)] font-normal"> {view.unit}</span> : null}
+        </span>
+      </div>
+      <div className="h-2 w-full rounded-full bg-[var(--bg-2)] overflow-hidden">
+        <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
+      </div>
+    </div>
+  )
+}
+
+function GaugeView({ view, value }: { view: StateViewSpec; value: any }) {
+  // Scalar → one gauge; dict-of-numbers → one gauge per key (per camera/zone).
+  const entries: [string, number][] =
+    value != null && typeof value === 'object' && !Array.isArray(value)
+      ? Object.entries(value)
+          .filter(([, v]) => typeof v === 'number')
+          .map(([k, v]) => [k, v as number])
+      : typeof value === 'number'
+        ? [[view.label, value]]
+        : []
+  if (entries.length === 0) return null
+  const single = entries.length === 1 && entries[0][0] === view.label
+  return (
+    <div title={view.description || view.name}>
+      {!single && <div className="text-xs text-[var(--text-dim)] mb-1">{view.label}</div>}
+      <div className="space-y-2">
+        {entries.map(([k, v]) => (
+          <GaugeBar key={k} label={k} value={v} view={view} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function fmtWhen(v: unknown): string {
+  if (v == null) return ''
+  if (typeof v === 'number') {
+    // epoch seconds or ms → relative age
+    const now = Date.now() / 1000
+    const t = v > 1e12 ? v / 1000 : v
+    const age = Math.max(0, now - t)
+    if (age < 60) return `${Math.floor(age)}s ago`
+    if (age < 3600) return `${Math.floor(age / 60)}m ago`
+    if (age < 86400) return `${Math.floor(age / 3600)}h ago`
+    return `${Math.floor(age / 86400)}d ago`
+  }
+  return String(v)
+}
+
+function LogView({ view, value }: { view: StateViewSpec; value: any }) {
+  // A recent-events feed: array of strings or {message/text, time/ts, level}.
+  if (!Array.isArray(value) || value.length === 0) return null
+  const limit = view.limit ?? 12
+  const rows = value.slice(-limit).reverse()
+  return (
+    <div title={view.description || view.name}>
+      <div className="text-xs text-[var(--text-dim)] mb-1">{view.label}</div>
+      <div className="rounded border border-[var(--border)] bg-[var(--bg-2)] divide-y divide-[var(--border)] max-h-64 overflow-y-auto">
+        {rows.map((row, i) => {
+          const isObj = row != null && typeof row === 'object'
+          const msg = isObj ? row.message ?? row.text ?? row.msg ?? JSON.stringify(row) : String(row)
+          const when = isObj ? fmtWhen(row.time ?? row.ts ?? row.timestamp ?? row.at) : ''
+          const level = isObj ? String(row.level ?? row.severity ?? '') : ''
+          const dot = level === 'high' || level === 'error' ? 'var(--danger,#ef4444)'
+            : level === 'warn' || level === 'warning' ? 'var(--warning,#f59e0b)'
+            : 'var(--text-dim)'
+          return (
+            <div key={i} className="flex items-start gap-2 px-2 py-1.5 text-xs">
+              <span className="mt-1 h-1.5 w-1.5 rounded-full shrink-0" style={{ background: dot }} />
+              <span className="flex-1 break-words">{msg}</span>
+              {when && <span className="text-[var(--text-dim)] shrink-0 tabular-nums">{when}</span>}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function GalleryView({ view, value }: { view: StateViewSpec; value: any }) {
+  // A thumbnail wall: array of {image|url|src (data-uri or path), label, time}.
+  // For LPR plate crops, package-on-porch snapshots, doorbell faces.
+  if (!Array.isArray(value) || value.length === 0) return null
+  const limit = view.limit ?? 12
+  const items = value.slice(-limit).reverse()
+  return (
+    <div title={view.description || view.name}>
+      <div className="text-xs text-[var(--text-dim)] mb-1">{view.label}</div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+        {items.map((it, i) => {
+          const isObj = it != null && typeof it === 'object'
+          const src = isObj ? it.image ?? it.url ?? it.src ?? it.thumbnail : typeof it === 'string' ? it : undefined
+          const caption = isObj ? it.label ?? it.plate ?? it.name ?? it.caption : undefined
+          const when = isObj ? fmtWhen(it.time ?? it.ts ?? it.timestamp ?? it.at) : ''
+          return (
+            <div key={i} className="rounded border border-[var(--border)] bg-[var(--bg-2)] overflow-hidden">
+              {src ? (
+                <img src={src} alt={caption || 'snapshot'} className="w-full h-24 object-cover" loading="lazy" />
+              ) : (
+                <div className="w-full h-24 grid place-items-center text-[var(--text-dim)] text-xs">no image</div>
+              )}
+              {(caption || when) && (
+                <div className="px-2 py-1 text-xs flex items-center justify-between gap-1">
+                  <span className="truncate font-medium">{caption}</span>
+                  {when && <span className="text-[var(--text-dim)] shrink-0">{when}</span>}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 export function LiveStateViews({ appId, views }: { appId: string; views: StateViewSpec[] }) {
   // Same key as AppStatusChip; enabled:false — this component only
   // OBSERVES the cache the chip's "Check" fills (no extra fan-out).
@@ -797,9 +936,12 @@ export function LiveStateViews({ appId, views }: { appId: string; views: StateVi
   const state = statusQuery.data?.state
   if (state == null) return null
   const metrics = views.filter((v) => v.kind === 'metric')
-  const tables = views.filter((v) => v.kind === 'table')
+  const gauges = views.filter((v) => v.kind === 'gauge')
+  // Tables, logs and galleries are full-width blocks rendered in the
+  // author's declared order (so a manifest can interleave them).
+  const blocks = views.filter((v) => v.kind === 'table' || v.kind === 'log' || v.kind === 'gallery')
   return (
-    <div className="space-y-2 pt-1">
+    <div className="space-y-3 pt-1">
       {metrics.length > 0 && (
         <div className="flex flex-wrap gap-2">
           {metrics.map((v) => (
@@ -807,9 +949,22 @@ export function LiveStateViews({ appId, views }: { appId: string; views: StateVi
           ))}
         </div>
       )}
-      {tables.map((v) => (
-        <TableView key={v.name} view={v} value={getStatePath(state, v.path)} />
-      ))}
+      {gauges.length > 0 && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-3">
+          {gauges.map((v) => (
+            <GaugeView key={v.name} view={v} value={getStatePath(state, v.path)} />
+          ))}
+        </div>
+      )}
+      {blocks.map((v) =>
+        v.kind === 'table' ? (
+          <TableView key={v.name} view={v} value={getStatePath(state, v.path)} />
+        ) : v.kind === 'log' ? (
+          <LogView key={v.name} view={v} value={getStatePath(state, v.path)} />
+        ) : (
+          <GalleryView key={v.name} view={v} value={getStatePath(state, v.path)} />
+        )
+      )}
     </div>
   )
 }

@@ -88,6 +88,18 @@ class StateView:
     ``kind="table"``
         A list at ``path``; ``columns`` names the keys to show when the
         rows are dicts. A list of scalars renders as one column.
+    ``kind="gauge"``
+        A numeric ``path`` rendered as a horizontal bar between ``min``
+        and ``max``, coloured amber past ``warn`` and red past
+        ``danger`` (e.g. zone occupancy). A dict-of-numbers renders one
+        gauge per key (per camera / per zone).
+    ``kind="log"``
+        A recent-events feed: ``path`` is a list of strings or dicts
+        ``{message, time, level}``; newest ``limit`` shown first.
+    ``kind="gallery"``
+        A thumbnail wall: ``path`` is a list of dicts
+        ``{image|url, label, time}`` — for plate crops, package or
+        doorbell snapshots. ``image`` may be a ``data:`` URI.
 
     ``path`` is a dot-path into the ``/state`` dict (``"zones"``,
     ``"counters.in"``). A missing path renders as an em-dash, never an
@@ -96,13 +108,29 @@ class StateView:
 
     name: str
     label: str
-    kind: str = "metric"  # "metric" | "table"
+    kind: str = "metric"  # metric | table | gauge | log | gallery
     path: str = ""
     columns: list[str] = field(default_factory=list)
     description: str = ""
+    # gauge bounds/thresholds (ignored by other kinds)
+    min: float | None = None
+    max: float | None = None
+    unit: str = ""
+    warn: float | None = None
+    danger: float | None = None
+    # log / gallery: how many recent entries to show
+    limit: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        # Drop unset optionals so manifests stay lean and the frontend's
+        # `?? default` fallbacks apply cleanly.
+        d = asdict(self)
+        for k in ("min", "max", "warn", "danger", "limit"):
+            if d.get(k) is None:
+                d.pop(k, None)
+        if not d.get("unit"):
+            d.pop("unit", None)
+        return d
 
 
 @dataclass
