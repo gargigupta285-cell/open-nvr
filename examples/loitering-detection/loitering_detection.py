@@ -65,6 +65,7 @@ Run::
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -74,6 +75,7 @@ from opennvr_app_sdk import (
     AppManifest,
     Detector,
     Param,
+    StateView,
     app,
 )
 from opennvr_app_sdk.config import load_yaml
@@ -99,6 +101,24 @@ MANIFEST = AppManifest(
         Param("zones", "geometry.polygon", per_camera=True),  # drawn in the catalog UI
     ],
     emits=[AlertType("loitering", severity="medium")],
+    # Declarative live-state views — the catalog renders the dwell
+    # bookkeeping (see state_snapshot) with zero app-specific UI code.
+    state_schema=[
+        StateView(name="active_dwells", label="Active dwells",
+                  kind="metric", path="active_dwells",
+                  description="Watched objects currently accruing dwell time "
+                              "in a zone (one per live (camera, label) key)."),
+        StateView(name="alerted", label="Alerts fired",
+                  kind="metric", path="alerted",
+                  description="Active dwells that have crossed the loiter "
+                              "threshold and latched an alert."),
+        StateView(name="dwelling", label="Dwelling now",
+                  kind="table", path="dwelling",
+                  columns=["camera", "label", "dwell_s", "alerted"],
+                  description="Each object currently dwelling in a zone, with "
+                              "its accrued dwell in seconds and whether it has "
+                              "already fired a loitering alert."),
+    ],
 )
 
 
@@ -446,6 +466,32 @@ class LoiteringDetector(Detector):
             },
             tags=["loitering", camera.zone.name, label],
         )
+
+    def state_snapshot(self) -> dict[str, Any]:
+        """``GET /state`` — live dwell bookkeeping the catalog renders
+        via ``state_schema``. Each live ``_DwellState`` is one object
+        currently accruing dwell in a zone.
+
+        ``present_since`` / ``last_seen`` are POSIX event-time seconds
+        (``parse_event_ts`` → ``time.time`` fallback, matching the
+        ``keyed_state`` default clock), so "now" is ``time.time()``.
+        A backdated ``completed_at`` could put ``present_since`` in the
+        future relative to our wall clock; clamp at 0 so ``dwell_s`` is
+        never negative."""
+        now = time.time()
+        dwelling: list[dict[str, Any]] = []
+        for (camera_id, label), record in self._states.items():
+            dwelling.append({
+                "camera": camera_id,
+                "label": label,
+                "dwell_s": round(max(0.0, now - record.present_since), 1),
+                "alerted": bool(record.alerted),
+            })
+        return {
+            "active_dwells": len(dwelling),
+            "alerted": sum(1 for row in dwelling if row["alerted"]),
+            "dwelling": dwelling,
+        }
 
 
 # Spec-preferred short name; ``LoiteringDetector`` is the historical

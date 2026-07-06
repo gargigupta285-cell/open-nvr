@@ -73,6 +73,7 @@ import datetime as _dt
 import logging
 import signal
 import sys
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -113,6 +114,9 @@ MANIFEST = AppManifest(
                   kind="metric", path="rows_total"),
         StateView(name="session", label="This session",
                   kind="metric", path="indexed_this_session"),
+        StateView(name="recent", label="Recent searches",
+                  kind="log", path="recent", limit=10,
+                  description="Operator queries run from the search action."),
     ],
     # Operator actions (user-JWT-only through the server proxy): the UI
     # query path that replaces `docker compose exec … search "…"`.
@@ -248,6 +252,9 @@ class Indexer(Detector):
         self._store = store
         super().__init__(config, dispatcher)
         self._indexed = 0
+        # Rolling feed of the most recent operator searches — powers the
+        # "Recent searches" log on the app's dashboard.
+        self._recent: deque[dict[str, Any]] = deque(maxlen=25)
 
     def ingest(self, event: dict[str, Any]) -> bool:
         """Index one event. Returns True if a keyframe was stored."""
@@ -273,6 +280,7 @@ class Indexer(Detector):
         return {
             "indexed_this_session": self._indexed,
             "rows_total": self._store.count(),
+            "recent": list(self._recent),
         }
 
     def on_action(self, name: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -305,6 +313,12 @@ class Indexer(Detector):
             # One fresh connection PER ACTION — it must close with the
             # request or N searches leak N file descriptors (review H1).
             read_store.close()
+        self._recent.append({
+            "message": f"“{query}” — {len(results)} hit"
+                       f"{'' if len(results) == 1 else 's'}",
+            "time": _dt.datetime.now(tz=_dt.timezone.utc).isoformat(
+                timespec="seconds"),
+        })
         return {
             "query": query,
             "results": [

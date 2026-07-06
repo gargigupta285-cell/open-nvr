@@ -45,6 +45,7 @@ import signal
 import sys
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -122,6 +123,9 @@ MANIFEST = AppManifest(
         StateView(name="deduped", label="Plates deduped",
                   kind="metric", path="deduped_plates_tracked",
                   description="Distinct (camera, plate) pairs in the dedup window."),
+        StateView(name="recent", label="Recent plate reads",
+                  kind="log", path="recent", limit=12,
+                  description="Latest reads; denylist hits show red."),
     ],
 )
 
@@ -393,6 +397,9 @@ class LicensePlateRecognizer(FrameApp):
         # actually-fired", never refreshes on suppression, and its
         # shape is pinned by this app's test suite.
         self._last_fired: dict[tuple[str, str], float] = {}
+        # Rolling feed of the most recent plate reads — powers the
+        # "Recent plate reads" log on the app's dashboard.
+        self._recent: deque[dict[str, Any]] = deque(maxlen=25)
         # BOTH watchlists live in ONE tuple attribute so a live config
         # swap is a single rebind: a reader can never observe new-allow
         # with old-deny mid-update (the alert-severity routing reads
@@ -436,6 +443,11 @@ class LicensePlateRecognizer(FrameApp):
 
             alert = self._build_alert(cam, read)
             self.dispatcher.dispatch(alert)
+            self._recent.append({
+                "message": f"{read.plate_text.upper()} on {cam.camera_id}",
+                "time": time.time(),
+                "level": alert.severity,
+            })
             fired += 1
         # Wire the app-dispatched alerts into the SDK contract counters
         # (/health's alerts_fired) — the base loop can't see them
@@ -450,6 +462,7 @@ class LicensePlateRecognizer(FrameApp):
             "deduped_plates_tracked": len(self._last_fired),
             "allowlist_size": len(self._watchlists[0]),
             "denylist_size": len(self._watchlists[1]),
+            "recent": list(self._recent),
         }
 
     def on_config_update(self, config: dict[str, Any]) -> None:

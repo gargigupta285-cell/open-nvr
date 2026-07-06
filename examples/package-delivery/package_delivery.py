@@ -59,7 +59,7 @@ from alerts import (
     build_dispatcher,
 )
 from frame_sources import FrameSource, FrameSourceError, build_frame_source
-from opennvr_app_sdk import AlertType, AppManifest, FrameApp, Param
+from opennvr_app_sdk import AlertType, AppManifest, FrameApp, Param, StateView
 from opennvr_app_sdk.frame_sources import DictFrameSource
 from package_pipeline import (
     DEFAULT_DETECTION_CONFIDENCE,
@@ -129,6 +129,25 @@ MANIFEST = AppManifest(
         AlertType(EVENT_LINGERING, severity="low"),
         AlertType(EVENT_GONE_OWNER, severity="low"),
         AlertType(EVENT_GONE_STRANGER, severity="high"),
+    ],
+    # Live dashboard (spec §04) — declarative views the catalog renders
+    # with zero app-specific UI. Driven off the FLAT keys the snapshot
+    # exposes alongside ``cameras`` (the nested per-camera payload stays
+    # for back-compat but doesn't render well as a table).
+    state_schema=[
+        StateView(
+            "on_porch", "On porch", kind="metric", path="on_porch",
+            description="Packages currently arrived or lingering across all cameras.",
+        ),
+        StateView(
+            "lingering", "Lingering", kind="metric", path="lingering",
+            description="Packages that have overstayed and fired a linger reminder.",
+        ),
+        StateView(
+            "packages", "Packages", kind="table", path="packages",
+            columns=["camera", "label", "state", "age_s"],
+            description="Every non-gone track, flattened across cameras, with its dwell in seconds.",
+        ),
     ],
 )
 
@@ -465,7 +484,43 @@ class PackageDelivery(FrameApp):
         return None
 
     def state_snapshot(self) -> dict[str, Any]:
-        """``GET /state`` — live per-camera tracks + sighting counts."""
+        """``GET /state`` — live per-camera tracks + sighting counts,
+        plus a FLAT view the catalog dashboard renders directly.
+
+        The nested ``cameras`` payload is kept verbatim for back-compat
+        (tests + any subscriber that already reads it). The flat keys —
+        ``on_porch`` / ``lingering`` / ``packages`` — feed the
+        :attr:`~AppManifest.state_schema` metric chips and table, which
+        want a single scalar / list-of-dicts at one path, not a
+        cameras→active_tracks tree.
+        """
+        # Same clock the tracker (and ``on_frame``) stamp tracks with,
+        # so ``age_s = now - first_seen_at`` is correct and non-negative.
+        now = time.monotonic()
+
+        on_porch = 0
+        lingering = 0
+        packages: list[dict[str, Any]] = []
+        for camera_id, tracker in self._trackers.items():
+            for track in tracker.tracks.values():
+                if track.state in ("arrived", "lingering"):
+                    on_porch += 1
+                if track.state == "lingering":
+                    lingering += 1
+                if track.state == "gone":
+                    continue
+                row: dict[str, Any] = {
+                    "camera": camera_id,
+                    "label": track.label,
+                    "state": track.state,
+                }
+                # ``first_seen_at`` is the track's creation stamp (monotonic);
+                # omit age when it was never stamped (defensive — a hand-built
+                # _TrackState in a test could leave the default 0.0).
+                if track.first_seen_at:
+                    row["age_s"] = round(now - track.first_seen_at, 1)
+                packages.append(row)
+
         return {
             "cameras": {
                 camera_id: {
@@ -484,7 +539,10 @@ class PackageDelivery(FrameApp):
                     ),
                 }
                 for camera_id, tracker in self._trackers.items()
-            }
+            },
+            "on_porch": on_porch,
+            "lingering": lingering,
+            "packages": packages,
         }
 
     # ── Transition handlers ─────────────────────────────────────────

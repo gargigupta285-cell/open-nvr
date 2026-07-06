@@ -63,6 +63,8 @@ Run::
 from __future__ import annotations
 
 import logging
+import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -72,6 +74,7 @@ from opennvr_app_sdk import (
     AppManifest,
     Detector,
     Param,
+    StateView,
     app,
 )
 from opennvr_app_sdk.config import load_yaml
@@ -101,6 +104,27 @@ MANIFEST = AppManifest(
         Param("line", "geometry.tripwire", per_camera=True),  # drawn in the catalog UI
     ],
     emits=[AlertType("line-crossing", severity="high")],
+    # Live dashboard — the catalog renders these from ``GET /state``
+    # (see ``state_snapshot``) with zero app-specific UI code.
+    state_schema=[
+        StateView(
+            "total_crossings", "Crossings", kind="metric", path="total_crossings",
+            description="Total tripwire crossings counted since boot.",
+        ),
+        StateView(
+            "active_tracks", "Active tracks", kind="metric", path="active_tracks",
+            description="Tracks currently held in state (not yet TTL-expired).",
+        ),
+        StateView(
+            "per_camera", "Per camera", kind="table", path="per_camera",
+            columns=["camera", "crossings"],
+            description="Crossing tally broken down by camera.",
+        ),
+        StateView(
+            "recent", "Recent crossings", kind="log", path="recent", limit=10,
+            description="Most recent crossings, newest first.",
+        ),
+    ],
 )
 
 
@@ -292,6 +316,10 @@ class LineCrossingDetector(Detector):
             auto_gc=False,
         )
         self._warned_missing_track = False
+        # Live-dashboard bookkeeping: a running crossing tally per
+        # camera and a bounded newest-first feed for the ``/state`` view.
+        self._crossings: dict[str, int] = {}
+        self._recent: deque[dict[str, Any]] = deque(maxlen=25)
 
     def on_detections(
         self,
@@ -342,11 +370,31 @@ class LineCrossingDetector(Detector):
                 continue  # first sighting — no segment to test yet
             direction = camera.wire.crossing(prev_point, curr)
             if direction is not None:
+                # Live-dashboard tally: count the crossing and push it
+                # onto the bounded feed before dispatching the alert.
+                self._crossings[camera_id] = self._crossings.get(camera_id, 0) + 1
+                self._recent.append({
+                    "message": f"{label} crossed {camera_id} ({direction})",
+                    "time": time.time(),
+                    "level": "high",
+                })
                 fired.append(self._build_alert(
                     camera=camera, label=label, track_id=str(track_id),
                     direction=direction, event=event,
                 ))
         return fired
+
+    def state_snapshot(self) -> dict[str, Any]:
+        """The live ``GET /state`` payload the ``state_schema`` views
+        render. Keys line up with the ``StateView`` paths above."""
+        return {
+            "total_crossings": sum(self._crossings.values()),
+            "active_tracks": len(self._tracks),
+            "per_camera": [
+                {"camera": k, "crossings": v} for k, v in self._crossings.items()
+            ],
+            "recent": list(self._recent),
+        }
 
     def _build_alert(
         self,

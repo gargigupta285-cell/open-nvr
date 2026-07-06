@@ -55,6 +55,7 @@ import signal
 import sys
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -129,6 +130,9 @@ MANIFEST = AppManifest(
     state_schema=[
         StateView(name="deduped", label="Visitors tracked", kind="metric",
                   path="deduped_visitors_tracked"),
+        StateView(name="recent", label="Recent visitors", kind="log",
+                  path="recent", limit=12,
+                  description="Latest faces at the door; strangers show red."),
     ],
     # Operator actions (user-JWT-only): the face-enrollment UI that was
     # previously CLI-only. Talks to the InsightFace adapter's /faces/*
@@ -420,6 +424,10 @@ class SmartDoorbell(FrameApp):
         # "last actually-fired", never refreshes on suppression, and
         # its shape is pinned by this app's test suite.
         self._last_fired: dict[tuple[str, Any], float] = {}
+        # Rolling feed of the most recent visitors — powers the "Recent
+        # visitors" log on the app's dashboard. Kept lightweight (no
+        # embedded snapshots) since /state is polled frequently.
+        self._recent: deque[dict[str, Any]] = deque(maxlen=25)
 
     def request_stop(self) -> None:
         """Historical name — the SDK base spells it ``stop()``."""
@@ -469,6 +477,13 @@ class SmartDoorbell(FrameApp):
                 )
         alert = self._build_alert(cam, read, snapshot_bytes)
         self.dispatcher.dispatch(alert)
+        self._recent.append({
+            "message": (f"{read.person_id} recognised" if read.recognized
+                        else "Unknown visitor")
+                       + f" at {cam.camera_id}",
+            "time": time.time(),
+            "level": "low" if read.recognized else "high",
+        })
         # Wire the app-dispatched alert into the SDK contract counters
         # (/health's alerts_fired) — the base loop can't see it because
         # on_frame returns None.
@@ -480,6 +495,7 @@ class SmartDoorbell(FrameApp):
         return {
             "cameras": [cam.camera_id for cam in self.config.cameras],
             "deduped_visitors_tracked": len(self._last_fired),
+            "recent": list(self._recent),
         }
 
     # ── Operator actions (App Catalog face-enrollment UI) ──────────────
