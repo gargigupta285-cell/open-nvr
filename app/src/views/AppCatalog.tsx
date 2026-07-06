@@ -24,7 +24,7 @@
 
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, Boxes, Check, Copy, Download, ExternalLink, RefreshCw, Settings2 } from 'lucide-react'
+import { Activity, Boxes, Check, Copy, Download, ExternalLink, RefreshCw, Settings2, Trash2 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
 import { Modal } from '../components/Modal'
@@ -89,6 +89,24 @@ type IndexApp = {
 
 type CapabilitiesResp = { kai_c?: Record<string, any>; adapters?: Record<string, Record<string, any>> }
 
+// Reconciler-driven install lifecycle. install/uninstall POST an intent that
+// lands "pending"; the reconciler later flips it to "applied" or "failed".
+type InstallStatusPhase = 'none' | 'pending' | 'applied' | 'failed'
+type InstallStatusResp = {
+  app_id: string
+  status: InstallStatusPhase
+  message?: string
+  image?: string
+  image_digest?: string
+}
+
+// The install/uninstall endpoints are opt-in + RBAC gated: a 403 is a normal,
+// expected path (operator disabled one-click, or caller lacks apps.install) —
+// NOT an error to toast. Callers treat it as "fall back to the command."
+function isForbidden(e: any): boolean {
+  return e?.status === 403 || e?.response?.status === 403
+}
+
 function useApps() {
   return useQuery({
     queryKey: ['apps'],
@@ -123,6 +141,51 @@ function useKaiCapabilities() {
     },
     retry: 0,
   })
+}
+
+// Polls install-status while a reconcile is in flight. Enabled only after an
+// install/uninstall intent is accepted (`active`); refetches on an interval
+// while pending and stops once the reconciler reports applied/failed. On
+// applied it invalidates ['apps'] + ['apps-index'] so the app hops groups.
+function useInstallStatusPoll(id: string, active: boolean) {
+  const queryClient = useQueryClient()
+  return useQuery({
+    queryKey: ['app-install-status', id],
+    queryFn: async () => {
+      const { data } = await apiService.getInstallStatus(id)
+      return data as InstallStatusResp
+    },
+    enabled: active,
+    retry: 0,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status
+      if (status === 'applied') {
+        queryClient.invalidateQueries({ queryKey: ['apps'] })
+        queryClient.invalidateQueries({ queryKey: ['apps-index'] })
+      }
+      return status === 'pending' ? 2000 : false
+    },
+  })
+}
+
+function InstallStatusNote({ status }: { status: InstallStatusResp }) {
+  const variant: BadgeVariant =
+    status.status === 'applied' ? 'success' : status.status === 'failed' ? 'destructive' : 'warning'
+  const label =
+    status.status === 'applied'
+      ? 'applied'
+      : status.status === 'failed'
+        ? 'failed'
+        : status.status === 'pending'
+          ? 'pending'
+          : status.status
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-sm">
+      <Badge variant={variant}>{label}</Badge>
+      {status.message && <span className="text-[var(--text-dim)]">{status.message}</span>}
+      {status.image && <code className="text-xs text-[var(--text-dim)]">{status.image}</code>}
+    </div>
+  )
 }
 
 function asStringList(v: unknown): string[] {
@@ -353,6 +416,8 @@ function AppStatusChip({ appId }: { appId: string }) {
 function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<string>; onConfigure: () => void }) {
   const queryClient = useQueryClient()
   const { showSuccess, showError } = useSnackbar()
+  const [uninstallPollActive, setUninstallPollActive] = useState(false)
+  const [uninstallNote, setUninstallNote] = useState<string | null>(null)
 
   const requires = asStringList(app.manifest?.requires_tasks)
   const missing = requires.filter((t) => !tasks.has(t))
@@ -365,6 +430,40 @@ function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<s
     },
     onError: (e) => showError(extractApiError(e, `Failed to ${app.enabled ? 'disable' : 'enable'} ${app.name}.`)),
   })
+
+  const uninstallStatus = useInstallStatusPoll(app.id, uninstallPollActive)
+
+  // Same opt-in + RBAC gating as install: a 403 degrades to an inline note
+  // (fail-closed) rather than an error toast, since the operator may have
+  // one-click disabled and expects to run the removal command by hand.
+  const uninstallMutation = useMutation({
+    mutationFn: () => apiService.uninstallApp(app.id),
+    onMutate: () => setUninstallNote(null),
+    onSuccess: () => {
+      showSuccess(`Uninstall requested — ${app.name} will be removed once the reconciler applies it`)
+      setUninstallPollActive(true)
+    },
+    onError: (e) => {
+      if (isForbidden(e)) {
+        setUninstallNote(
+          extractApiError(
+            e,
+            "One-click uninstall is disabled by your operator (or you don't have permission)."
+          )
+        )
+      } else {
+        setUninstallNote(extractApiError(e, `Failed to request uninstall of ${app.name}.`))
+      }
+    },
+  })
+
+  const uninstallInFlight = uninstallMutation.isPending || uninstallStatus.data?.status === 'pending'
+
+  const confirmUninstall = () => {
+    if (window.confirm(`Uninstall ${app.name}? This asks the reconciler to remove the app from this host.`)) {
+      uninstallMutation.mutate()
+    }
+  }
 
   return (
     <Card>
@@ -402,10 +501,16 @@ function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<s
           <Button variant="outline" onClick={onConfigure}>
             <Settings2 size={14} /> Configure
           </Button>
+          <Button variant="danger" onClick={confirmUninstall} disabled={uninstallInFlight}>
+            <Trash2 size={14} /> {uninstallInFlight ? 'Uninstalling…' : 'Uninstall'}
+          </Button>
           <Badge variant={app.enabled ? 'success' : 'neutral'} className="ml-auto">
             {app.enabled ? 'enabled' : 'disabled'}
           </Badge>
         </div>
+
+        {uninstallNote && <div className="text-sm text-amber-400">{uninstallNote}</div>}
+        {uninstallPollActive && uninstallStatus.data && <InstallStatusNote status={uninstallStatus.data} />}
       </CardContent>
     </Card>
   )
@@ -413,12 +518,46 @@ function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<s
 
 /* -------------------------- Install modal ------------------------ */
 
-// Deliberate safe first cut: we only DISPLAY the install command/compose — no
-// POST, no auto-spawn. The operator runs it on their host and the app then
-// self-registers, appearing under Installed.
+// The command/compose display is the ALWAYS-PRESENT fallback (the fail-closed
+// path): install may be disabled or unpermitted, so we never assume one-click
+// works. When the backend opts in AND the caller is permitted, the primary
+// "Install (one-click)" button POSTs an intent and we poll the reconciler; a
+// 403 quietly degrades to "run the command below instead."
 function InstallModal({ app, onClose }: { app: IndexApp; onClose: () => void }) {
   const { showSuccess, showError } = useSnackbar()
   const [copied, setCopied] = useState<string | null>(null)
+  const [pollActive, setPollActive] = useState(false)
+  const [forbidden, setForbidden] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const statusQuery = useInstallStatusPoll(app.id, pollActive)
+
+  const installMutation = useMutation({
+    mutationFn: () => apiService.installApp(app.id),
+    onMutate: () => {
+      setForbidden(null)
+      setError(null)
+    },
+    onSuccess: () => {
+      showSuccess('Install requested — the app will appear under Installed once the reconciler applies it')
+      setPollActive(true)
+    },
+    onError: (e) => {
+      if (isForbidden(e)) {
+        setForbidden(
+          extractApiError(
+            e,
+            "One-click install is disabled by your operator (or you don't have permission). Run the command below instead."
+          )
+        )
+      } else {
+        setError(extractApiError(e, 'Failed to request install.'))
+      }
+    },
+  })
+
+  const status = statusQuery.data?.status
+  const inFlight = installMutation.isPending || status === 'pending'
 
   const copy = async (label: string, text: string) => {
     try {
@@ -452,8 +591,23 @@ function InstallModal({ app, onClose }: { app: IndexApp; onClose: () => void }) 
   return (
     <Modal open title={`Install ${app.name}`} onClose={onClose} widthClassName="w-[640px]">
       <div className="space-y-4">
+        {/* Primary path: one-click install (opt-in + RBAC gated server-side). */}
+        <div className="rounded border border-[var(--border)] bg-[var(--bg-2)] p-3 space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="primary" onClick={() => installMutation.mutate()} disabled={inFlight}>
+              <Download size={14} /> {inFlight ? 'Installing…' : 'Install (one-click)'}
+            </Button>
+            <span className="text-xs text-[var(--text-dim)]">
+              The backend enforces opt-in and permissions; if it's disabled, use the command below.
+            </span>
+          </div>
+          {forbidden && <div className="text-sm text-amber-400">{forbidden}</div>}
+          {error && <div className="text-sm text-red-400">{error}</div>}
+          {pollActive && statusQuery.data && <InstallStatusNote status={statusQuery.data} />}
+        </div>
+
         <div className="text-sm text-[var(--text-dim)]">
-          Run this on your OpenNVR host, then the app self-registers and appears under Installed.
+          Or run this on your OpenNVR host, then the app self-registers and appears under Installed.
         </div>
 
         {command && (
