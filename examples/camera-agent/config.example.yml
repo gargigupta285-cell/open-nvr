@@ -122,7 +122,20 @@ event_ring_size: 256
 # the same deployment — the SERVER API (opennvr_api_url, the "app door")
 # and the main web UI (opennvr_ui_url, for deep links). This is all most
 # installs need.
-# opennvr_base_url: http://127.0.0.1:8000
+#
+# SET THIS so the install on-ramp works out of the box: when a skill is
+# greyed out for want of a backing adapter/app, the skills panel shows an
+# "Enable →" / "install the <App> app" deep-link into OpenNVR — but ONLY
+# when this (or opennvr_ui_url) is set. Unset ⇒ suggestion text only, no link.
+#
+# Use the HOST origin your BROWSER reaches OpenNVR at (these links open in
+# your browser, so a compose-internal name like http://opennvr-core:8000 will
+# NOT resolve there). The docker configs default this to http://localhost:8000
+# — the address the compose stack publishes opennvr-core on — via the
+# OPENNVR_UI_URL env var. For a LAN box or remote host, override it in .env:
+#   OPENNVR_UI_URL=http://<host-ip>:8000     (or https://nvr.example)
+# so `docker compose ... --profile camera-agent up` yields working links.
+# opennvr_base_url: http://localhost:8000
 #
 # NOTE: opennvr_base_url does NOT derive kaic_url or nats_inference_url —
 # the KAI-C inference gateway and the NATS event bus are separate services

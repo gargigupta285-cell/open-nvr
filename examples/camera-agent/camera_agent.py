@@ -3135,6 +3135,69 @@ class CameraAgentRuntime:
 
     # ── System prompt construction ────────────────────────────────
 
+    def unavailable_capabilities_hint(self) -> str:
+        """A compact, dynamic system-prompt note about capabilities that are
+        NOT available this turn, so the model can proactively (and honestly)
+        tell the user "I can't do X — no adapter/app provides it" and point at
+        the install path, WITHOUT ever claiming to perform it.
+
+        Built from ``skills_payload()`` — the single source of truth for
+        per-skill availability. A skill is listed here only when it's genuinely
+        known-unavailable: either its backend requirement is unmet (``available``
+        false) or KAI-C affirmatively reports no adapter advertising its backing
+        task (``tasks_available`` false). This degrades cleanly: when KAI-C is
+        unreachable ``tasks_available`` is True for every skill (see
+        ``skills_payload``), so we never over-claim that a working tool is
+        unavailable — an unknown capability just stays off this list.
+
+        Guidance ONLY — this adds no tool and grants no enable/install action.
+        Empty string when every capability is available (no tokens spent)."""
+        # A prompt hint must never be able to break turn construction — if
+        # skills_payload() ever raises, drop the hint rather than the prompt.
+        try:
+            payload = self.skills_payload()
+        except Exception:
+            logger.exception("unavailable_capabilities_hint: skills_payload failed")
+            return ""
+        lines: list[str] = []
+        for s in payload:
+            # Skip installed catalog-app entries — those are always available
+            # (an operator enabled them) and carry no adapter/app suggestion.
+            if s.get("source") == "app":
+                continue
+            unavailable = (not s.get("available")) or (not s.get("tasks_available"))
+            if not unavailable:
+                continue
+            suggestion = ""
+            adapters = s.get("suggested_adapters") or []
+            apps = s.get("suggested_apps") or []
+            if adapters:
+                suggestion = (
+                    f"suggest installing the {', '.join(adapters)} adapter"
+                    f" via AI Adapters"
+                )
+            elif apps:
+                suggestion = (
+                    f"suggest installing the {', '.join(apps)} app"
+                    f" via the App Catalog"
+                )
+            name = str(s.get("name") or s.get("id"))
+            lines.append(
+                f"- {name}: unavailable"
+                + (f" — {suggestion}" if suggestion else "")
+            )
+        if not lines:
+            return ""
+        return (
+            "UNAVAILABLE CAPABILITIES (no adapter/app currently provides these). "
+            "If the user asks for one of these, say plainly that it isn't "
+            "available right now, briefly "
+            + ("suggest installing the named adapter/app in OpenNVR's AI "
+               "Adapters / App Catalog")
+            + ", and do NOT claim to perform it or make up a result:\n"
+            + "\n".join(lines)
+        )
+
     def build_system_prompt(self) -> str:
         """Compose the system prompt the LLM sees: the agent's identity + the
         operator's base prompt + a per-camera roster + task guidance."""
@@ -3181,6 +3244,14 @@ class CameraAgentRuntime:
             f"look into it and get back to them, and keep the conversation going. "
             f"You'll deliver the result when the task finishes."
         )
+        # Proactive honesty about capabilities that aren't wired this turn:
+        # a compact, dynamic list so the model can say "I can't do X — install
+        # the adapter/app" instead of hallucinating a result. Empty (and thus a
+        # no-op) when everything is available, or when KAI-C is unreachable and
+        # availability is unknown (we never over-claim unavailability).
+        unavailable_hint = self.unavailable_capabilities_hint()
+        if unavailable_hint:
+            prompt += f"\n\n{unavailable_hint}"
         # Disable Qwen3-style "thinking" for snappy tool-calling when the
         # operator opted out. Only appended when llm_think is explicitly False,
         # so non-thinking models (qwen2.5, llama3.2, …) are unaffected.

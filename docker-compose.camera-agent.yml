@@ -239,10 +239,12 @@ services:
         lhost=$$(sed_esc "$${CAMERA_AGENT_LISTEN_HOST}")
         omodel=$$(sed_esc "$${OLLAMA_MODEL}")
         cadapter=$$(sed_esc "$${CAPTION_ADAPTER}")
+        ouiurl=$$(sed_esc "$${OPENNVR_UI_URL}")
         sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
             -e "s/[$$][{]CAMERA_AGENT_LISTEN_HOST[}]/$$lhost/g" \
             -e "s/[$$][{]OLLAMA_MODEL[}]/$$omodel/g" \
             -e "s/[$$][{]CAPTION_ADAPTER[}]/$$cadapter/g" \
+            -e "s/[$$][{]OPENNVR_UI_URL[}]/$$ouiurl/g" \
             < /template/config.docker.yml > /generated/config.yml
         echo "Wrote /generated/config.yml (voice) from template."
     environment:
@@ -250,6 +252,11 @@ services:
       - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
       - CAPTION_ADAPTER=${CAPTION_ADAPTER:-moondream}
+      # Host origin the operator's browser reaches OpenNVR at (opennvr-core is
+      # published on 127.0.0.1:8000). Drives the skills-panel "Enable →" /
+      # "install the <App> app" deep-links. Override for LAN/remote installs,
+      # e.g. OPENNVR_UI_URL=https://nvr.example in .env.
+      - OPENNVR_UI_URL=${OPENNVR_UI_URL:-http://localhost:8000}
     volumes:
       - ./examples/camera-agent:/template:ro
       - opennvr_camera_agent_config:/generated
@@ -306,10 +313,12 @@ services:
         lhost=$$(sed_esc "$${CAMERA_AGENT_LISTEN_HOST}")
         omodel=$$(sed_esc "$${OLLAMA_MODEL}")
         cadapter=$$(sed_esc "$${CAPTION_ADAPTER}")
+        ouiurl=$$(sed_esc "$${OPENNVR_UI_URL}")
         sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
             -e "s/[$$][{]CAMERA_AGENT_LISTEN_HOST[}]/$$lhost/g" \
             -e "s/[$$][{]OLLAMA_MODEL[}]/$$omodel/g" \
             -e "s/[$$][{]CAPTION_ADAPTER[}]/$$cadapter/g" \
+            -e "s/[$$][{]OPENNVR_UI_URL[}]/$$ouiurl/g" \
             < /template/config.docker.chat.yml > /generated/config.yml
         echo "Wrote /generated/config.yml (chat) from template."
     environment:
@@ -317,6 +326,11 @@ services:
       - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
       - CAPTION_ADAPTER=${CAPTION_ADAPTER:-moondream}
+      # Host origin the operator's browser reaches OpenNVR at (opennvr-core is
+      # published on 127.0.0.1:8000). Drives the skills-panel "Enable →" /
+      # "install the <App> app" deep-links. Override for LAN/remote installs,
+      # e.g. OPENNVR_UI_URL=https://nvr.example in .env.
+      - OPENNVR_UI_URL=${OPENNVR_UI_URL:-http://localhost:8000}
     volumes:
       - ./examples/camera-agent:/template:ro
       - opennvr_camera_agent_config_chat:/generated
