@@ -181,6 +181,63 @@ def test_lint_mixes_clean_alias_and_unknown(registry):
     assert any("uncategorized" in w for w in warnings)
 
 
+# ─── lint_and_log_adapter_tasks (advisory logging) ──────────────────────
+
+
+def test_lint_and_log_warns_for_non_canonical(registry, monkeypatch):
+    """A non-canonical (alias) task produces a logged warning naming the
+    adapter and nudging toward the canonical spelling."""
+    from routers.ai_models import _lint_seen, lint_and_log_adapter_tasks
+
+    _lint_seen.clear()
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        ai_models.main_logger,
+        "warning",
+        lambda *a, **kw: calls.append((a, kw)),
+    )
+    lint_and_log_adapter_tasks("caption-adapter", ["scene_caption"], registry)
+    assert len(calls) == 1
+    rendered = calls[0][0][0] % calls[0][0][1:]
+    assert "caption-adapter" in rendered
+    assert "scene_caption" in rendered
+    assert "image_captioning" in rendered
+
+
+def test_lint_and_log_silent_for_canonical(registry, monkeypatch):
+    """A fully-canonical taskset logs nothing."""
+    from routers.ai_models import _lint_seen, lint_and_log_adapter_tasks
+
+    _lint_seen.clear()
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        ai_models.main_logger,
+        "warning",
+        lambda *a, **kw: calls.append((a, kw)),
+    )
+    lint_and_log_adapter_tasks(
+        "clean-adapter", ["object_detection", "vqa"], registry
+    )
+    assert calls == []
+
+
+def test_lint_and_log_dedupes_per_adapter_taskset(registry, monkeypatch):
+    """The same (adapter, taskset) warns exactly once even across
+    repeated polls."""
+    from routers.ai_models import _lint_seen, lint_and_log_adapter_tasks
+
+    _lint_seen.clear()
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        ai_models.main_logger,
+        "warning",
+        lambda *a, **kw: calls.append((a, kw)),
+    )
+    for _ in range(3):
+        lint_and_log_adapter_tasks("dup-adapter", ["scene_caption"], registry)
+    assert len(calls) == 1
+
+
 # ─── GET /ai-models/tasks ───────────────────────────────────────────────
 
 

@@ -288,6 +288,59 @@ def test_derive_skill_suggested_adapters_from_bundled_registry():
     assert derived["watch"] == ["yolov8"]                    # inherits count
 
 
+# ── greyed skills → suggested_apps + app_enable_url (install on-ramp) ──
+
+
+def test_derive_skill_suggested_apps_from_bundled_registry():
+    import camera_agent
+
+    derived = camera_agent._derive_skill_suggested_apps()
+    # object_detection backs count → its packaged apps.
+    assert derived["count"] == [
+        "intrusion-detection", "loitering-detection", "occupancy-counting"
+    ]
+    assert derived["faces"] == ["smart-doorbell"]
+    assert derived["watch"] == [                              # inherits count
+        "intrusion-detection", "loitering-detection", "occupancy-counting"
+    ]
+
+
+def test_greyed_skill_includes_suggested_apps_and_app_enable_url():
+    cfg = AppConfig(
+        kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+        opennvr_ui_url="https://nvr.example/",
+        cameras=[CameraSpec(camera_id="cam1", frame_url="http://x/1.jpg", role="front door")],
+    )
+    rt = CameraAgentRuntime(cfg)
+    rt.kaic_capabilities = _StubCaps({"image_captioning"})   # count greyed
+    count = {s["id"]: s for s in rt.skills_payload()}["count"]
+    assert count["tasks_available"] is False
+    assert count["suggested_apps"] == [
+        "intrusion-detection", "loitering-detection", "occupancy-counting"
+    ]
+    # app deep-link points at the App Catalog (trailing slash normalized).
+    assert count["app_enable_url"] == "https://nvr.example/app-catalog"
+
+
+def test_app_enable_url_none_when_ui_url_unset():
+    rt = _runtime()                                          # no opennvr_ui_url
+    rt.kaic_capabilities = _StubCaps(set())
+    count = {s["id"]: s for s in rt.skills_payload()}["count"]
+    assert count["suggested_apps"] == [
+        "intrusion-detection", "loitering-detection", "occupancy-counting"
+    ]
+    assert count["app_enable_url"] is None
+
+
+def test_not_greyed_skill_omits_app_suggestion_fields():
+    rt = _runtime()
+    rt.kaic_capabilities = _StubCaps({"object_detection"})   # count is served
+    count = {s["id"]: s for s in rt.skills_payload()}["count"]
+    assert count["tasks_available"] is True
+    assert "suggested_apps" not in count
+    assert "app_enable_url" not in count
+
+
 # ── decoupling: a new agent_skill in tasks.yml needs no agent code edit ─
 
 

@@ -46,6 +46,12 @@
 #                use_case_map.yml. The OpenNVR Agent uses these to tell an
 #                operator which adapter to enable when a skill is greyed
 #                out (guidance only; the agent never enables one itself).
+#   suggested_apps: catalog app id(s) from examples/ that deliver this
+#                task's capability as a packaged use case — the app-install
+#                on-ramp alongside suggested_adapters. Same editorial
+#                source-of-truth as use_case_map.yml's suggested_apps; the
+#                Agent surfaces these as "or install the <App> app" when a
+#                skill is greyed out (guide-only deep link, never a POST).
 
 - task: object_detection
   label: Object Detection
@@ -55,6 +61,7 @@
   agent_skill: count
   aliases: [detect_objects, object-detection]
   suggested_adapters: [yolov8]
+  suggested_apps: [intrusion-detection, loitering-detection, occupancy-counting]
 
 - task: face_recognition
   label: Face Recognition
@@ -64,6 +71,7 @@
   agent_skill: faces
   aliases: []
   suggested_adapters: [insightface]
+  suggested_apps: [smart-doorbell]
 
 - task: image_captioning
   label: Image Captioning
@@ -110,6 +118,7 @@
   agent_skill: null
   aliases: [lpr, anpr]
   suggested_adapters: [fast-plate-ocr]
+  suggested_apps: [license-plate-recognition]
 
 - task: multi_object_tracking
   label: Multi-Object Tracking

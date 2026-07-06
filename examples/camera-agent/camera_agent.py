@@ -419,6 +419,47 @@ def _derive_skill_suggested_adapters() -> dict[str, list[str]]:
 _SKILL_SUGGESTED_ADAPTERS: dict[str, list[str]] = _derive_skill_suggested_adapters()
 
 
+def _derive_skill_suggested_apps() -> dict[str, list[str]]:
+    """Union the ``suggested_apps`` of every task backing each skill, from
+    the bundled task registry — ``skill id -> [app ids]``, order preserved
+    and deduped.
+
+    The app-install twin of ``_derive_skill_suggested_adapters``: when a
+    skill is greyed out for want of a backing adapter, the agent can point
+    the operator either at a raw adapter to enable OR at a packaged catalog
+    app that delivers the same capability (e.g. object_detection →
+    intrusion-detection / occupancy-counting). GUIDANCE ONLY: the agent
+    never installs an app — the link opens the App Catalog. Inherited
+    skills (``_SKILL_TASK_INHERITS``) pick up their source's apps. On any
+    error the map is empty — a missing suggestion never breaks the UI."""
+    try:
+        raw = yaml.safe_load(TASKS_REGISTRY_PATH.read_text()) or []
+        by_task: dict[str, list[str]] = {}
+        for entry in raw:
+            names = [entry["task"], *(entry.get("aliases") or [])]
+            apps = entry.get("suggested_apps") or []
+            for name in names:
+                by_task[name] = list(apps)
+        derived: dict[str, list[str]] = {}
+        for skill, tasks in _SKILL_BACKING_TASKS.items():
+            seen: list[str] = []
+            for task in tasks:
+                for app in by_task.get(task, []):
+                    if app not in seen:
+                        seen.append(app)
+            derived[skill] = seen
+        return derived
+    except Exception:                          # pragma: no cover - defensive
+        logger.warning(
+            "could not derive skill suggested apps from %s",
+            TASKS_REGISTRY_PATH, exc_info=True,
+        )
+        return {}
+
+
+_SKILL_SUGGESTED_APPS: dict[str, list[str]] = _derive_skill_suggested_apps()
+
+
 # Phrases Whisper commonly hallucinates from silence / background noise / the
 # end of an utterance. Matched case-insensitively after stripping punctuation,
 # so noise doesn't trigger a turn. (English-only; extend per deployment.)
@@ -2353,6 +2394,16 @@ class CameraAgentRuntime:
                     f"{self.cfg.opennvr_ui_url.rstrip('/')}/ai-adapters"
                     if self.cfg.opennvr_ui_url else None
                 )
+                # App-install on-ramp, symmetric to the adapter one above:
+                # name the catalog app(s) that package this capability and,
+                # when we know the main UI's base URL, deep-link the App
+                # Catalog. Guide-only — no install POST; the operator
+                # installs from the catalog behind OpenNVR's permission gate.
+                entry["suggested_apps"] = _SKILL_SUGGESTED_APPS.get(sid, [])
+                entry["app_enable_url"] = (
+                    f"{self.cfg.opennvr_ui_url.rstrip('/')}/app-catalog"
+                    if self.cfg.opennvr_ui_url else None
+                )
             if sid == "watch":
                 # The converged monitors: which SDK rule classes back the
                 # count/crossing kinds (spec §07 "one rule library, two doors").
@@ -2562,6 +2613,10 @@ class CameraAgentRuntime:
             "monitors": self.monitors.export(),
             "alarms": self.alarms.export(),
             "reports": self.reports.export(),
+            # Operator skill toggles are part of the durable agent state
+            # too — without this a skill switched off at runtime silently
+            # comes back on the next restart (its tools re-advertised).
+            "disabled_skills": sorted(self.disabled_skills),
         }
         try:
             d = os.path.dirname(self.cfg.state_path) or "."
@@ -2589,9 +2644,17 @@ class CameraAgentRuntime:
         self.monitors.restore(data.get("monitors") or [])
         self.alarms.restore(data.get("alarms") or [], contact_for=self._emergency_contact_for)
         self.reports.restore(data.get("reports") or [])
-        logger.info("restored %d watches, %d alarms, %d reports from %s",
+        # Re-apply persisted skill toggles through the normal path so the
+        # advertised toolset reflects them (a disabled skill's tools stay
+        # unadvertised). Ignore unknown ids so a stale state file can't
+        # break boot.
+        restored_disabled: list[str] = []
+        for sid in (data.get("disabled_skills") or []):
+            if self.set_skill_enabled(sid, False):
+                restored_disabled.append(sid)
+        logger.info("restored %d watches, %d alarms, %d reports, %d disabled skills from %s",
                     len(data.get("monitors") or []), len(data.get("alarms") or []),
-                    len(data.get("reports") or []), self.cfg.state_path)
+                    len(data.get("reports") or []), len(restored_disabled), self.cfg.state_path)
 
     async def _handle_create_monitor(self, args: dict[str, Any]) -> str:
         kind = str(args.get("kind") or "").strip().lower()
@@ -3128,15 +3191,6 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         logger.info("skill %r %sd — tools reconfigured (%d advertised)",
                     skill_id, action, len(runtime.tool_definitions))
         return JSONResponse({"skills": runtime.skills_payload()})
-
-    @app.get("/demo/opennvr-logo.svg")
-    async def _demo_logo() -> Response:
-        """The OpenNVR logo shown in the demo header (bundled, offline)."""
-        from fastapi.responses import FileResponse
-        path = Path(__file__).parent / "demo" / "opennvr-logo.svg"
-        if not path.is_file():
-            return Response(status_code=404)
-        return FileResponse(path, media_type="image/svg+xml")
 
     @app.get("/demo/avatar/{name}")
     async def _demo_avatar(name: str) -> Response:

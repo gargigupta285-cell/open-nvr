@@ -38,6 +38,7 @@ from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user
 from core.database import get_db
+from core.logging_config import main_logger
 from models import AIDetectionResult, User
 from services.audit_service import write_audit_log
 from services.kai_c_service import get_kai_c_service
@@ -98,6 +99,7 @@ class TaskEntry(BaseModel):
     agent_skill: str | None = None
     aliases: list[str] = []
     suggested_adapters: list[str] = []
+    suggested_apps: list[str] = []
 
 
 TASKS_REGISTRY_PATH = Path(__file__).resolve().parent.parent / "config" / "tasks.yml"
@@ -166,6 +168,41 @@ def lint_task_names(advertised: list[str], registry: list[TaskEntry]) -> list[st
                 "stay uncategorized"
             )
     return warnings
+
+
+# One-time-per-(adapter, taskset) lint dedupe. The /capabilities poll
+# runs on a cadence; without this we'd re-emit the same advisory every
+# poll. Keyed by (adapter_name, frozenset(tasks_advertised)) so a genuine
+# taxonomy change (an adapter's task list drifting) re-lints, but a
+# steady-state advertisement warns exactly once per process.
+_lint_seen: set[tuple[str, frozenset[str]]] = set()
+
+
+def lint_and_log_adapter_tasks(
+    adapter_name: str,
+    tasks_advertised: list[str],
+    registry: list[TaskEntry],
+) -> None:
+    """Advisory-only: run ``lint_task_names`` over one adapter's
+    ``tasks_advertised`` and LOG a warning per non-canonical string,
+    prefixed with the adapter name so an operator can trace it back.
+    Deduped per (adapter, taskset) so it doesn't spam every poll.
+
+    Never raises, never blocks — an adapter advertising free-text or
+    alias tasks is fully valid (§15.1); this only nudges toward the
+    canonical spelling.
+    """
+    key = (adapter_name, frozenset(tasks_advertised or []))
+    if key in _lint_seen:
+        return
+    # Bound the dedupe set so a long-running server with churning adapter
+    # names / task sets can't grow it without limit. The set only suppresses
+    # duplicate log lines, so clearing it just re-warns once — harmless.
+    if len(_lint_seen) >= 512:
+        _lint_seen.clear()
+    _lint_seen.add(key)
+    for warning in lint_task_names(tasks_advertised, registry):
+        main_logger.warning("adapter %s advertises %s", adapter_name, warning)
 
 
 class InferenceRequest(BaseModel):
@@ -251,6 +288,21 @@ async def get_capabilities(
     try:
         kai_c_service = get_kai_c_service()
         capabilities = await kai_c_service.get_capabilities()
+
+        # Advisory taxonomy lint (contract §4): make the canonical task
+        # taxonomy earn its keep — when the server aggregates adapter
+        # capabilities, warn (once per adapter+taskset) about any task an
+        # adapter advertises under an alias or a free-text spelling.
+        # Purely a log nudge; never blocks or mutates the response.
+        try:
+            registry = _load_tasks_registry()
+            for adapter_name, entry in (capabilities.get("adapters") or {}).items():
+                caps = (entry or {}).get("capabilities") or {}
+                tasks = caps.get("tasks_advertised") or []
+                if tasks:
+                    lint_and_log_adapter_tasks(adapter_name, tasks, registry)
+        except Exception:
+            main_logger.debug("task-name lint skipped", exc_info=True)
 
         return CapabilitiesResponse(
             kai_c=capabilities.get("kai_c", {}),
