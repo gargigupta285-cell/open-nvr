@@ -1,0 +1,263 @@
+# Opt-in one-click App install — desired-state + reconciler
+
+OpenNVR's App Catalog can **discover** curated apps (browse-and-install)
+and, when an operator opts in, **install** them with one click. This
+document describes the security-critical core of that install path.
+
+The design has one non-negotiable invariant:
+
+> **The web app never runs Docker and never holds the Docker socket.**
+> It only writes desired state. A separate, minimally-privileged
+> reconciler applies it.
+
+This is the sovereignty moat: a compromised web app cannot spawn
+containers, and an air-gapped / sovereign deployment can leave one-click
+install off entirely and still install apps via the copy-paste command.
+
+---
+
+## The two halves
+
+```
+   ┌───────────────────────┐        writes desired state         ┌──────────────────────────┐
+   │  Web app (opennvr-core)│  ────────────────────────────────▶ │  app_install_intents      │
+   │                        │   POST /apps/index/{id}/install     │  (DB table)               │
+   │  • validates the id    │   POST /apps/index/{id}/uninstall   │                           │
+   │    against the index   │                                     │  id, image, image_digest, │
+   │  • writes ONE row      │                                     │  desired, status, message │
+   │  • audits              │                                     └──────────────────────────┘
+   │                        │                                                  ▲  │
+   │  NO docker.            │                                        polls /   │  │ writes back
+   │  NO subprocess.        │                                        applies   │  │ status
+   │  NO socket.            │                                                  │  ▼
+   └───────────────────────┘                                     ┌──────────────────────────┐
+                                                                 │  app-installer reconciler │
+                                                                 │  (scripts/app-installer)  │
+                                                                 │                           │
+                                                                 │  • THE ONLY component     │
+                                                                 │    with the docker socket │
+                                                                 │  • NOT network-facing     │
+                                                                 │  • runs `docker compose`  │
+                                                                 │    up / down per intent   │
+                                                                 └──────────────────────────┘
+```
+
+* **Web app** (`server/routers/apps.py`): the `POST /install` and
+  `POST /uninstall` endpoints do exactly three things — (a) enforce the
+  gates, (b) validate the id against the curated index and copy
+  `image`/`image_digest` from it, and (c) upsert a desired-state row and
+  audit. There is **no** `subprocess`, `docker`, or `compose exec` call
+  anywhere in the server process.
+
+* **Reconciler** (`scripts/app-installer/`): a tiny, stdlib + SQLAlchemy
+  + Docker-CLI service. It polls `app_install_intents`, and for each
+  pending row drives `docker compose` up (`desired="installed"`) or down
+  (`desired="absent"`), then writes back `status`/`message`. It opens no
+  listening ports.
+
+---
+
+## Desired-state model — `app_install_intents`
+
+One row per curated app (primary key is the app id, so re-requesting is
+an upsert). Migration: `server/migrations/versions/
+c8f42a1b6e93_add_app_install_intents.py` (mirrors the `installed_apps`
+migration).
+
+| column          | type          | meaning                                                        |
+| --------------- | ------------- | -------------------------------------------------------------- |
+| `id`            | `String(100)` | curated app id — **must exist in `apps_index.yml`** (PK)        |
+| `image`         | `String(500)` | canonical image ref, **copied from the index** (never user input) |
+| `image_digest`  | `String(100)` | `sha256:…` the reconciler pins to, or `NULL` (unpinned)         |
+| `desired`       | `String(20)`  | `installed` \| `absent` — what the operator wants               |
+| `status`        | `String(20)`  | `pending` \| `applied` \| `failed` — where the reconciler is    |
+| `message`       | `Text`        | last-reconcile note (compose stderr on failure, etc.)          |
+| `requested_by`  | `String(100)` | actor username who set the current desired state               |
+| `requested_at`  | `DateTime`    | when the desired state was last (re)requested                  |
+| `updated_at`    | `DateTime`    | when the reconciler last wrote back status                     |
+
+**Why a DB table, not a state file?** The repo already models installed
+apps as a queryable, migratable table (`installed_apps`), audit as rows,
+and RBAC as rows. A table is consistent with that, is trivially
+cross-referenced with `installed_apps` for the catalog UI, and gives the
+reconciler a natural least-privilege boundary (SELECT the row, UPDATE
+`status`/`message` only). A state directory would have been simpler to
+mount but weaker to query and inconsistent with the codebase.
+
+---
+
+## Endpoints and their gates
+
+All three live under the `/apps` router (`/api/v1/apps/...`).
+
+| endpoint                                    | gate(s)                                          |
+| ------------------------------------------- | ------------------------------------------------ |
+| `POST /apps/index/{id}/install`             | `APPS_INSTALL_ENABLED` **and** `apps.install`    |
+| `POST /apps/index/{id}/uninstall`           | `APPS_INSTALL_ENABLED` **and** `apps.install`    |
+| `GET  /apps/index/{id}/install-status`      | authenticated user (read-only; any role)         |
+
+Every gate, in order:
+
+1. **OPT-IN — `APPS_INSTALL_ENABLED`** (default **false**). When off, the
+   two POST endpoints return `403 "one-click install disabled; use the
+   copy-paste command"`. The command-display path (`GET /apps/index`)
+   stays available. **Sovereign / air-gapped: leave this off.**
+2. **RBAC — `apps.install`.** Install/uninstall require this named
+   permission (not just any authenticated user). It is seeded by
+   `scripts/init_db.py` and granted to no default role except admin — an
+   operator must explicitly grant it. Superusers bypass, matching the
+   rest of the RBAC surface.
+3. **INDEX-ONLY.** The id must be present in `server/config/apps_index.yml`
+   (404 otherwise). No arbitrary image or user-supplied field ever
+   reaches the desired state — `image` and `image_digest` are copied
+   **from the curated index entry**, not from the request body.
+4. **AUDIT.** Every install/uninstall writes an audit row
+   (`app.install.request` / `app.uninstall.request`) with the actor
+   username, app id, image + digest, and desired action.
+
+The install endpoint then upserts the intent (`desired="installed"`,
+`status="pending"`) and returns it. Uninstall flips `desired="absent"`.
+
+---
+
+## Digest pinning
+
+`IndexEntry` gains an optional `image_digest` (`sha256:…`). When present,
+the reconciler deploys the **digest-pinned** image
+(`image@sha256:…`) — the exact bytes the curated index vouched for
+(supply-chain integrity). When absent, the reconciler logs a loud
+
+```
+UNPINNED — dev only: app 'x' has no image_digest; deploying '…' without
+supply-chain pinning. Do NOT run unpinned images in production.
+```
+
+warning and proceeds (so local dev with `:local-build` still works).
+
+### How the pin reaches `docker compose` (wired, end-to-end)
+
+The pin is not just logged — it takes effect through a per-service image
+override env var:
+
+1. `reconciler.image_env_key(app_id)` computes the var name via ONE
+   shared transform — upper-snake-case + `_IMAGE`
+   (`license-plate-recognition` → `LICENSE_PLATE_RECOGNITION_IMAGE`).
+2. For a `desired="installed"` intent **with** a digest, the reconciler
+   builds `{<KEY>: <image>@sha256:<digest>}` (`_run_env`) and passes it
+   to the runner, which **merges it over `os.environ`** for the
+   `docker compose … up -d <id>` subprocess.
+3. Each app service in `docker-compose.apps.yml` declares
+   `image: ${<KEY>:-opennvr/<id>:local-build}` alongside its `build:`
+   block. With the var set, compose resolves the service image to the
+   pinned ref and **pulls that exact digest**; with the var unset it
+   resolves to the `:local-build` tag and uses the `build:` block. The
+   argv stays a plain list (no shell), so nothing about the pin string
+   is injectable.
+
+The transform is unit-tested on both sides and the env-var name must
+match between the reconciler and compose — that is the whole contract.
+
+For a `desired="installed"` intent **without** a digest, no override is
+passed (compose falls back to the local build) and the loud UNPINNED
+warning above fires. Teardown (`desired="absent"`) passes no override —
+`rm` doesn't resolve an image.
+
+> **Unpinned = not for production.** A production / sovereign deployment
+> should install only apps whose curated index entry carries an
+> `image_digest`.
+
+### Current state (be honest)
+
+Pinning is fully **wired and takes effect** the moment the curated index
+carries an `image_digest` for an app *and* that image is published to a
+registry the host can pull from. **Today, the shipped apps ship as a
+local `build:` overlay with `:local-build` tags and NO published digest
+in `apps_index.yml`** — so installing one of them right now logs the
+UNPINNED warning and uses the local build. That is expected, not a bug:
+the missing piece is a published, digest-pinned registry (see *What is
+deferred*), not the pinning mechanism, which is complete and tested.
+
+---
+
+## The reconciler
+
+`scripts/app-installer/` — the single privileged, non-network-facing
+component.
+
+* `reconciler.py` — the pure reconcile core. `reconcile_intent(intent,
+  runner)` returns `(status, message)`; the docker/subprocess call is an
+  **injected `runner(argv, env)`** callable so unit tests pass a fake and
+  never touch real Docker. `reconcile_once(store, runner)` sweeps every
+  pending intent (skips `applied`), calling `docker compose up -d <id>`
+  for `installed` and `docker compose rm -s -f <id>` for `absent`. A
+  non-zero exit → `status="failed"` with stderr in `message`. For a
+  pinned `installed` intent the runner also receives the
+  `{<ID>_IMAGE: image@sha256:…}` override (see *Digest pinning*), which
+  `docker_runner` merges over `os.environ`.
+* `store.py` — the production `IntentStore`: SQLAlchemy Core over
+  `app_install_intents`. Least privilege: it only needs SELECT on the
+  row and UPDATE of `status`/`message`/`updated_at` (it never INSERTs —
+  only the web app does).
+* `main.py` — the thin poll loop wiring `SqlIntentStore` + the real
+  `docker_runner` into `reconcile_once`.
+* `tests/test_reconciler.py` — unit tests with a fake runner + fake
+  store: pending→up→applied, failed run→failed+message, absent→down,
+  unpinned→warning, digest-pin shape, sweep semantics. No Docker.
+
+### The single privileged mount
+
+`docker-compose.installer.yml` (profile `app-installer`) is the only
+place the Docker socket is mounted — into this one tiny service, nowhere
+else in the stack. Read-only is sufficient for `compose up/down`.
+
+The installer container **runs as root** (its Dockerfile sets no `USER`).
+This is deliberate and required: the bind-mounted `/var/run/docker.sock`
+has host-dependent group ownership, so root is the reliable way to open
+it. This is acceptable because the installer is the **single privileged
+component**, is **opt-in** (only started via the app-installer overlay),
+and is **non-network-facing** (no `EXPOSE`, no listening ports) — its
+only reachable surfaces are the DB and the socket. The web app, by
+contrast, never touches the socket at all.
+
+---
+
+## How to enable
+
+Deliberate operator decision — off by default.
+
+```bash
+# 1. Opt in (gates the endpoints).
+echo "APPS_INSTALL_ENABLED=true" >> .env
+
+# 2. Grant the apps.install permission to the operator role(s)
+#    (Settings → Roles, or the permissions API). Admins already have it.
+
+# 3. Bring up the single privileged reconciler.
+docker compose -f docker-compose.yml -f docker-compose.installer.yml \
+    --profile app-installer up -d app-installer
+```
+
+To stop reconciling (this does **not** uninstall apps):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.installer.yml \
+    --profile app-installer down
+```
+
+**Sovereign / air-gapped guidance:** leave `APPS_INSTALL_ENABLED` unset,
+do not run the installer overlay, and install apps with the copy-paste
+`docker compose … up` command shown in the App Catalog. That path never
+requires the socket-holding reconciler at all.
+
+---
+
+## What is deferred
+
+* **Real end-to-end install.** Exercising the reconciler against a live
+  daemon needs Docker on the host and **published + digested** app
+  images on GHCR (today the apps ship as a `build:` overlay with
+  `:local-build` tags). The reconcile logic is fully unit-tested with a
+  fake runner; the missing piece is a published, digest-pinned registry.
+* **Reconcile → installed_apps reflection.** The app still self-registers
+  into `installed_apps` on boot (unchanged). Tying "intent applied" back
+  to the catalog's installed/enabled state can be layered on later.

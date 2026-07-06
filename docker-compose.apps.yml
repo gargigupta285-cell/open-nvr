@@ -64,7 +64,13 @@ services:
     build:
       context: .
       dockerfile: examples/loitering-detection/Dockerfile
-    image: opennvr/loitering-detection:local-build
+    # A digest-pinned ref set by the one-click installer overrides the
+    # local build: the reconciler exports LOITERING_DETECTION_IMAGE=
+    # <image>@sha256:<digest>, and compose then PULLS that exact ref
+    # instead of using the build. Unset (the copy-paste / dev path) →
+    # this resolves to the :local-build tag and the build block above is
+    # used. See docs/APPS_INSTALL.md → Digest pinning.
+    image: ${LOITERING_DETECTION_IMAGE:-opennvr/loitering-detection:local-build}
     container_name: opennvr_loitering_detection
     restart: unless-stopped
     depends_on:
@@ -125,7 +131,13 @@ services:
     build:
       context: .
       dockerfile: examples/occupancy-counting/Dockerfile
-    image: opennvr/occupancy-counting:local-build
+    # A digest-pinned ref set by the one-click installer overrides the
+    # local build: the reconciler exports OCCUPANCY_COUNTING_IMAGE=
+    # <image>@sha256:<digest>, and compose then PULLS that exact ref
+    # instead of using the build. Unset (the copy-paste / dev path) →
+    # this resolves to the :local-build tag and the build block above is
+    # used. See docs/APPS_INSTALL.md → Digest pinning.
+    image: ${OCCUPANCY_COUNTING_IMAGE:-opennvr/occupancy-counting:local-build}
     container_name: opennvr_occupancy_counting
     restart: unless-stopped
     depends_on:

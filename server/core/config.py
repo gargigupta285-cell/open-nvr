@@ -389,6 +389,22 @@ class Settings(BaseSettings):
     # it makes the deviation from the hardened default auditable.
     mediamtx_allow_plaintext_outputs: bool = False
 
+    # ──────────────────────────────────────────────────────────────────
+    # One-click App install (opt-in; sovereignty moat)
+    # ──────────────────────────────────────────────────────────────────
+    # When False (the default), the /apps/index/{id}/install and
+    # /uninstall endpoints return 403 and only the copy-paste command
+    # path stays available. This is the sovereign / air-gapped posture:
+    # leave it off. When an operator opts in (APPS_INSTALL_ENABLED=true),
+    # the web app STILL never runs Docker — the endpoints only write a
+    # desired-state row (``app_install_intents``); a separate,
+    # minimally-privileged reconciler (scripts/app-installer) is the one
+    # component that holds the docker socket and applies the intent.
+    #
+    # See docs/APPS_INSTALL.md for the full desired-state + reconciler
+    # design and the RBAC / digest-pinning / audit guarantees.
+    apps_install_enabled: bool = False
+
     # Logging settings
     log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
     log_file_enabled: bool = True

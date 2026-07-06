@@ -59,6 +59,19 @@ generated at `up` time from its `config.docker.yml` template (secrets
 come from `.env`) — edit the template's cameras/zones for your scene
 and re-run `up`.
 
+### One-click install (opt-in)
+
+The copy-paste command above is always available. There is also an
+**opt-in** one-click install path where an operator with the
+`apps.install` permission installs a curated app straight from the App
+Catalog — but the web app **never runs Docker**. It only writes a
+desired-state row; a separate, minimally-privileged reconciler
+(`scripts/app-installer`) is the single component that holds the Docker
+socket and applies it. It is **off by default** (`APPS_INSTALL_ENABLED`)
+— sovereign / air-gapped deployments leave it off and use the copy-paste
+command. See **[docs/APPS_INSTALL.md](../docs/APPS_INSTALL.md)** for the
+full design (desired-state + reconciler, RBAC, digest pinning, audit).
+
 ---
 
 ## ✅ Shipped — runnable today

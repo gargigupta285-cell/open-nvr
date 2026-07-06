@@ -1,0 +1,82 @@
+# ==========================================================================
+# OpenNVR — App Installer overlay (THE ONE privileged component)
+# ==========================================================================
+#
+# This overlay adds the app-installer reconciler: the SINGLE component in
+# the whole stack that is granted the Docker socket. It exists so that
+# opt-in one-click app install can work WITHOUT the web app ever touching
+# Docker.
+#
+# The trust split:
+#
+#   * The web app (opennvr-core) writes desired state only — it upserts
+#     rows in the ``app_install_intents`` table when an operator with the
+#     ``apps.install`` permission clicks install/uninstall (and only when
+#     APPS_INSTALL_ENABLED=true). It NEVER spawns a subprocess, holds the
+#     Docker socket, or runs compose.
+#
+#   * This app-installer reads that table and applies it by running
+#     ``docker compose`` up/down. It is minimally privileged and NOT
+#     network-facing: no published ports, no inbound network — it only
+#     reaches the DB and the Docker socket.
+#
+# Opt in (this is a deliberate operator decision — leave it off for
+# sovereign / air-gapped deployments):
+#
+#   1. Set APPS_INSTALL_ENABLED=true in your .env (gates the endpoints).
+#   2. Grant the ``apps.install`` permission to the operator role(s).
+#   3. Bring up the installer:
+#
+#        docker compose -f docker-compose.yml -f docker-compose.installer.yml \
+#            --profile app-installer up -d app-installer
+#
+# Stop it (this does NOT uninstall apps — it just stops the reconciler):
+#
+#        docker compose -f docker-compose.yml -f docker-compose.installer.yml \
+#            --profile app-installer down
+#
+# See docs/APPS_INSTALL.md for the full design, the RBAC + digest-pinning
+# + audit guarantees, and the unpinned/air-gapped guidance.
+# ==========================================================================
+
+services:
+  app-installer:
+    profiles: [app-installer]
+    build:
+      context: .
+      dockerfile: scripts/app-installer/Dockerfile
+    image: opennvr/app-installer:local
+    container_name: opennvr_app_installer
+    restart: unless-stopped
+    # NOT network-facing: no ports published. It only needs the DB and
+    # the Docker socket. Join the internal network purely to reach the DB.
+    networks:
+      - opennvr_internal
+    environment:
+      # Reads the desired-state table. Point this at a least-privilege
+      # role with SELECT on app_install_intents and UPDATE of
+      # status/message/updated_at only — the installer never INSERTs
+      # intents (only the web app does).
+      - DATABASE_URL=${INSTALLER_DATABASE_URL:-${DATABASE_URL}}
+      - INSTALLER_POLL_SECONDS=${INSTALLER_POLL_SECONDS:-10}
+      # The compose files + profile the reconciler drives to bring apps
+      # up/down. Must match the app service blocks (docker-compose.apps.yml).
+      - INSTALLER_COMPOSE_FILES=docker-compose.yml,docker-compose.apps.yml
+      - INSTALLER_PROFILE=apps
+    volumes:
+      # ── THE privilege ──────────────────────────────────────────────
+      # The Docker socket is mounted into THIS tiny service and NOWHERE
+      # ELSE in the stack. Read-only is enough for `compose up/down`
+      # against the daemon API. This single mount is the entire attack
+      # surface of one-click install; keep the image minimal and the
+      # image_digest pinned (see the curated index).
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # The compose files + repo context the reconciler runs compose
+      # against (read-only). It builds/pins per the app compose blocks.
+      - ./:/repo:ro
+    working_dir: /repo
+
+# Uses the opennvr_internal network defined by the base compose file.
+networks:
+  opennvr_internal:
+    external: true
