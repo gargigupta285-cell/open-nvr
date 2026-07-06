@@ -436,3 +436,26 @@ def test_rules_dir_env_override(tmp_path, monkeypatch):
     finally:
         for m in ("monitor_host", "occupancy_counting", "line_crossing"):
             sys.modules.pop(m, None)
+
+
+async def test_nonfinite_params_rejected_loudly():
+    """Regression (review F7): json.loads accepts NaN/Infinity. A NaN line
+    endpoint passes Tripwire's degenerate-line check but every crossing()
+    comparison is False — the watch would be created "successfully" and
+    silently never fire. Non-finite numerics must be refused up front."""
+    host = _standalone_host()
+    nan, inf = float("nan"), float("inf")
+    with pytest.raises(ValueError, match="finite"):
+        host.create("line_crossing", ["cam1"],
+                    {"target": "person", "line": [0, 0, nan, 1]})
+    with pytest.raises(ValueError, match="finite"):
+        host.create("line_crossing", ["cam1"],
+                    {"target": "person", "line": [0, 0, 1, inf]})
+    with pytest.raises(ValueError, match="interval_s"):
+        host.create("occupancy", ["cam1"],
+                    {"target": "person", "interval_s": inf})
+    with pytest.raises(ValueError, match="track_ttl_seconds"):
+        host.create("line_crossing", ["cam1"],
+                    {"target": "person", "line": [0, 0, 1, 1],
+                     "track_ttl_seconds": nan})
+    assert host.list() == []

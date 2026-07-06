@@ -96,7 +96,13 @@ class CameraContext:
         self._frame_sources: dict[str, FrameSource] = {}
         self._frame_cache: dict[str, _CachedFrame] = {}
         self._cache_ttl = float(frame_cache_ttl_seconds)
-        self._cache_lock = asyncio.Lock()
+        # Per-camera fetch locks: a fetch on cam1 (which can take seconds —
+        # RTSP keyframe wait, up to the source timeout) must not block a
+        # concurrent tool call or monitor poll on cam2. One global lock here
+        # would serialize ALL frame access and starve interactive "what do
+        # you see?" calls behind hosted-monitor polling. The dict is bounded
+        # by the configured camera set (get_frame rejects unknown ids first).
+        self._cache_locks: dict[str, asyncio.Lock] = {}
 
         # One ring per camera + a global ring for events that don't
         # carry a camera_id (rare). bounded so a chatty bus doesn't
@@ -116,6 +122,12 @@ class CameraContext:
         self._alert_ring_size = self._event_ring_size
         self._app_alerts: dict[str, deque[AlertRecord]] = {}
         self._app_alert_seq = 0
+        # Cap on DISTINCT app rings. app_id comes off the bus (the alert's
+        # own source.name / subject segment), i.e. publisher-controlled — a
+        # buggy or malicious publisher minting a fresh app_id per message
+        # would otherwise create a new ring per alert, unbounded. When full,
+        # the ring with the OLDEST newest-alert is evicted (stalest app).
+        self._max_app_rings = 64
 
     # ── Cameras ────────────────────────────────────────────────────
 
@@ -157,17 +169,21 @@ class CameraContext:
                 f"no frame source registered for camera {camera_id!r}"
             )
 
-        # Cache check under the lock so two concurrent tool calls on
-        # the same camera don't race-fetch twice.
-        async with self._cache_lock:
+        # Cache check under the camera's OWN lock so two concurrent tool
+        # calls on the same camera don't race-fetch twice — while a slow
+        # fetch on another camera proceeds in parallel (monitor polls must
+        # not starve interactive calls).
+        lock = self._cache_locks.setdefault(camera_id, asyncio.Lock())
+        async with lock:
             cached = self._frame_cache.get(camera_id)
             now = time.monotonic()
             if cached is not None and (now - cached.fetched_at) < self._cache_ttl:
                 return cached.bytes_
 
-            # Fetch outside the lock would be nicer for parallelism,
-            # but frame_sources are sync and the lock is held only
-            # briefly. Trade-off acceptable for v0.1 single-host use.
+            # The fetch (RTSP keyframe wait: seconds) runs under this
+            # camera's lock — deliberate, so concurrent callers coalesce on
+            # one fetch instead of hammering the camera. Other cameras
+            # proceed in parallel on their own locks.
             try:
                 frame = await asyncio.to_thread(source.fetch)
             except FrameSourceError:
@@ -231,6 +247,20 @@ class CameraContext:
     # ── App alert ring (app door — read/relay) ─────────────────────
 
     def record_app_alert(self, alert: AlertRecord) -> None:
+        if (
+            alert.app_id not in self._app_alerts
+            and len(self._app_alerts) >= self._max_app_rings
+        ):
+            # At capacity and a NEW app id arrived: evict the app whose most
+            # recent alert is oldest. Bounds memory against a publisher
+            # minting fresh app_ids per message; a legitimately busy app is
+            # never evicted (its newest alert is recent).
+            stalest = min(
+                self._app_alerts,
+                key=lambda k: self._app_alerts[k][-1].received_at
+                if self._app_alerts[k] else 0.0,
+            )
+            del self._app_alerts[stalest]
         ring = self._app_alerts.setdefault(
             alert.app_id, deque(maxlen=self._alert_ring_size)
         )
@@ -316,15 +346,33 @@ async def run_event_subscriber(
 
             sub = await nc.subscribe("opennvr.inference.>", cb=_handler)
             logger.info("nats subscriber: connected to %s", nats_url)
-            await stop_event.wait()
-            await sub.unsubscribe()
+            # Park until stop — but wake periodically to check the connection
+            # still exists. nats-py gives up auto-reconnecting after its
+            # default budget (60 attempts x 2s ≈ 2 min) and CLOSES the
+            # connection without telling this coroutine; without the
+            # liveness check a longer NATS outage would leave the subscriber
+            # deaf for the rest of the process while recent_events keeps
+            # answering "no events". On close, fall through to the outer
+            # loop and redial.
+            while not stop_event.is_set() and not nc.is_closed:
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    continue
+            if nc.is_closed:
+                logger.warning(
+                    "nats subscriber: connection closed; reconnecting"
+                )
+            else:
+                await sub.unsubscribe()
         except Exception:
             logger.exception("nats subscriber: error in run loop; reconnecting")
         finally:
-            try:
-                await nc.drain()
-            except Exception:
-                logger.exception("nats subscriber: drain failed")
+            if not nc.is_closed:
+                try:
+                    await nc.drain()
+                except Exception:
+                    logger.exception("nats subscriber: drain failed")
 
 
 def _parse_inference_event(
@@ -461,17 +509,32 @@ async def run_app_alert_subscriber(
 
             sub = await nc.subscribe("opennvr.alerts.app.>", cb=_handler)
             logger.info("app-alert subscriber: connected to %s", nats_url)
-            await stop_event.wait()
-            await sub.unsubscribe()
+            # Liveness-checked park (same rationale as run_event_subscriber):
+            # nats-py closes the connection after its reconnect budget
+            # (~2 min) expires; detect that and redial via the outer loop
+            # instead of staying deaf while recent_app_alerts reports
+            # all-clear.
+            while not stop_event.is_set() and not nc.is_closed:
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    continue
+            if nc.is_closed:
+                logger.warning(
+                    "app-alert subscriber: connection closed; reconnecting"
+                )
+            else:
+                await sub.unsubscribe()
         except Exception:
             logger.exception(
                 "app-alert subscriber: error in run loop; reconnecting"
             )
         finally:
-            try:
-                await nc.drain()
-            except Exception:
-                logger.exception("app-alert subscriber: drain failed")
+            if not nc.is_closed:
+                try:
+                    await nc.drain()
+                except Exception:
+                    logger.exception("app-alert subscriber: drain failed")
 
 
 def _parse_app_alert(
@@ -504,13 +567,21 @@ def _parse_app_alert(
         or _camera_from_alert_subject(subject)
         or "unknown"
     )
-    severity = str(payload.get("severity") or "high")
+    # severity + title come straight off the bus, i.e. from whatever app
+    # published the alert — bound them before they reach the notification
+    # feed, webhooks, TTS, or the LLM tool output. severity is collapsed to
+    # its first whitespace-delimited token (kills embedded newlines that
+    # could smuggle text into the model context) and capped; title is
+    # capped like summary is (a megabyte title must not ride into the
+    # webhook fan-out verbatim).
+    severity_raw = str(payload.get("severity") or "high").strip().lower()
+    severity = (severity_raw.split() or ["high"])[0][:16]
     summary = _summarise_app_alert(payload)
     return AlertRecord(
         received_at=time.time(),
-        app_id=str(app_id),
-        camera_id=str(camera_id),
-        title=title.strip(),
+        app_id=str(app_id)[:64],
+        camera_id=str(camera_id)[:64],
+        title=" ".join(title.split())[:160],
         severity=severity,
         summary=summary,
         raw=payload,

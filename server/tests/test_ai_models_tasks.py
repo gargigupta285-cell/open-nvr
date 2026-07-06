@@ -254,3 +254,62 @@ def test_tasks_endpoint_serves_registry(client):
         assert key in entry
     assert "scene_caption" in entry["aliases"]
     assert entry["agent_skill"] == "see"
+
+
+# ─── fail-fast collision validation ─────────────────────────────────────
+# tasks.yml is hand-edited; a duplicated name/alias must refuse to load
+# rather than resolve silently (canonicalize_task is first-entry-wins,
+# lint_task_names was last-entry-wins — a collision would make the
+# canonicalizer and the advisory log disagree about the same string).
+
+
+def _load_from(tmp_path, monkeypatch, text: str):
+    p = tmp_path / "tasks.yml"
+    p.write_text(text)
+    monkeypatch.setattr(ai_models, "TASKS_REGISTRY_PATH", p)
+    _load_tasks_registry.cache_clear()
+    try:
+        return _load_tasks_registry()
+    finally:
+        _load_tasks_registry.cache_clear()
+
+
+def test_duplicate_canonical_task_fails_fast(tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="duplicate canonical task"):
+        _load_from(tmp_path, monkeypatch, (
+            "- task: object_detection\n  label: A\n"
+            "- task: Object_Detection\n  label: B\n"
+        ))
+
+
+def test_alias_claimed_twice_fails_fast(tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="claimed by both"):
+        _load_from(tmp_path, monkeypatch, (
+            "- task: image_captioning\n  label: A\n  aliases: [caption]\n"
+            "- task: vqa\n  label: B\n  aliases: [Caption]\n"
+        ))
+
+
+def test_alias_colliding_with_canonical_fails_fast(tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="collides with"):
+        _load_from(tmp_path, monkeypatch, (
+            "- task: vqa\n  label: A\n"
+            "- task: image_captioning\n  label: B\n  aliases: [VQA]\n"
+        ))
+
+
+def test_shipped_registry_passes_validation(registry):
+    """The editorial file at HEAD must always load clean."""
+    assert registry  # loading did not raise
+
+
+# ─── adapter-supplied strings are bounded before hitting logs ───────────
+
+
+def test_lint_bounds_and_escapes_adapter_strings(registry):
+    evil = "x" * 5000 + "\n2026-07-06 ERROR forged line"
+    warnings = lint_task_names([evil], registry)
+    assert len(warnings) == 1
+    assert len(warnings[0]) < 300          # megabyte name can't inflate logs
+    assert "\n" not in warnings[0]         # newline can't forge a log line
+    assert "\\n" in warnings[0] or "…" in warnings[0]

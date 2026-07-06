@@ -477,7 +477,7 @@ one capability, two names, counted as two).
 
 OpenNVR resolves this with a **curated + open** taxonomy: a
 product-owned registry at [`server/config/tasks.yml`](../server/config/tasks.yml),
-served over `GET /ai-models/tasks`, that adds a canonical layer on top of
+served over `GET /api/v1/ai-models/tasks`, that adds a canonical layer on top of
 the free-text one — without closing it. Each entry is:
 
 ```yaml

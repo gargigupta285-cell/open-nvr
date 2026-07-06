@@ -108,7 +108,38 @@ TASKS_REGISTRY_PATH = Path(__file__).resolve().parent.parent / "config" / "tasks
 @lru_cache(maxsize=1)
 def _load_tasks_registry() -> list[TaskEntry]:
     raw = yaml.safe_load(TASKS_REGISTRY_PATH.read_text()) or []
-    return [TaskEntry(**entry) for entry in raw]
+    entries = [TaskEntry(**entry) for entry in raw]
+    # Fail fast on collisions. tasks.yml is a hand-edited editorial file;
+    # without this, a duplicated name/alias would resolve SILENTLY and
+    # inconsistently — canonicalize_task iterates in file order (first entry
+    # wins) while lint_task_names builds dicts (last entry wins), so the
+    # canonicalizer and the advisory log would disagree about the same
+    # string. Better to refuse the file at load than map a task to the
+    # wrong skill with a contradictory log line.
+    canonical_by_key: dict[str, str] = {}
+    for e in entries:
+        key = e.task.lower()
+        if key in canonical_by_key:
+            raise ValueError(
+                f"tasks.yml: duplicate canonical task '{e.task}'"
+            )
+        canonical_by_key[key] = e.task
+    alias_owner: dict[str, str] = {}
+    for e in entries:
+        for a in e.aliases:
+            key = a.lower()
+            if key in canonical_by_key:
+                raise ValueError(
+                    f"tasks.yml: alias '{a}' of '{e.task}' collides with "
+                    f"canonical task '{canonical_by_key[key]}'"
+                )
+            if key in alias_owner:
+                raise ValueError(
+                    f"tasks.yml: alias '{a}' is claimed by both "
+                    f"'{alias_owner[key]}' and '{e.task}'"
+                )
+            alias_owner[key] = e.task
+    return entries
 
 
 def canonicalize_task(name: str, registry: list[TaskEntry]) -> str:
@@ -152,6 +183,14 @@ def lint_task_names(advertised: list[str], registry: list[TaskEntry]) -> list[st
     alias_to_task = {
         a.lower(): e.task for e in registry for a in e.aliases
     }
+
+    def _display(s: str) -> str:
+        # Adapter-supplied strings end up in server logs verbatim; bound the
+        # length and escape newlines so a misbehaving adapter can't forge log
+        # lines or inflate the log with a megabyte "task name".
+        out = (s or "")[:80].replace("\r", "\\r").replace("\n", "\\n")
+        return out + ("…" if s and len(s) > 80 else "")
+
     warnings: list[str] = []
     for raw in advertised or []:
         key = (raw or "").strip().lower()
@@ -159,13 +198,13 @@ def lint_task_names(advertised: list[str], registry: list[TaskEntry]) -> list[st
             continue
         if key in alias_to_task:
             warnings.append(
-                f"'{raw}' is an alias of '{alias_to_task[key]}'; "
+                f"'{_display(raw)}' is an alias of '{alias_to_task[key]}'; "
                 "prefer the canonical name"
             )
         else:
             warnings.append(
-                f"'{raw}' is not a known task — it will register but "
-                "stay uncategorized"
+                f"'{_display(raw)}' is not a known task — it will register "
+                "but stay uncategorized"
             )
     return warnings
 

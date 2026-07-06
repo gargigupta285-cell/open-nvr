@@ -59,9 +59,13 @@ InferenceSubscriber shape:
   with the synthetic demo client.
 * **``feed_event(event)`` (passive)** — hand a decoded
   ``opennvr.inference.*`` event straight to every hosted detector.
-  This is the in-process NATS bridge point: when the agent's event
-  subscriber is running, events off the bus can drive the same rule
-  instances with zero extra inference.
+  This is the in-process NATS bridge point for events off the bus to
+  drive the same rule instances with zero extra inference. NOT YET
+  WIRED: the agent's event subscriber doesn't call it in this release
+  — hosted monitors are driven by the active poll path only. Note for
+  whoever wires it: unlike the poll path, raw bus events bypass
+  ``_adapt_detections``/``_adapt_tracks`` normalisation, so the two
+  paths can disagree on labels/tracks until that's unified.
 
 Async-loop hygiene
 ------------------
@@ -88,6 +92,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import logging
+import math
 import os
 import sys
 from collections import deque
@@ -418,7 +423,18 @@ class MonitorHost:
         for mon in list(self._monitors.values()):
             if not mon.active:
                 continue
-            fired.extend(mon.detector.handle_event(event))
+            # Isolate per monitor: Detector.handle_event does NOT swallow
+            # on_detections exceptions (only the NATS _handle_raw path
+            # does), so one raising rule must not kill the caller — or
+            # starve every other hosted monitor of the event.
+            try:
+                fired.extend(mon.detector.handle_event(event))
+            except Exception:
+                logger.exception(
+                    "monitor #%s: detector raised on fed event; skipping",
+                    mon.id,
+                )
+                continue
             if isinstance(camera_id, str) and camera_id in mon.camera_ids:
                 self._push_counts(mon, camera_id)
         return fired
@@ -495,6 +511,12 @@ class MonitorHost:
             x1, y1, x2, y2 = (float(v) for v in line)
         except (TypeError, ValueError):
             raise ValueError("'line' values must all be numbers") from None
+        if not all(math.isfinite(v) for v in (x1, y1, x2, y2)):
+            # json.loads accepts NaN/Infinity; a NaN endpoint passes
+            # Tripwire's degenerate-line check (nan != 0 comparisons) but
+            # every crossing() comparison involving NaN is False — the watch
+            # would be created "successfully" and then silently never fire.
+            raise ValueError("'line' values must all be finite numbers")
         direction = str(params.get("direction") or "both").strip()
         # Tripwire itself rejects a degenerate line (A == B) and a bad
         # count_direction with operator-readable ValueErrors.
@@ -506,8 +528,8 @@ class MonitorHost:
             track_ttl = float(params.get("track_ttl_seconds", 30.0))
         except (TypeError, ValueError):
             raise ValueError("'track_ttl_seconds' must be a number > 0") from None
-        if track_ttl <= 0:
-            raise ValueError("'track_ttl_seconds' must be a number > 0")
+        if not math.isfinite(track_ttl) or track_ttl <= 0:
+            raise ValueError("'track_ttl_seconds' must be a finite number > 0")
 
         cameras = {
             cam: lc.CameraWire(
@@ -539,8 +561,8 @@ class MonitorHost:
             interval = float(raw)
         except (TypeError, ValueError):
             raise ValueError("'interval_s' must be a number > 0") from None
-        if interval <= 0:
-            raise ValueError("'interval_s' must be a number > 0")
+        if not math.isfinite(interval) or interval <= 0:
+            raise ValueError("'interval_s' must be a finite number > 0")
         return interval
 
     @staticmethod

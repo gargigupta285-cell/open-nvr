@@ -34,9 +34,11 @@ import base64
 import difflib
 import json
 import logging
+import math
 import re
 import signal
 import subprocess
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -927,7 +929,10 @@ class MonitorManager:
         self._cooldown = notify_cooldown
         self._max = max_monitors
         self._last_notified: dict[tuple[int, str], float] = {}
-        self._notifications: list[dict[str, Any]] = []
+        # Bounded: the feed only ever serves the newest 50 (notifications()),
+        # but appends arrive from monitor notify paths AND the app-alert
+        # relay — an unbounded list in a long-running agent is a slow leak.
+        self._notifications: deque[dict[str, Any]] = deque(maxlen=200)
         self._next_note_id = 1
         # SDK front door. Everything is late-bound through ``runtime`` so
         # tests that monkeypatch ``context.get_frame`` / ``detection_client
@@ -1055,7 +1060,7 @@ class MonitorManager:
         return out
 
     def notifications(self) -> list[dict[str, Any]]:
-        return list(self._notifications[-50:])
+        return list(self._notifications)[-50:]
 
     def _count_target(self, detections: list[dict[str, Any]], target: str) -> int:
         deduped = self._runtime.tools._dedup_detections(detections[:64])
@@ -2353,6 +2358,9 @@ class CameraAgentRuntime:
         self._stop_event = asyncio.Event()
         self._subscriber_task: asyncio.Task | None = None
         self._app_alert_subscriber_task: asyncio.Task | None = None
+        # Push-side throttle for the app-alert relay: last relay time per
+        # (app_id, camera_id). Reuses MonitorManager's notify cooldown.
+        self._app_relay_last: dict[tuple[str, str], float] = {}
 
     def _configure_tools(self) -> None:
         """(Re)build the advertised tool lists from ``enabled_tools`` minus the
@@ -2872,8 +2880,11 @@ class CameraAgentRuntime:
                 window = float(raw_window)
             except (TypeError, ValueError):
                 return "ERROR: window_seconds must be a number."
-        if window <= 0:
-            return "ERROR: window_seconds must be positive."
+        if not math.isfinite(window) or window <= 0:
+            # json.loads accepts NaN/Infinity; Infinity would blow up the
+            # int(window / 60) below (OverflowError), NaN would match nothing.
+            return "ERROR: window_seconds must be a positive finite number."
+        window = min(window, 7 * 86400.0)  # the ring holds hours, not weeks
 
         app_arg = args.get("app_id")
         app_id: str | None
@@ -2912,10 +2923,25 @@ class CameraAgentRuntime:
         source, labelled ``app:<id>``. Read/relay only: this reports the
         alert; it never acts on the app. Called synchronously from the
         subscriber's handler; never blocks (list append + fire-and-forget
-        webhook task)."""
+        webhook task).
+
+        Throttled per (app, camera) with the same cooldown the legacy
+        monitor notify path uses: this runs once per bus message, so
+        without it a misbehaving app alerting in a loop would spam the
+        feed and fire one webhook POST per message. The full alert
+        stream stays queryable via recent_app_alerts — only the PUSH
+        side is rate-limited."""
         import time as _t
 
         now = _t.time()
+        key = (str(alert.app_id), str(alert.camera_id))
+        if now - self._app_relay_last.get(key, 0.0) < self.monitors._cooldown:
+            logger.debug(
+                "app alert throttled (cooldown): app:%s on %s",
+                alert.app_id, alert.camera_id,
+            )
+            return
+        self._app_relay_last[key] = now
         self.monitors._notifications.append({
             "id": self.monitors._next_note_id,
             "source": f"app:{alert.app_id}",
@@ -3127,10 +3153,12 @@ class CameraAgentRuntime:
         closers = [
             self.whisper.aclose(), self.ollama.aclose(), self.piper.aclose(),
             self.caption_client.aclose(), self.detection_client.aclose(),
-            self.recognition_client.aclose(),
+            self.recognition_client.aclose(), self.kaic_capabilities.aclose(),
         ]
         if self.faces:
             closers.append(self.faces.aclose())
+        if self.app_registry:
+            closers.append(self.app_registry.aclose())
         await asyncio.gather(*closers, return_exceptions=True)
 
     # ── System prompt construction ────────────────────────────────

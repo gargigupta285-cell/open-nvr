@@ -82,7 +82,8 @@ for a hard-hat rule.
 
 That's the whole mechanism. The registry, the catalog, and the agent
 all do the same thing: **intersect the lists.** `requires_tasks` is
-checked against `GET /api/v1/adapters`; if the intersection is empty,
+checked against the aggregated task set from
+`GET /api/v1/ai-models/capabilities`; if the intersection is empty,
 the capability isn't there. This is exactly what's behind the
 catalog's "requires `ppe_detection` — not installed" badge: the card
 still renders, but it's greyed out until an adapter advertising that
@@ -98,7 +99,7 @@ can advertise anything and it matches — but once a task converges,
 OpenNVR gives it a canonical name in
 [`server/config/tasks.yml`](../server/config/tasks.yml)
 ([contract §4.1](./AI_ADAPTER_CONTRACT.md#41-the-canonical-task-taxonomy--curated--open)),
-served over `GET /ai-models/tasks`. Each entry carries a label, a skill
+served over `GET /api/v1/ai-models/tasks`. Each entry carries a label, a skill
 binding, and **aliases** — non-canonical spellings that mean the same
 capability. That last part is what makes the intersection above robust:
 we shipped one captioning adapter as `scene_caption` and another as

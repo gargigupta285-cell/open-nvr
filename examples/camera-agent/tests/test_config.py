@@ -146,6 +146,28 @@ def test_base_url_trailing_slash_is_normalised(tmp_path):
     assert parsed.opennvr_api_url == "http://nvr.local:8000"
 
 
+def test_shipped_docker_configs_use_internal_api_url():
+    """Regression: the shipped docker configs must pin opennvr_api_url to the
+    compose-INTERNAL service origin. opennvr_base_url is the browser-facing
+    host URL (localhost:8000); if it were left to derive opennvr_api_url, the
+    AppRegistryClient inside the bridge-networked container would call itself
+    on localhost and the app door would silently never work under compose."""
+    import yaml
+
+    cfg_dir = Path(__file__).resolve().parent.parent
+    for name in ("config.docker.yml", "config.docker.chat.yml"):
+        raw = yaml.safe_load((cfg_dir / name).read_text())
+        api_url = raw.get("opennvr_api_url")
+        assert api_url, f"{name}: opennvr_api_url must be set explicitly"
+        assert "opennvr-core" in api_url, (
+            f"{name}: opennvr_api_url must use the compose-internal service "
+            f"name (got {api_url!r}) — localhost is the agent container itself"
+        )
+        assert "localhost" not in api_url and "127.0.0.1" not in api_url, (
+            f"{name}: opennvr_api_url points at the agent container, not core"
+        )
+
+
 def test_explicit_fields_override_base_url(tmp_path):
     """Explicit per-field values always win over the derived base."""
     parsed = load_config(_write(

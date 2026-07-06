@@ -492,15 +492,20 @@ def test_read_routes_are_read_only(auth_client):
     from routers.apps import router as apps_router_obj
 
     read_routes = {("/apps", "GET"), ("/apps/{app_id}/status", "GET")}
+    checked: set[tuple[str, str]] = set()
     for route in apps_router_obj.routes:
         if (route.path, "GET") not in read_routes or "GET" not in route.methods:
             continue
+        checked.add((route.path, "GET"))
         dependency_names = {
             dep.call.__name__ for dep in route.dependant.dependencies
         }
         assert "get_read_principal" in dependency_names, route.path
         # The register/write service identity is never wired here.
         assert "get_register_principal" not in dependency_names, route.path
+    # Guard against vacuous passes: if the read routes are ever renamed or
+    # removed, the loop body would simply never run — fail instead.
+    assert checked == read_routes, f"read routes not found: {read_routes - checked}"
 
 
 # ─── Read routes accept the internal key (service reads for the agent) ──
