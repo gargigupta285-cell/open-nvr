@@ -468,21 +468,29 @@ def test_write_routes_do_not_accept_internal_api_key(auth_client):
     dependency only for register)."""
     from routers.apps import router as apps_router_obj
 
-    # register accepts the key via get_register_principal; the two read
-    # routes accept it via get_read_principal — both are intended.
+    # register accepts the key via get_register_principal; the read
+    # routes accept it via get_read_principal — both are intended. The
+    # check is per (path, METHOD): /apps/{app_id}/config carries a GET
+    # (read — the app's live-config poll, service key OK) AND a PUT
+    # (write — operator only), so path-only matching would be wrong in
+    # both directions.
     service_principals = {"get_register_principal", "get_read_principal"}
-    write_paths = {"/apps/{app_id}/enable", "/apps/{app_id}/disable",
-                   "/apps/{app_id}/config"}
+    write_routes = {("/apps/{app_id}/enable", "POST"),
+                    ("/apps/{app_id}/disable", "POST"),
+                    ("/apps/{app_id}/config", "PUT")}
     checked = set()
     for route in apps_router_obj.routes:
-        if route.path not in write_paths:
-            continue
-        checked.add(route.path)
-        dependency_names = {
-            dep.call.__name__ for dep in route.dependant.dependencies
-        }
-        assert not (service_principals & dependency_names), route.path
-    assert checked == write_paths          # all three write routes exist
+        for method in route.methods or ():
+            if (route.path, method) not in write_routes:
+                continue
+            checked.add((route.path, method))
+            dependency_names = {
+                dep.call.__name__ for dep in route.dependant.dependencies
+            }
+            assert not (service_principals & dependency_names), (
+                route.path, method,
+            )
+    assert checked == write_routes         # all three write routes exist
 
 
 def test_read_routes_are_read_only(auth_client):
@@ -491,7 +499,13 @@ def test_read_routes_are_read_only(auth_client):
     through the read principal."""
     from routers.apps import router as apps_router_obj
 
-    read_routes = {("/apps", "GET"), ("/apps/{app_id}/status", "GET")}
+    read_routes = {
+        ("/apps", "GET"),
+        ("/apps/{app_id}/status", "GET"),
+        # Live config delivery: the running app polls its own config
+        # with the internal key it already holds for registration.
+        ("/apps/{app_id}/config", "GET"),
+    }
     checked: set[tuple[str, str]] = set()
     for route in apps_router_obj.routes:
         if (route.path, "GET") not in read_routes or "GET" not in route.methods:
@@ -884,3 +898,58 @@ def test_validate_unknown_type_name_is_not_blocking():
     """A manifest with a type name we don't know shouldn't brick config."""
     manifest = {"params": [_param("x", "quaternion")]}
     assert validate_app_config(manifest, {"x": object()}) == []
+
+
+def test_get_config_with_internal_api_key_succeeds(auth_client):
+    """Live config delivery: the RUNNING APP polls its own config with
+    the deployment's internal key (the same credential it registers
+    with) — no user JWT in a headless container."""
+    reg = auth_client.post(
+        "/apps/register",
+        json={"url": "http://loitering:9200", "manifest": _manifest()},
+        headers={"X-Internal-Api-Key": _effective_internal_key()},
+    )
+    assert reg.status_code == 200
+
+    resp = auth_client.get(
+        "/apps/loitering-detection/config",
+        headers={"X-Internal-Api-Key": _effective_internal_key()},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == "loitering-detection"
+    assert isinstance(body["config"], dict)
+
+    # And it reflects a PUT (user-JWT path) — the registry is the
+    # single source of truth the app converges to.
+    put = auth_client.put(
+        "/apps/loitering-detection/config",
+        json={"watch_labels": ["person", "car"]},
+    )
+    assert put.status_code == 200
+    resp2 = auth_client.get(
+        "/apps/loitering-detection/config",
+        headers={"X-Internal-Api-Key": _effective_internal_key()},
+    )
+    assert resp2.json()["config"]["watch_labels"] == ["person", "car"]
+
+
+def test_get_config_requires_a_credential(auth_client):
+    """No JWT, no internal key → 401; wrong key → 401."""
+    import httpx as _httpx  # noqa: F401 — parity with sibling tests
+
+    reg = auth_client.post(
+        "/apps/register",
+        json={"url": "http://loitering:9200", "manifest": _manifest()},
+        headers={"X-Internal-Api-Key": _effective_internal_key()},
+    )
+    assert reg.status_code == 200
+    bare = auth_client.get(
+        "/apps/loitering-detection/config", headers={"Authorization": ""}
+    )
+    assert bare.status_code in (401, 403)
+    wrong = auth_client.get(
+        "/apps/loitering-detection/config",
+        headers={"X-Internal-Api-Key": "not-the-key"},
+    )
+    assert wrong.status_code in (401, 403)

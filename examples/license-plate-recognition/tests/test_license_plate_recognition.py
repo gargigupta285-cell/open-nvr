@@ -206,3 +206,58 @@ def test_multiple_reads_in_one_frame_each_fire_once():
     )
     recognizer.step()
     assert dispatcher.dispatch.call_count == 2
+
+
+# ── Live config delivery (SDK registry poll → on_config_update) ────────
+
+
+def test_on_config_update_swaps_watchlists_live():
+    """Registry watchlist edits apply WITHOUT a restart: the hook
+    rebuilds the allow/deny sets with the same normalization
+    load_config uses (upper + strip, empties dropped)."""
+    recognizer, _pipeline, _dispatcher = _build_recognizer(
+        [], config=_app_config(allowlist=["OLD1"], denylist=[])
+    )
+    assert recognizer._allowlist == {"OLD1"}
+
+    recognizer.on_config_update(
+        {"allowlist": [" abc123 ", ""], "denylist": ["evil1", "EVIL1"]}
+    )
+    assert recognizer._allowlist == {"ABC123"}
+    assert recognizer._denylist == {"EVIL1"}
+
+
+def test_on_config_update_is_idempotent_noop_on_same_values():
+    """The first poll re-delivers the boot config — same values must
+    not churn the sets (identity preserved ⇒ no spurious log/work)."""
+    recognizer, _pipeline, _dispatcher = _build_recognizer(
+        [], config=_app_config(allowlist=["AAA111"], denylist=["BBB222"])
+    )
+    before_allow = recognizer._allowlist
+    before_deny = recognizer._denylist
+    recognizer.on_config_update(
+        {"allowlist": ["aaa111"], "denylist": ["bbb222"]}
+    )
+    # Equal → early return → the exact same set objects still bound.
+    assert recognizer._allowlist is before_allow
+    assert recognizer._denylist is before_deny
+
+
+def test_on_config_update_severity_routing_follows_live_lists():
+    """End-to-end: a plate moved onto the denylist AFTER boot fires the
+    high-severity watchlist alert on the next read."""
+    read = _plate_read("XYZ789")
+    recognizer, _pipeline, dispatcher = _build_recognizer(
+        [[read], [read]], config=_app_config(
+            allowlist=[], denylist=[], dedup_window_seconds=0.0,
+        ))
+
+    recognizer.step()
+    first = dispatcher.dispatch.call_args_list[0][0][0]
+    assert first.severity == "info"          # plain read, not watched
+
+    recognizer.on_config_update({"allowlist": [], "denylist": ["XYZ789"]})
+    recognizer.step()
+    second = dispatcher.dispatch.call_args_list[1][0][0]
+    assert second.severity == "high"         # denylist applied live
+    assert "Watchlist plate XYZ789" in second.title

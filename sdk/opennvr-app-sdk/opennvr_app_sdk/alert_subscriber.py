@@ -133,9 +133,11 @@ class AlertSubscriber(ContractMixin, NatsSubscriberMixin):
         shared with ``Detector``."""
         self.start_contract_server()
         self.register_with_opennvr()
+        self.start_config_poll()
         try:
             await self._run_nats_loop(once=once)
         finally:
+            self.stop_config_poll()
             self.stop_contract_server()
 
 

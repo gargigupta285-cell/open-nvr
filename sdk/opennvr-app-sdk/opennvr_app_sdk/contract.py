@@ -50,6 +50,18 @@ Config keys read (all via ``getattr``, all optional):
     service credential). Falls back to the
     ``OPENNVR_INTERNAL_API_KEY`` environment variable when the config
     key is absent — the natural fit for compose deployments.
+``config_poll_seconds``
+    Interval for LIVE CONFIG DELIVERY (default ``10``; ``0`` or
+    negative disables). When ``opennvr_url`` is set, the app polls
+    ``GET {opennvr_url}/api/v1/apps/{manifest.id}/config`` — the
+    registry is the single source of truth (spec §05) — and calls
+    :meth:`ContractMixin.on_config_update` with the config dict on the
+    FIRST successful fetch and on every change after. Override the
+    hook to apply params live (it must be idempotent — the first call
+    usually re-delivers what the boot config already set); the default
+    logs that a restart is needed. Poll chosen over push: it works
+    with no new inbound surface on the app and no broker dependency,
+    and the app already holds the registry URL + key for registration.
 """
 from __future__ import annotations
 
@@ -69,6 +81,13 @@ logger = logging.getLogger(__name__)
 # Budget for the one-shot registration POST at boot. Tight on purpose:
 # a slow registry must not stall app startup for long.
 REGISTER_TIMEOUT_SECONDS = 5.0
+
+# Live config delivery defaults: how often the app polls its own config
+# from the registry, and the per-request budget. The poll thread is a
+# daemon and every failure path is swallowed-and-logged — config
+# delivery must never take the app down.
+CONFIG_POLL_DEFAULT_SECONDS = 10.0
+CONFIG_POLL_TIMEOUT_SECONDS = 5.0
 
 # Captured at import so the contract counters keep reading the REAL
 # clock even when an app's tests monkeypatch ``time.monotonic`` to
@@ -204,6 +223,11 @@ class ContractMixin:
         self._alerts_fired = 0
         self._last_event_monotonic: float | None = None
         self._contract_server: ContractServer | None = None
+        # Live config delivery (registry poll) state.
+        self._config_poll_thread: threading.Thread | None = None
+        self._config_poll_stop = threading.Event()
+        self._applied_config: dict[str, Any] | None = None
+        self._config_update_warned = False
 
     def _contract_note_event(self) -> None:
         self._events_seen += 1
@@ -348,5 +372,134 @@ class ContractMixin:
         )
         return True
 
+    # ── Live config delivery (registry poll, spec §05) ─────────────
 
-__all__ = ["ContractServer", "ContractMixin", "REGISTER_TIMEOUT_SECONDS"]
+    def on_config_update(self, config: dict[str, Any]) -> None:
+        """Override to apply registry config edits LIVE.
+
+        Called from the poll thread — first on the initial successful
+        fetch (which usually re-delivers what the boot config already
+        set, so implementations must be IDEMPOTENT), then on every
+        change. Applying state must be thread-safe against the app's
+        run loop; for typical param swaps, rebuilding into a fresh
+        object and rebinding one attribute is atomic enough under the
+        GIL (see the license-plate-recognition watchlists for the
+        pattern).
+
+        The default logs once that live-reload isn't handled — a
+        restart applies the change — so apps that never override still
+        behave sanely.
+        """
+        if not self._config_update_warned:
+            self._config_update_warned = True
+            logger.info(
+                "registry config changed but %s has no live-reload "
+                "handler (on_config_update not overridden) — restart "
+                "the app to apply",
+                type(self).__name__,
+            )
+
+    def _config_poll_target(self) -> tuple[str, dict[str, str]] | None:
+        """(url, headers) for the config poll, or None when unwired."""
+        opennvr_url = getattr(self.cfg, "opennvr_url", None)
+        app_id = getattr(self.manifest, "id", None) if self.manifest else None
+        if not opennvr_url or not app_id:
+            return None
+        headers: dict[str, str] = {}
+        token = getattr(self.cfg, "opennvr_token", None) or os.environ.get(
+            "OPENNVR_INTERNAL_API_KEY"
+        )
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+            headers["X-Internal-Api-Key"] = str(token)
+        url = (
+            f"{str(opennvr_url).rstrip('/')}/api/v1/apps/{app_id}/config"
+        )
+        return url, headers
+
+    def _config_poll_once(self, url: str, headers: dict[str, str]) -> None:
+        """One poll tick. Never raises — every failure is a debug log
+        (the registry being down must not spam a healthy app's logs)."""
+        try:
+            response = httpx.get(
+                url,
+                headers=headers,
+                timeout=CONFIG_POLL_TIMEOUT_SECONDS,
+                trust_env=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("config poll failed (%s): %s", url, exc)
+            return
+        if response.status_code >= 400:
+            # 404 is normal before first registration succeeds.
+            logger.debug(
+                "config poll rejected (%s): HTTP %d", url, response.status_code
+            )
+            return
+        try:
+            config = response.json().get("config")
+        except Exception:  # noqa: BLE001
+            logger.debug("config poll: non-JSON body from %s", url)
+            return
+        if not isinstance(config, dict):
+            return
+        if config == self._applied_config:
+            return
+        self._applied_config = config
+        try:
+            self.on_config_update(dict(config))
+        except Exception:
+            # A raising hook must not kill the poll thread — next edit
+            # still gets delivered.
+            logger.exception("on_config_update raised; config NOT applied")
+
+    def start_config_poll(self) -> bool:
+        """Start the live-config poll thread iff wired + enabled.
+
+        Requires ``cfg.opennvr_url`` + a manifest id (same conditions
+        as self-registration) and a positive ``config_poll_seconds``
+        (default 10s; set ``0`` to disable). Idempotent. Returns True
+        when the thread is running.
+        """
+        if self._config_poll_thread is not None:
+            return True
+        target = self._config_poll_target()
+        if target is None:
+            return False
+        raw = getattr(self.cfg, "config_poll_seconds", None)
+        interval = (
+            CONFIG_POLL_DEFAULT_SECONDS if raw is None else float(raw)
+        )
+        if interval <= 0:
+            return False
+        url, headers = target
+
+        def _loop() -> None:
+            while not self._config_poll_stop.wait(timeout=interval):
+                self._config_poll_once(url, headers)
+
+        self._config_poll_stop.clear()
+        thread = threading.Thread(
+            target=_loop, name="opennvr-app-config-poll", daemon=True
+        )
+        self._config_poll_thread = thread
+        thread.start()
+        logger.info(
+            "live config delivery: polling %s every %.0fs", url, interval
+        )
+        return True
+
+    def stop_config_poll(self) -> None:
+        thread = self._config_poll_thread
+        self._config_poll_thread = None
+        self._config_poll_stop.set()
+        if thread is not None:
+            thread.join(timeout=3.0)
+
+
+__all__ = [
+    "ContractServer",
+    "ContractMixin",
+    "REGISTER_TIMEOUT_SECONDS",
+    "CONFIG_POLL_DEFAULT_SECONDS",
+]

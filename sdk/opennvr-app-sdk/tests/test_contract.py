@@ -354,3 +354,164 @@ async def test_frame_app_run_starts_registers_and_stops_contract(monkeypatch):
     assert app_obj._contract_server is None
     with pytest.raises(httpx.TransportError):
         _get(seen_ports[0], "/health")
+
+
+# ── Live config delivery (registry poll) ───────────────────────────
+
+
+class _FakeGet:
+    """Sequenced httpx.get stub: pops canned (status, body) responses,
+    repeating the last one; records every (url, headers)."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls: list[tuple[str, dict]] = []
+
+    def __call__(self, url, headers=None, timeout=None, trust_env=None):
+        self.calls.append((url, dict(headers or {})))
+        status, body = (
+            self.responses.pop(0) if len(self.responses) > 1 else self.responses[0]
+        )
+        request = httpx.Request("GET", url)
+        return httpx.Response(status, json=body, request=request)
+
+
+class _ReloadDetector(_EchoDetector):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.applied: list[dict] = []
+
+    def on_config_update(self, config):
+        self.applied.append(config)
+
+
+def test_config_poll_off_without_url_or_interval():
+    # No opennvr_url → unwired.
+    det = _ReloadDetector(_cfg(), AlertDispatcher([_RecorderChannel()]))
+    assert det.start_config_poll() is False
+    # Wired but explicitly disabled.
+    det2 = _ReloadDetector(
+        _cfg(opennvr_url="http://reg:8000", config_poll_seconds=0),
+        AlertDispatcher([_RecorderChannel()]),
+    )
+    assert det2.start_config_poll() is False
+
+
+def test_config_poll_target_url_and_auth_headers(monkeypatch):
+    monkeypatch.setenv("OPENNVR_INTERNAL_API_KEY", "env-sekrit")
+    det = _ReloadDetector(
+        _cfg(opennvr_url="http://reg:8000/"),
+        AlertDispatcher([_RecorderChannel()]),
+    )
+    url, headers = det._config_poll_target()
+    assert url == "http://reg:8000/api/v1/apps/contract-echo/config"
+    assert headers["X-Internal-Api-Key"] == "env-sekrit"
+    assert headers["Authorization"] == "Bearer env-sekrit"
+
+
+def test_config_poll_applies_first_fetch_then_only_changes(monkeypatch):
+    """The hook fires on the FIRST successful fetch (registry is the
+    source of truth — spec §05) and again only when the config
+    actually changes."""
+    fake = _FakeGet([
+        (200, {"id": "contract-echo", "config": {"threshold": 1}}),
+        (200, {"id": "contract-echo", "config": {"threshold": 1}}),  # no change
+        (200, {"id": "contract-echo", "config": {"threshold": 2}}),
+    ])
+    monkeypatch.setattr(contract_mod.httpx, "get", fake)
+    det = _ReloadDetector(
+        _cfg(opennvr_url="http://reg:8000"),
+        AlertDispatcher([_RecorderChannel()]),
+    )
+    url, headers = det._config_poll_target()
+    det._config_poll_once(url, headers)
+    det._config_poll_once(url, headers)
+    det._config_poll_once(url, headers)
+    assert det.applied == [{"threshold": 1}, {"threshold": 2}]
+
+
+def test_config_poll_tolerates_registry_failures(monkeypatch):
+    """404 (not registered yet), 500, and connection errors are all
+    debug-logged no-ops — delivery resumes when the registry recovers."""
+    fake = _FakeGet([
+        (404, {"detail": "not registered"}),
+        (500, {"detail": "boom"}),
+        (200, {"id": "contract-echo", "config": {"a": 1}}),
+    ])
+    monkeypatch.setattr(contract_mod.httpx, "get", fake)
+    det = _ReloadDetector(
+        _cfg(opennvr_url="http://reg:8000"),
+        AlertDispatcher([_RecorderChannel()]),
+    )
+    url, headers = det._config_poll_target()
+    det._config_poll_once(url, headers)
+    det._config_poll_once(url, headers)
+    assert det.applied == []
+    det._config_poll_once(url, headers)
+    assert det.applied == [{"a": 1}]
+
+
+def test_config_poll_raising_hook_does_not_stop_delivery(monkeypatch):
+    """A buggy on_config_update must not kill the poll — the NEXT edit
+    still gets delivered."""
+
+    class _Angry(_EchoDetector):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.calls = 0
+
+        def on_config_update(self, config):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("bad hook")
+
+    fake = _FakeGet([
+        (200, {"config": {"v": 1}}),
+        (200, {"config": {"v": 2}}),
+    ])
+    monkeypatch.setattr(contract_mod.httpx, "get", fake)
+    det = _Angry(
+        _cfg(opennvr_url="http://reg:8000"),
+        AlertDispatcher([_RecorderChannel()]),
+    )
+    url, headers = det._config_poll_target()
+    det._config_poll_once(url, headers)   # raises inside, swallowed
+    det._config_poll_once(url, headers)   # next change still delivered
+    assert det.calls == 2
+
+
+def test_config_poll_thread_lifecycle(monkeypatch):
+    """start_config_poll spins the daemon thread, delivers, and
+    stop_config_poll joins it."""
+    import time as _time
+
+    fake = _FakeGet([(200, {"config": {"live": True}})])
+    monkeypatch.setattr(contract_mod.httpx, "get", fake)
+    det = _ReloadDetector(
+        _cfg(opennvr_url="http://reg:8000", config_poll_seconds=0.01),
+        AlertDispatcher([_RecorderChannel()]),
+    )
+    assert det.start_config_poll() is True
+    deadline = _time.time() + 3.0
+    while not det.applied and _time.time() < deadline:
+        _time.sleep(0.01)
+    det.stop_config_poll()
+    assert det.applied and det.applied[0] == {"live": True}
+    assert det._config_poll_thread is None
+
+
+def test_default_hook_logs_restart_needed_once(monkeypatch, caplog):
+    fake = _FakeGet([
+        (200, {"config": {"v": 1}}),
+        (200, {"config": {"v": 2}}),
+    ])
+    monkeypatch.setattr(contract_mod.httpx, "get", fake)
+    det = _detector(_cfg(opennvr_url="http://reg:8000"))  # no override
+    url, headers = det._config_poll_target()
+    import logging as _logging
+
+    with caplog.at_level(_logging.INFO, logger="opennvr_app_sdk.contract"):
+        det._config_poll_once(url, headers)
+        det._config_poll_once(url, headers)
+    restarts = [r for r in caplog.records if "restart" in r.message]
+    assert len(restarts) == 1  # warned once, not per change

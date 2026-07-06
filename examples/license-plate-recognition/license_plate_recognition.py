@@ -434,6 +434,43 @@ class LicensePlateRecognizer(FrameApp):
             "denylist_size": len(self._denylist),
         }
 
+    def on_config_update(self, config: dict[str, Any]) -> None:
+        """Live config delivery (SDK registry poll): apply watchlist
+        edits from the catalog's config form WITHOUT a restart.
+
+        Called from the SDK's poll thread; idempotent by construction
+        (set equality short-circuits the no-change case, including the
+        first fetch that re-delivers the boot config). The swap is a
+        single attribute rebind of a freshly built set — atomic under
+        the GIL against the frame loop's membership reads, mirroring
+        how ``load_config`` normalizes plates (upper + strip).
+
+        Only the watchlists apply live: they are pure per-read lookups.
+        Camera topology / adapter / interval edits still need a restart
+        (they are baked into the running pipeline), which the SDK's
+        default log line already tells the operator.
+        """
+        allow = {
+            str(p).upper().strip()
+            for p in (config.get("allowlist") or [])
+            if str(p).strip()
+        }
+        deny = {
+            str(p).upper().strip()
+            for p in (config.get("denylist") or [])
+            if str(p).strip()
+        }
+        if allow == self._allowlist and deny == self._denylist:
+            return
+        self._allowlist = allow
+        self._denylist = deny
+        logger.info(
+            "watchlists updated live from the registry: "
+            "allowlist=%d denylist=%d",
+            len(allow),
+            len(deny),
+        )
+
     def _build_alert(self, cam: CameraConfig, read: PlateRead) -> Alert:
         plate_upper = read.plate_text.upper()
         if plate_upper in self._denylist:

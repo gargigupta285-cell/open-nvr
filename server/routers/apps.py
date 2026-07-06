@@ -675,6 +675,33 @@ async def disable_app(
     return _serialize_app(row)
 
 
+@router.get("/{app_id}/config")
+async def get_app_config(
+    app_id: str,
+    principal: User | None = Depends(get_read_principal),
+    db: Session = Depends(get_db),
+):
+    """
+    Read one app's effective config from the registry.
+
+    This is the poll target for the SDK's LIVE CONFIG DELIVERY: the
+    registry is the single source of truth (spec §05) and the running
+    app polls this endpoint (with the deployment's internal key it
+    already holds for registration) to apply operator edits made in the
+    catalog's config form WITHOUT a container restart.
+
+    Read-only, hence ``get_read_principal`` (user JWT **or**
+    ``X-Internal-Api-Key``): the app itself is the intended service
+    caller. Writes stay user-JWT-only (``PUT`` below).
+    """
+    row = _get_app_or_404(db, app_id)
+    return {
+        "id": row.id,
+        "config": row.config_json or {},
+        "updated_at": row.updated_at,
+    }
+
+
 @router.put("/{app_id}/config")
 async def update_app_config(
     app_id: str,
