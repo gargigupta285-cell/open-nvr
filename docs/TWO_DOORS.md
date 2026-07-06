@@ -174,6 +174,10 @@ app and can relay its state conversationally. Two read-only tools back it:
 - **`app_status`** — one app's live health + state, proxied through the
   server's `GET /api/v1/apps/{id}/status`. "Is the occupancy app healthy?
   What's it seeing right now?"
+- **`recent_app_alerts`** — the alerts installed apps have *fired*, off the
+  bus (the alert relay, below). "Any alerts from my apps? Did the PPE app
+  flag anything in the last hour?" Optional `app_id` + `window_seconds`
+  filters; returns newest-first.
 
 Each installed+enabled app also surfaces in the agent's skills panel as a
 `source:"app"` entry (`id` like `app:loitering-detection`), alongside the
@@ -201,13 +205,36 @@ is cached (60s TTL, negative-cached) and never raises: an unreachable or
 unconfigured registry degrades to a graceful "couldn't reach the app
 registry" message and simply omits the per-app skill entries, never a crash.
 
-> **Deferred next slice: alert relay.** This slice is discovery + state
-> query. The natural follow-on is the agent **subscribing** to app alerts
-> (`opennvr.alerts.app.>` on the bus) so a container app firing a loitering
-> or PPE alert can reach the user through the same conversational surface as
-> the agent's own watches. That's a separate, additive slice — still
-> read-only (the agent relays alerts, it doesn't arm or silence the app) —
-> and is not built here.
+**Alert relay — the app door's second half (shipped).** Discovery + state
+query is the *pull* side. The *push* side is the agent **subscribing** to app
+alerts on the bus (`opennvr.alerts.app.>` — the §11.5 alert envelope apps
+publish via the App SDK) so a container app firing a loitering or PPE alert
+reaches the user through the same conversational surface as the agent's own
+watches. This surfaces two ways:
+
+- **Conversationally** — the `recent_app_alerts` tool answers "any alerts
+  from my apps?" out of a bounded, newest-first in-memory ring (the same
+  shape as the `recent_events` inference ring, with a monotonic sequence
+  tiebreak so an equal-timestamp burst stays deterministically ordered).
+- **Proactively** — each incoming alert is pushed into the **same
+  notification feed** the demo polls and the **same webhook fan-out**
+  (`Notifier`) the agent's own watches and alarms use, labelled
+  `source: "app:<id>"`. So "the PPE app flagged a violation" reaches you
+  even with the tab closed, exactly like a watch notification.
+
+The subscriber rides the **same NATS connection** the inference-event
+subscriber uses (`nats_inference_url`); it starts only when NATS is
+configured and, like the event subscriber, **never crashes the agent** —
+a down broker or a missing `nats-py` degrades to an empty ring, not an
+error. Non-alert / malformed bus traffic is dropped by the parser.
+
+**Still strictly read/relay.** The agent *consumes and reports* app alerts —
+the `recent_app_alerts` query tool plus the proactive notification surfacing.
+There is deliberately **no** path that arms, silences, acknowledges, enables,
+or reconfigures an app: no such tool, handler, or client method exists.
+Arming or silencing an app stays an **operator action**, exactly like the
+enable/disable/configure boundary above. The agent relays the alert; it never
+acts on the app.
 
 ## 4. What this means for you as a developer
 

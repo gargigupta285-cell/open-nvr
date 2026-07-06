@@ -359,9 +359,12 @@ def test_app_entries_omitted_before_any_fetch():
 
 
 def test_apps_skill_maps_only_to_read_tools():
-    # The whole slice is read-only: the "apps" skill exposes only the two
-    # query tools — no enable/disable/config tool exists.
-    assert SKILL_TOOLS["apps"] == ["list_apps", "app_status"]
+    # The whole slice is read-only: the "apps" skill exposes only query /
+    # relay tools (list + status + the alert relay) — no enable/disable/
+    # config tool exists.
+    assert SKILL_TOOLS["apps"] == [
+        "list_apps", "app_status", "recent_app_alerts"
+    ]
 
 
 def test_no_registry_write_tool_or_handler_exists():

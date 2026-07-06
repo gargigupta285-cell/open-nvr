@@ -62,6 +62,23 @@ class EventRecord:
     seq: int = 0  # insertion order, stamped by CameraContext.record_event
 
 
+@dataclass
+class AlertRecord:
+    """One app-emitted alert off the NATS bus (§11.5 envelope), trimmed
+    to the bits the LLM cares about — the read side of the app door's
+    alert relay. Mirrors EventRecord, including the monotonic ``seq``
+    tiebreak for deterministic newest-first ordering under equal
+    ``received_at``."""
+    received_at: float
+    app_id: str          # the source app's id (subject/source.name)
+    camera_id: str
+    title: str
+    severity: str        # low / medium / high / critical
+    summary: str         # short human-readable summary the tool emits to the LLM
+    raw: dict[str, Any] = field(default_factory=dict)
+    seq: int = 0         # insertion order, stamped by record_app_alert
+
+
 class CameraContext:
     """One instance shared across all tool calls. Owns the cache, the
     ring buffer, and the frame sources."""
@@ -91,6 +108,14 @@ class CameraContext:
         # clock with coarse resolution). Without it, equal timestamps sort
         # nondeterministically and the LLM sees a scrambled recent-events list.
         self._event_seq = 0
+
+        # App alert ring — the read side of the app door's ALERT RELAY. One
+        # ring per source app id, bounded like the event ring so a chatty app
+        # can't grow memory unboundedly. Same seq tiebreak so equal-timestamp
+        # bursts stay deterministic newest-first.
+        self._alert_ring_size = self._event_ring_size
+        self._app_alerts: dict[str, deque[AlertRecord]] = {}
+        self._app_alert_seq = 0
 
     # ── Cameras ────────────────────────────────────────────────────
 
@@ -201,6 +226,41 @@ class CameraContext:
         # prompt-token budget runs out. The seq tiebreak keeps ordering
         # deterministic when events share a received_at.
         out.sort(key=lambda e: (e.received_at, e.seq), reverse=True)
+        return out
+
+    # ── App alert ring (app door — read/relay) ─────────────────────
+
+    def record_app_alert(self, alert: AlertRecord) -> None:
+        ring = self._app_alerts.setdefault(
+            alert.app_id, deque(maxlen=self._alert_ring_size)
+        )
+        alert.seq = self._app_alert_seq
+        self._app_alert_seq += 1
+        ring.append(alert)
+
+    def recent_app_alerts(
+        self,
+        *,
+        app_id: str | None = None,
+        window_seconds: float,
+    ) -> list[AlertRecord]:
+        """Return app alerts from the last ``window_seconds``. Filter by
+        source app if given; otherwise across all apps. Newest-first and
+        deterministic (the seq tiebreak orders equal-timestamp bursts) —
+        the same pattern as ``recent_events``."""
+        cutoff = time.time() - max(0.0, float(window_seconds))
+        rings: list[deque[AlertRecord]]
+        if app_id is None:
+            rings = list(self._app_alerts.values())
+        else:
+            ring = self._app_alerts.get(app_id)
+            rings = [ring] if ring else []
+        out: list[AlertRecord] = []
+        for ring in rings:
+            for al in ring:
+                if al.received_at >= cutoff:
+                    out.append(al)
+        out.sort(key=lambda a: (a.received_at, a.seq), reverse=True)
         return out
 
 
@@ -325,3 +385,163 @@ def _summarise_event(payload: dict[str, Any]) -> str:
     if isinstance(title, str) and title.strip():
         return title.strip()
     return f"event from adapter ({task or 'unknown task'})"
+
+
+# ── App alert relay (subscriber + parser) ──────────────────────────
+
+
+async def run_app_alert_subscriber(
+    *,
+    context: CameraContext,
+    nats_url: str,
+    nats_token: str | None,
+    stop_event: asyncio.Event,
+    on_alert=None,  # optional callback(AlertRecord) — the notification bridge
+) -> None:
+    """Subscribe to ``opennvr.alerts.app.>`` and feed parsed app alerts
+    into the camera context's alert ring — the READ side of the app
+    door's alert relay. This is a near-copy of ``run_event_subscriber``:
+    the agent only CONSUMES and REPORTS these alerts (query tool +
+    optional notification bridge); it never publishes back or acts on the
+    app.
+
+    On each parsed alert we call ``context.record_app_alert`` AND the
+    optional ``on_alert`` callback (used by camera_agent to push the alert
+    into the existing notification feed so it surfaces proactively).
+
+    Runs forever until ``stop_event`` fires. Connection errors log + back
+    off; we never crash the agent if NATS is offline. nats-py missing →
+    just wait on stop_event (the recent_app_alerts tool stays empty).
+    """
+    try:
+        import nats  # type: ignore
+    except ImportError:
+        logger.warning(
+            "nats-py not installed; recent_app_alerts tool will be empty"
+        )
+        await stop_event.wait()
+        return
+
+    while not stop_event.is_set():
+        try:
+            options: dict[str, Any] = {"servers": [nats_url]}
+            if nats_token:
+                options["token"] = nats_token
+            nc = await nats.connect(**options)
+        except Exception as exc:
+            logger.warning(
+                "app-alert subscriber: connect failed (%s); retrying in 5s", exc
+            )
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                continue
+            return
+
+        try:
+            async def _handler(msg) -> None:  # noqa: ANN001 — nats msg type
+                try:
+                    payload = json.loads(msg.data.decode("utf-8"))
+                except Exception:
+                    logger.debug(
+                        "app-alert subscriber: dropping non-JSON payload"
+                    )
+                    return
+                record = _parse_app_alert(msg.subject, payload)
+                if record is None:
+                    return
+                context.record_app_alert(record)
+                if on_alert is not None:
+                    try:
+                        on_alert(record)
+                    except Exception:  # pragma: no cover - defensive
+                        logger.exception(
+                            "app-alert subscriber: on_alert callback raised"
+                        )
+
+            sub = await nc.subscribe("opennvr.alerts.app.>", cb=_handler)
+            logger.info("app-alert subscriber: connected to %s", nats_url)
+            await stop_event.wait()
+            await sub.unsubscribe()
+        except Exception:
+            logger.exception(
+                "app-alert subscriber: error in run loop; reconnecting"
+            )
+        finally:
+            try:
+                await nc.drain()
+            except Exception:
+                logger.exception("app-alert subscriber: drain failed")
+
+
+def _parse_app_alert(
+    subject: str, payload: dict[str, Any]
+) -> AlertRecord | None:
+    """Coerce an ``opennvr.alerts.app.<id>.<cam>`` §11.5 envelope into a
+    compact AlertRecord. Returns None if the message isn't shaped like an
+    app alert (no title → not an alert; guards against inference/other
+    traffic that shares the bus).
+
+    App id: from the ``source.name`` block, falling back to the subject's
+    app-id segment. Camera: from ``camera_id`` in the payload, falling
+    back to the subject's trailing segment(s)."""
+    if not isinstance(payload, dict):
+        return None
+    title = payload.get("title")
+    if not isinstance(title, str) or not title.strip():
+        # §11.5 alerts always carry a title; without one this isn't an
+        # app alert we can relay.
+        return None
+    source = payload.get("source")
+    source = source if isinstance(source, dict) else {}
+    app_id = (
+        (source.get("name") if isinstance(source.get("name"), str) else None)
+        or _app_id_from_subject(subject)
+        or "unknown"
+    )
+    camera_id = (
+        payload.get("camera_id")
+        or _camera_from_alert_subject(subject)
+        or "unknown"
+    )
+    severity = str(payload.get("severity") or "high")
+    summary = _summarise_app_alert(payload)
+    return AlertRecord(
+        received_at=time.time(),
+        app_id=str(app_id),
+        camera_id=str(camera_id),
+        title=title.strip(),
+        severity=severity,
+        summary=summary,
+        raw=payload,
+    )
+
+
+def _app_id_from_subject(subject: str) -> str | None:
+    # ``opennvr.alerts.app.<app-id>.<camera>`` → app-id
+    parts = subject.split(".")
+    if len(parts) >= 4 and parts[:3] == ["opennvr", "alerts", "app"]:
+        return parts[3]
+    return None
+
+
+def _camera_from_alert_subject(subject: str) -> str | None:
+    # ``opennvr.alerts.app.<app-id>.<camera…>`` → camera (any trailing
+    # segments joined, so a future extra token doesn't lose the camera).
+    parts = subject.split(".")
+    if len(parts) >= 5 and parts[:3] == ["opennvr", "alerts", "app"]:
+        return ".".join(parts[4:])
+    return None
+
+
+def _summarise_app_alert(payload: dict[str, Any]) -> str:
+    """One-line human-readable summary of an app alert the LLM can read
+    directly. Prefers the envelope's description, falling back to the
+    title, then a generic phrase."""
+    title = str(payload.get("title") or "").strip()
+    desc = payload.get("description")
+    if isinstance(desc, str) and desc.strip():
+        base = f"{title}: {desc.strip()}" if title else desc.strip()
+    else:
+        base = title or "app alert"
+    return base[:200]

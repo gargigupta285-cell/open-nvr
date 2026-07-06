@@ -55,7 +55,12 @@ from adapter_clients import (
     SyntheticDetectionClient,
     WhisperClient,
 )
-from context import CameraContext, CameraSpec, run_event_subscriber
+from context import (
+    CameraContext,
+    CameraSpec,
+    run_app_alert_subscriber,
+    run_event_subscriber,
+)
 from frame_sources import build_frame_source, discover_local_cameras
 from monitor_host import MonitorHost
 from tools import CameraTools, build_tool_definitions
@@ -281,7 +286,7 @@ SKILL_TOOLS: dict[str, list[str]] = {
     "watch": ["create_monitor", "stop_monitor"],
     "report": ["create_report", "stop_report"],
     "task": ["create_background_task"],
-    "apps": ["list_apps", "app_status"],
+    "apps": ["list_apps", "app_status", "recent_app_alerts"],
 }
 # id, icon, name, example question, requirement key ("" = always available)
 _SKILL_META: list[tuple[str, str, str, str, str]] = [
@@ -1479,12 +1484,19 @@ class Notifier:
         title = str(event.get("title") or "OpenNVR alert")
         detail = str(event.get("text") or "")
         body = f"{title}: {detail}" if detail else title
-        return {
+        payload = {
             "text": body, "content": body,  # Slack / Discord
             "type": event.get("type"), "title": title, "detail": detail,
             "camera": event.get("camera"), "severity": event.get("severity"),
             "ts": event.get("ts"), "agent": self._runtime.agent_name,
         }
+        # App-alert relay labels its source (``app:<id>``) so a webhook
+        # consumer can tell "the PPE app flagged a violation" apart from the
+        # agent's own watches. Only present for relayed app alerts.
+        source = event.get("source")
+        if source:
+            payload["source"] = source
+        return payload
 
     async def send(self, event: dict[str, Any]) -> int:
         kind = event.get("type")
@@ -1923,6 +1935,46 @@ def _app_status_tool() -> dict[str, Any]:
     }
 
 
+def _recent_app_alerts_tool() -> dict[str, Any]:
+    """Function schema for the app-door ALERT RELAY read side: recent
+    alerts fired by installed catalog apps, off the bus."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "recent_app_alerts",
+            "description": (
+                "Look back at recent ALERTS fired by installed OpenNVR catalog "
+                "apps (loitering, PPE violations, occupancy limits, etc.). Use "
+                "for 'any alerts from my apps?', 'did the PPE app flag anything?', "
+                "'has the loitering detector gone off?'. Returns alerts "
+                "newest-first with the app, camera, severity, and what fired. "
+                "Read-only: you RELAY what an app reported — you cannot arm, "
+                "silence, or reconfigure the app."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app_id": {
+                        "type": "string",
+                        "description": (
+                            "Optional: filter to one app's alerts by its id "
+                            "(from list_apps), e.g. 'ppe-detection'. Omit for "
+                            "alerts from all apps."
+                        ),
+                    },
+                    "window_seconds": {
+                        "type": "number",
+                        "description": (
+                            "How far back, in SECONDS (60=1min, 3600=1hr). "
+                            "Defaults to 3600 (the last hour)."
+                        ),
+                    },
+                },
+            },
+        },
+    }
+
+
 def load_config(path: str | Path) -> AppConfig:
     raw = yaml.safe_load(Path(path).read_text())
     if not isinstance(raw, dict):
@@ -2264,6 +2316,7 @@ class CameraAgentRuntime:
             "forget_face": self._handle_forget_face,
             "list_apps": self._handle_list_apps,
             "app_status": self._handle_app_status,
+            "recent_app_alerts": self._handle_recent_app_alerts,
         }
 
         self.agent_name = agent_name_for(cfg.agent_name)
@@ -2275,6 +2328,7 @@ class CameraAgentRuntime:
         self.reports = ReportScheduler(self)
         self._stop_event = asyncio.Event()
         self._subscriber_task: asyncio.Task | None = None
+        self._app_alert_subscriber_task: asyncio.Task | None = None
 
     def _configure_tools(self) -> None:
         """(Re)build the advertised tool lists from ``enabled_tools`` minus the
@@ -2306,7 +2360,7 @@ class CameraAgentRuntime:
             _create_alarm_tool(cam_all), _stop_alarm_tool(),
             _create_report_tool(), _stop_report_tool(),
             _enroll_face_tool(cam_all), _list_people_tool(), _forget_face_tool(),
-            _list_apps_tool(), _app_status_tool(),
+            _list_apps_tool(), _app_status_tool(), _recent_app_alerts_tool(),
         ) if keep(t)]
         self.background_tool_definitions = base
         self.tool_definitions = base + control
@@ -2349,7 +2403,7 @@ class CameraAgentRuntime:
             "faces": f"{self.cfg.recognition_adapter} recognition",
             "events": "inference event bus (NATS)",
             "footage": "footage-search index",
-            "apps": "OpenNVR app registry (read-only)",
+            "apps": "OpenNVR app registry + alert relay (read-only)",
         }
         hints = {
             "faces": "Set faces_url to the recognition adapter to enable.",
@@ -2781,6 +2835,81 @@ class CameraAgentRuntime:
             parts.append("No live state was reported.")
         return " ".join(parts)
 
+    async def _handle_recent_app_alerts(self, args: dict[str, Any]) -> str:
+        """Tool handler (app-door ALERT RELAY, read side): report recent
+        alerts fired by installed catalog apps, off the bus. Read-only —
+        the agent RELAYS what an app reported; it never arms/silences it.
+        Degrades to a graceful message when the alert bus isn't wired."""
+        raw_window = args.get("window_seconds")
+        if raw_window in (None, ""):
+            window = 3600.0
+        else:
+            try:
+                window = float(raw_window)
+            except (TypeError, ValueError):
+                return "ERROR: window_seconds must be a number."
+        if window <= 0:
+            return "ERROR: window_seconds must be positive."
+
+        app_arg = args.get("app_id")
+        app_id: str | None
+        if app_arg in (None, "", "__any__"):
+            app_id = None
+        else:
+            app_id = str(app_arg).strip() or None
+
+        alerts = self.context.recent_app_alerts(
+            app_id=app_id, window_seconds=window
+        )
+        if not alerts:
+            scope = f"'{app_id}'" if app_id else "any app"
+            mins = int(window / 60) or 1
+            if not self.cfg.nats_inference_url:
+                return (
+                    "No app alerts — the alert bus isn't configured, so I'm "
+                    "not receiving alerts from installed apps."
+                )
+            return f"No alerts from {scope} in the last {mins} minute(s)."
+        import time as _time
+
+        now = _time.time()
+        lines = [
+            f"{int(now - a.received_at)}s ago — [{a.severity}] app:{a.app_id} "
+            f"on {a.camera_id}: {a.summary}"
+            for a in alerts[:6]
+        ]
+        return "Recent app alerts:\n" + "\n".join(lines)
+
+    def _relay_app_alert(self, alert: Any) -> None:
+        """Notification bridge (app-door ALERT RELAY): a subscribed app
+        fired an alert. Push it into the SAME notification feed the demo
+        polls + the Notifier webhook fan-out, so 'the PPE app flagged a
+        violation' surfaces proactively — app alerts are just another
+        source, labelled ``app:<id>``. Read/relay only: this reports the
+        alert; it never acts on the app. Called synchronously from the
+        subscriber's handler; never blocks (list append + fire-and-forget
+        webhook task)."""
+        import time as _t
+
+        now = _t.time()
+        self.monitors._notifications.append({
+            "id": self.monitors._next_note_id,
+            "source": f"app:{alert.app_id}",
+            "text": f"{alert.title} — {alert.summary}",
+            "ts": now,
+        })
+        self.monitors._next_note_id += 1
+        logger.info(
+            "app alert relayed: app:%s on %s — %s",
+            alert.app_id, alert.camera_id, alert.title,
+        )
+        self.notifier.fire({
+            "type": "notify", "title": f"App alert: {alert.title}",
+            "text": alert.summary, "camera": alert.camera_id,
+            "severity": alert.severity, "source": f"app:{alert.app_id}",
+            "ts": now,
+        })
+
     async def _handle_create_task(self, args: dict[str, Any]) -> str:
         """Tool handler: queue a long-running job and acknowledge so the
         conversation continues while it runs in the background."""
@@ -2842,10 +2971,30 @@ class CameraAgentRuntime:
                 "camera-agent: NATS subscriber started on %s",
                 self.cfg.nats_inference_url,
             )
+            # App-door ALERT RELAY: subscribe opennvr.alerts.app.> on the SAME
+            # bus so app-emitted alerts reach the user both conversationally
+            # (recent_app_alerts tool) and proactively (the notification feed,
+            # via the _relay_app_alert bridge). Read/relay only — the agent
+            # reports app alerts, it never acts on the app.
+            self._app_alert_subscriber_task = asyncio.create_task(
+                run_app_alert_subscriber(
+                    context=self.context,
+                    nats_url=self.cfg.nats_inference_url,
+                    nats_token=self.cfg.nats_inference_token,
+                    stop_event=self._stop_event,
+                    on_alert=self._relay_app_alert,
+                ),
+                name="camera-agent-app-alert-subscriber",
+            )
+            logger.info(
+                "camera-agent: app-alert subscriber started on %s "
+                "(opennvr.alerts.app.>)",
+                self.cfg.nats_inference_url,
+            )
         else:
             logger.info(
-                "camera-agent: NATS not configured; recent_events tool "
-                "will always report 'no events'"
+                "camera-agent: NATS not configured; recent_events and "
+                "recent_app_alerts tools will always report 'no events'"
             )
 
         # Pre-warm the LLM in the background so the FIRST real question
@@ -2937,13 +3086,18 @@ class CameraAgentRuntime:
         self.monitors.stop_all()
         self.alarms.stop_all()
         self.reports.stop_all()
-        if self._subscriber_task is not None:
+        for task, label in (
+            (self._subscriber_task, "subscriber"),
+            (self._app_alert_subscriber_task, "app-alert subscriber"),
+        ):
+            if task is None:
+                continue
             try:
-                await asyncio.wait_for(self._subscriber_task, timeout=5.0)
+                await asyncio.wait_for(task, timeout=5.0)
             except asyncio.TimeoutError:
-                self._subscriber_task.cancel()
+                task.cancel()
             except Exception:
-                logger.exception("subscriber shutdown raised")
+                logger.exception("%s shutdown raised", label)
         # Close all reusable HTTP clients so pytest / uvicorn don't
         # log warnings about unclosed AsyncClient instances on exit.
         closers = [
