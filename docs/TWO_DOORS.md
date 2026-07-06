@@ -21,10 +21,10 @@ than 3 cars in the driveway", "hard hat missing" — as an SDK
 `Detector` class. That single class is reachable through **two front
 doors**: the **App Catalog** (an operator enables it from a card,
 fills in an auto-generated config form, and it runs as a 24/7
-daemon) and the **OpenNVR Agent** (formerly the Camera Agent — a user *says* "keep watching the
-driveway and tell me if more than 3 cars show up", and the agent
-spins up the same class as a session monitor). Zero agent code on
-your side. Whether either door can actually *do* the thing is decided
+daemon) and the **OpenNVR Agent**, formerly the Camera Agent (a user
+*says* "keep watching the driveway and tell me if more than 3 cars
+show up", and the agent spins up the same class as a session
+monitor). Zero agent code on your side. Whether either door can actually *do* the thing is decided
 by one mechanism: intersecting the tasks your rule declares it needs
 (`requires_tasks` in the app manifest) with the tasks registered
 adapters advertise (`tasks_advertised` from `GET /capabilities`).
@@ -167,7 +167,7 @@ should be able to *talk about* them.
 
 That's the **app door**: when the agent is configured with the OpenNVR
 server's base URL (`opennvr_api_url`), it discovers every installed catalog
-app and can relay its state conversationally. Two read-only tools back it:
+app and can relay its state conversationally. Three read-only tools back it:
 
 - **`list_apps`** — the installed **and enabled** apps: id, name, summary,
   category, and what each emits (alert types). "What apps are running? Do I
