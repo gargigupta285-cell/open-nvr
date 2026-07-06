@@ -19,6 +19,7 @@
 import { NavLink, useLocation } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import { apiService } from '../lib/apiService'
+import { useSnackbar } from '../components/Snackbar'
 
 const SUBTABS = [
   { key: 'camera-lan', label: 'Camera LAN' },
@@ -32,6 +33,39 @@ export function NetworkView() {
   const [uplink, setUplink] = useState<any | null>(null)
   const [whitelist, setWhitelist] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [savingLan, setSavingLan] = useState(false)
+  const [savingUplink, setSavingUplink] = useState(false)
+  const { showSuccess, showError } = useSnackbar()
+
+  const saveLan = async () => {
+    setSavingLan(true)
+    try {
+      await apiService.updateCameraLAN(lan)
+      const extra = (lan?.scan_subnets || []).length
+      const cidr = lan?.subnet_cidr
+      showSuccess(
+        cidr
+          ? `Camera LAN saved — subnet ${cidr}${extra ? ` (+${extra} scan subnet${extra > 1 ? 's' : ''})` : ''}`
+          : 'Camera LAN settings saved'
+      )
+    } catch (e: any) {
+      showError(e?.data?.detail || e?.message || 'Failed to save Camera LAN settings')
+    } finally {
+      setSavingLan(false)
+    }
+  }
+
+  const saveUplink = async () => {
+    setSavingUplink(true)
+    try {
+      await apiService.updateUplink(uplink)
+      showSuccess('Uplink settings saved')
+    } catch (e: any) {
+      showError(e?.data?.detail || e?.message || 'Failed to save Uplink settings')
+    } finally {
+      setSavingUplink(false)
+    }
+  }
 
   useEffect(() => {
     ;(async () => {
@@ -130,7 +164,7 @@ export function NetworkView() {
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <button className="btn btn-primary" onClick={async ()=>{ await apiService.updateCameraLAN(lan); }}>Save</button>
+              <button className="btn btn-primary" disabled={savingLan} onClick={saveLan}>{savingLan ? 'Saving…' : 'Save'}</button>
               {/* <button className="btn" onClick={async ()=>{ await apiService.isolateCameraLAN(); }}>Isolate from internet</button> */}
             </div>
           </div>
@@ -175,7 +209,7 @@ export function NetworkView() {
               </label>
             </div>
             <div className="flex items-center gap-2">
-              <button className="btn btn-primary" onClick={async ()=>{ await apiService.updateUplink(uplink); }}>Save</button>
+              <button className="btn btn-primary" disabled={savingUplink} onClick={saveUplink}>{savingUplink ? 'Saving…' : 'Save'}</button>
             </div>
           </div>
         ) : (

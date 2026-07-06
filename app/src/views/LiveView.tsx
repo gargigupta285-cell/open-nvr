@@ -988,17 +988,20 @@ function MenuItem({ item, onClose }: { item: { icon: React.ReactNode; label: str
   )
 }
 
-// Add Camera Dialog Component
-function AddCameraDialog({ 
-  onClose, 
+// Add Camera Dialog Component. Shared by Live View (with the "Existing" tab for
+// tile assignment) and the Cameras tab (add-only, no "Existing" tab).
+export function AddCameraDialog({
+  onClose,
   onCameraAdded,
   onCameraSelected,
-  existingCameras 
-}: { 
+  existingCameras = [],
+  title = 'Add Camera to Tile',
+}: {
   onClose: () => void
   onCameraAdded: (cameraId?: number) => void
   onCameraSelected?: (cameraId: number) => void
-  existingCameras: Array<{id: number, name: string}>
+  existingCameras?: Array<{id: number, name: string}>
+  title?: string
 }) {
   const [mode, setMode] = useState<'discover' | 'select' | 'manual'>('discover')
   const [loading, setLoading] = useState(false)
@@ -1214,22 +1217,22 @@ function AddCameraDialog({
       setError('Name and IP address are required')
       return
     }
-    if (!form.rtsp_url.trim()) {
-      setError('RTSP URL is required')
-      return
-    }
 
     setLoading(true)
     setError(null)
-    
+
     try {
+      // rtsp_url is optional. If provided, the server embeds the username/password
+      // into it (URL-encoding specials like "@") when they aren't already there.
+      // If left blank, the server derives the URL from the IP + credentials.
+      // Either way it back-fills device identity.
       const response = await apiService.createCamera({
         name: form.name,
         ip_address: form.ip_address,
         port: form.port,
         username: form.username || undefined,
         password: form.password || undefined,
-        rtsp_url: form.rtsp_url,
+        rtsp_url: form.rtsp_url || undefined,
       })
       const newCameraId = response?.data?.id
       
@@ -1267,7 +1270,7 @@ function AddCameraDialog({
         <div className="flex items-center justify-between p-4 border-b border-neutral-700">
           <h3 className="font-semibold flex items-center gap-2">
             <Video size={18} />
-            Add Camera to Tile
+            {title}
           </h3>
           <button 
             className="p-1 hover:bg-[var(--panel-2)] rounded"
@@ -1281,25 +1284,27 @@ function AddCameraDialog({
         <div className="flex border-b border-neutral-700">
           <button
             className={`flex-1 px-3 py-2 text-xs ${mode === 'discover' ? 'bg-[var(--accent)]/20 text-[var(--accent)] border-b-2 border-[var(--accent)]' : 'text-[var(--text-dim)] hover:bg-[var(--panel-2)]'}`}
-            onClick={() => { setMode('discover'); setAuthStep(false); setSelectedCamera(null); }}
+            onClick={() => { setMode('discover'); setAuthStep(false); setSelectedCamera(null); setError(null); }}
           >
             <Search size={12} className="inline mr-1" />
             Discover
           </button>
           <button
             className={`flex-1 px-3 py-2 text-xs ${mode === 'manual' ? 'bg-[var(--accent)]/20 text-[var(--accent)] border-b-2 border-[var(--accent)]' : 'text-[var(--text-dim)] hover:bg-[var(--panel-2)]'}`}
-            onClick={() => setMode('manual')}
+            onClick={() => { setMode('manual'); setError(null); }}
           >
             <Plus size={12} className="inline mr-1" />
             Manual
           </button>
-          <button
-            className={`flex-1 px-3 py-2 text-xs ${mode === 'select' ? 'bg-[var(--accent)]/20 text-[var(--accent)] border-b-2 border-[var(--accent)]' : 'text-[var(--text-dim)] hover:bg-[var(--panel-2)]'}`}
-            onClick={() => setMode('select')}
-          >
-            <Camera size={12} className="inline mr-1" />
-            Existing
-          </button>
+          {existingCameras.length > 0 && (
+            <button
+              className={`flex-1 px-3 py-2 text-xs ${mode === 'select' ? 'bg-[var(--accent)]/20 text-[var(--accent)] border-b-2 border-[var(--accent)]' : 'text-[var(--text-dim)] hover:bg-[var(--panel-2)]'}`}
+              onClick={() => { setMode('select'); setError(null); }}
+            >
+              <Camera size={12} className="inline mr-1" />
+              Existing
+            </button>
+          )}
         </div>
 
         {/* Content */}
@@ -1554,16 +1559,18 @@ function AddCameraDialog({
               </div>
 
               <label className="flex flex-col gap-1">
-                <span className="text-xs text-[var(--text-dim)]">RTSP URL *</span>
+                <span className="text-xs text-[var(--text-dim)]">RTSP URL</span>
                 <input
                   type="text"
                   className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm font-mono text-xs"
-                  placeholder="rtsp://admin:password@192.168.1.100:554/stream1"
+                  placeholder="rtsp://192.168.1.100:554/stream1"
                   value={form.rtsp_url}
                   onChange={(e) => setForm(f => ({ ...f, rtsp_url: e.target.value }))}
                 />
                 <span className="text-[10px] text-[var(--text-dim)]">
-                  Hikvision NVR: rtsp://user:pass@ip:554/Streaming/Channels/101
+                  Optional. No need to put credentials in the URL — the
+                  Username/Password above are added automatically. Leave blank to
+                  build the URL from the IP + credentials.
                 </span>
               </label>
             </div>
@@ -1633,7 +1640,7 @@ function AddCameraDialog({
             <button
               className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50"
               onClick={handleAddManualCamera}
-              disabled={loading || !form.name.trim() || !form.ip_address.trim() || !form.rtsp_url.trim()}
+              disabled={loading || !form.name.trim() || !form.ip_address.trim()}
             >
               {loading ? 'Adding...' : 'Add Camera'}
             </button>
