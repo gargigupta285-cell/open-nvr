@@ -405,3 +405,34 @@ async def test_tool_created_monitor_stops_cleanly_via_stop_monitor():
     await asyncio.sleep(0)
     assert rt.monitors.host.list() == []
     assert len(_sdk_monitor_tasks()) == baseline
+
+
+def test_rules_dir_env_override(tmp_path, monkeypatch):
+    """The container flattens agent modules under /app and copies the rule
+    libraries to a separate dir, so OPENNVR_RULES_DIR must override the
+    dev-tree parent.parent default. Regression guard for the packaging bug
+    where monitor_host / the rule modules weren't shipped in the image."""
+    import importlib
+    import shutil
+    import sys
+    from pathlib import Path
+
+    here = Path(__file__).resolve().parent.parent
+    rules = tmp_path / "rules"
+    (rules / "occupancy-counting").mkdir(parents=True)
+    (rules / "line-crossing").mkdir(parents=True)
+    shutil.copy(here.parent / "occupancy-counting" / "occupancy_counting.py",
+                rules / "occupancy-counting" / "occupancy_counting.py")
+    shutil.copy(here.parent / "line-crossing" / "line_crossing.py",
+                rules / "line-crossing" / "line_crossing.py")
+    monkeypatch.setenv("OPENNVR_RULES_DIR", str(rules))
+    for m in ("monitor_host", "occupancy_counting", "line_crossing"):
+        sys.modules.pop(m, None)
+    try:
+        mh = importlib.import_module("monitor_host")
+        assert mh._EXAMPLES_DIR == rules.resolve()
+        assert mh._load_rule_module("occupancy").OccupancyCounter is not None
+        assert mh._load_rule_module("line_crossing").LineCrossingDetector is not None
+    finally:
+        for m in ("monitor_host", "occupancy_counting", "line_crossing"):
+            sys.modules.pop(m, None)

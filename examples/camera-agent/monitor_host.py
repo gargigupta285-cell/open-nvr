@@ -88,6 +88,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import logging
+import os
 import sys
 from collections import deque
 from dataclasses import dataclass, field
@@ -102,8 +103,15 @@ logger = logging.getLogger(__name__)
 
 # ── Rule library loading (the example modules ARE the library) ──────
 
-# examples/ — this file lives in examples/camera-agent/.
-_EXAMPLES_DIR = Path(__file__).resolve().parent.parent
+# Where the rule-library example dirs live. In the dev/examples-tree layout
+# this file sits in examples/camera-agent/, so its parent is examples/. In a
+# packaged container the agent modules are flattened under /app and the rule
+# dirs are copied to a separate location, so OPENNVR_RULES_DIR overrides this
+# (the Dockerfile sets it). Keeping the default = parent means dev + tests are
+# unchanged.
+_EXAMPLES_DIR = Path(os.environ["OPENNVR_RULES_DIR"]).resolve() \
+    if os.environ.get("OPENNVR_RULES_DIR") \
+    else Path(__file__).resolve().parent.parent
 
 # rule name → (example dir, module file, module name)
 _RULE_MODULES: dict[str, tuple[str, str, str]] = {

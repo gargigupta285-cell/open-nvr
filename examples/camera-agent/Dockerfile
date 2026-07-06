@@ -58,6 +58,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         echo "attempt $i failed; retrying in 15s..."; sleep 15; \
     done
 
+# The OpenNVR App SDK — monitor_host.py (the create_monitor convergence)
+# imports opennvr_app_sdk, and the count/crossing rule libraries below are
+# built on it. Installed from the in-repo package like the detector examples.
+COPY sdk/opennvr-app-sdk /opt/opennvr-app-sdk
+RUN pip install --no-cache-dir /opt/opennvr-app-sdk
+
 COPY examples/camera-agent/__init__.py        ./__init__.py
 COPY examples/camera-agent/adapter_clients.py ./adapter_clients.py
 COPY examples/camera-agent/camera_agent.py    ./camera_agent.py
@@ -67,6 +73,14 @@ COPY examples/camera-agent/serializer.py      ./serializer.py
 COPY examples/camera-agent/services.py        ./services.py
 COPY examples/camera-agent/tools.py           ./tools.py
 COPY examples/camera-agent/footage_index.py   ./footage_index.py
+COPY examples/camera-agent/monitor_host.py    ./monitor_host.py
+# The count/crossing conversational monitors instantiate the SAME SDK rule
+# classes the standalone catalog apps use — one rule library, two front doors
+# (app-sdk-spec §07). monitor_host loads them by file path from OPENNVR_RULES_DIR
+# (set below). The rule modules import only opennvr_app_sdk + stdlib, so just
+# the module files are needed — not their standalone alerts/zone shims.
+COPY examples/occupancy-counting/occupancy_counting.py ./rules/occupancy-counting/occupancy_counting.py
+COPY examples/line-crossing/line_crossing.py           ./rules/line-crossing/line_crossing.py
 # Bundled copy of the canonical task registry (server/config/tasks.yml).
 # The agent derives its skill→backing-tasks map from this at runtime, so a
 # new task with an agent_skill becomes a skill backing with no code change.
@@ -74,6 +88,9 @@ COPY examples/camera-agent/tasks.yml          ./tasks.yml
 COPY examples/camera-agent/config.example.yml ./config.example.yml
 COPY examples/camera-agent/demo               ./demo
 
+# Point monitor_host at the bundled rule libraries (the /app layout flattens
+# the agent modules, so the dev-tree parent.parent default doesn't apply).
+ENV OPENNVR_RULES_DIR=/app/rules
 ENV PYTHONUNBUFFERED=1
 
 EXPOSE 9100
