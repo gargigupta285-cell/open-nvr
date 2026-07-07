@@ -46,10 +46,10 @@ def test_pin_frame_bypasses_fetch_and_ttl():
     assert asyncio.run(rt.context.get_frame("cam1")) == JPEG
     assert rt.context.get_cached_frame("cam1") == JPEG   # chat shows the pin
     rt.context.clear_pins()
-    # pin gone; the seeded cache entry remains (the turn's "what I saw"),
-    # and the next /ask invalidates it before fetching live.
+    # pin gone; nothing cached either — pins deliberately never touch the
+    # shared frame cache (autonomous callers read it).
     assert rt.context._pinned == {}
-    assert rt.context.get_cached_frame("cam1") == JPEG
+    assert rt.context.get_cached_frame("cam1") is None
 
 
 def test_pin_frame_rejects_unknown_camera():
@@ -179,3 +179,67 @@ def test_demo_camera_deep_link_route():
     ok = client.get("/demo/camera/cam1")
     assert ok.status_code == 200 and "camScreen" in ok.text
     assert client.get("/demo/camera/nope").status_code == 404
+
+
+# ── review fixes: pins vs autonomous pollers, tokens, ring bounds ──────
+
+
+def test_autonomous_callers_bypass_pins():
+    """An operator pin must never reach alarm/monitor polls or the live
+    thumbnail endpoint — only the conversation path sees it."""
+    rt = _runtime()
+    rt.context.register_frame_source("cam1", _Source(jpeg=JPEG))
+    rt.context.pin_frame("cam1", b"HISTORICAL")
+    # conversation path (default) sees the pin
+    assert asyncio.run(rt.context.get_frame("cam1")) == b"HISTORICAL"
+    # autonomous path sees the REAL frame
+    assert asyncio.run(rt.context.get_frame("cam1", allow_pinned=False)) == JPEG
+    # the live /frame endpoint rides the autonomous path
+    client = TestClient(build_app(rt))
+    assert client.get("/frame/cam1").content == JPEG
+
+
+def test_pin_tokens_scope_cleanup_to_owner():
+    rt = _runtime()
+    t1 = rt.context.pin_frame("cam1", b"A")
+    t2 = rt.context.pin_frame("cam2", b"B")
+    rt.context.clear_pins(t1)              # only cam1's pin goes
+    assert rt.context.get_cached_frame("cam2") == b"B"
+    assert asyncio.run(rt.context.get_frame("cam2")) == b"B"
+    rt.context.clear_pins(t2)
+    rt.context.clear_pins()                # no-arg still clears everything
+
+
+def test_ask_pin_without_camera_400s(monkeypatch):
+    rt = _runtime()
+
+    async def fake_turn(runtime, history, text, **kw):  # pragma: no cover
+        return "ok"
+
+    monkeypatch.setattr(ca, "_run_conversation_turn", fake_turn)
+    client = TestClient(build_app(rt))
+    r = client.post("/ask", json={"text": "x",
+                                  "pinned_jpeg_b64": base64.b64encode(JPEG).decode()})
+    assert r.status_code == 400
+    assert "camera" in r.json()["error"]
+
+
+def test_review_ring_respects_byte_budget_and_frame_cap():
+    rt = _runtime()
+    rt.context._review_byte_budget = 25          # tiny budget for the test
+    src = _Source(jpeg=b"0123456789")            # 10 bytes/frame
+    rt.context.register_frame_source("cam1", src)
+
+    async def fetch():
+        rt.context.invalidate_frame_cache()
+        await rt.context.get_frame("cam1")
+
+    for _ in range(5):
+        asyncio.run(fetch())
+    # 5 × 10B fetched, budget 25B → only the newest 2 frames survive
+    assert len(rt.context.review_timestamps("cam1")) == 2
+    assert rt.context._review_bytes["cam1"] == 20
+    # an oversized frame is skipped entirely
+    rt.context._review_frame_cap = 5
+    asyncio.run(fetch())
+    assert len(rt.context.review_timestamps("cam1")) == 2

@@ -988,7 +988,7 @@ class MonitorManager:
         # .infer`` after construction are honored, exactly like the legacy
         # loop's attribute lookups per poll.
         self.host = MonitorHost(
-            get_frame=lambda cam: runtime.context.get_frame(cam),
+            get_frame=lambda cam: runtime.context.get_frame(cam, allow_pinned=False),
             infer=lambda **kw: runtime.detection_client.infer(**kw),
             notify=self._hosted_notify,
             dedup=lambda dets: runtime.tools._dedup_detections(dets),
@@ -1171,7 +1171,7 @@ class MonitorManager:
         import time
 
         try:
-            frame = await self._runtime.context.get_frame(cam)
+            frame = await self._runtime.context.get_frame(cam, allow_pinned=False)
             extra = {"task": "track"} if mon.kind == "crossing" else None
             resp = await self._runtime.detection_client.infer(frame_jpeg=frame, extra=extra)
         except Exception as exc:
@@ -1442,7 +1442,7 @@ class AlarmManager:
         import time
 
         try:
-            frame = await self._runtime.context.get_frame(cam)
+            frame = await self._runtime.context.get_frame(cam, allow_pinned=False)
             resp = await self._runtime.detection_client.infer(frame_jpeg=frame)
         except Exception as exc:
             logger.info("alarm #%d: poll of %s failed (%s)", alarm.id, cam, exc)
@@ -1542,6 +1542,7 @@ class Notifier:
         # never costs anything.
         self._apprise_urls = list(apprise_urls or [])
         self._apprise = None
+        self._apprise_active = 0   # URLs the client actually accepted
         self._apprise_warned = False
 
     @property
@@ -1568,11 +1569,15 @@ class Notifier:
                         len(self._apprise_urls))
                 return None
             client = apprise.Apprise()
+            added = 0
             for url in self._apprise_urls:
-                if not client.add(url):
+                if client.add(url):
+                    added += 1
+                else:
                     scheme = str(url).split("://", 1)[0]
                     logger.warning("notify: invalid Apprise URL ignored "
                                    "(scheme %r)", scheme)
+            self._apprise_active = added
             self._apprise = client
         return self._apprise
 
@@ -1629,10 +1634,13 @@ class Notifier:
                     body=payload["detail"] or payload["title"],
                 )
                 if sent:
-                    ok += len(self._apprise_urls)
+                    # Only URLs the client ACCEPTED count as delivered —
+                    # invalid ones were dropped at add() time and reporting
+                    # them ok would fake the operator's delivery-health view.
+                    ok += self._apprise_active
                 else:
                     logger.warning("notify: apprise delivery failed "
-                                   "(%d URL(s))", len(self._apprise_urls))
+                                   "(%d URL(s))", self._apprise_active)
             except Exception as exc:
                 logger.warning("notify: apprise delivery errored: %s", exc)
         import time as _t
@@ -3597,7 +3605,9 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             return Response(content=jpeg, media_type="image/jpeg",
                             headers={"Cache-Control": "no-store"})
         try:
-            jpeg = await runtime.context.get_frame(camera_id)
+            # allow_pinned=False: this endpoint claims LIVE — an operator
+            # pin mid-turn must not freeze the thumbnails or the player.
+            jpeg = await runtime.context.get_frame(camera_id, allow_pinned=False)
         except LookupError:
             return Response(status_code=404)
         except Exception:
@@ -3993,7 +4003,13 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         # live — cleared in the finally, so the next question is live again.
         pinned_jpeg: bytes | None = None
         raw_pin = (body or {}).get("pinned_jpeg_b64")
-        if raw_pin and camera_hint:
+        if raw_pin:
+            if not camera_hint:
+                # Silently answering from LIVE frames while the caller
+                # believes the pin applied would be a lie — fail loudly.
+                return JSONResponse(
+                    {"error": "pinned_jpeg_b64 requires a valid 'camera'"},
+                    status_code=400)
             try:
                 pinned_jpeg = base64.b64decode(str(raw_pin), validate=True)
             except (binascii.Error, ValueError):
@@ -4009,17 +4025,25 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         # Fresh frame per question (see /converse): each turn sees the current
         # moment, not a frame cached from a question seconds ago.
         runtime.context.invalidate_frame_cache()
+        pin_token: int | None = None
         if pinned_jpeg is not None:
-            runtime.context.pin_frame(camera_hint, pinned_jpeg)
+            pin_token = runtime.context.pin_frame(camera_hint, pinned_jpeg)
         try:
             reply = await _run_conversation_turn(
                 runtime, demo_history, text, preferred_camera=camera_hint
             )
+            # Capture "what I saw" while the pin is still visible — a
+            # racing thumbnail fetch may have overwritten the cache seed,
+            # and the chat must show the frame the answer was ABOUT.
+            frames = _frames_for(runtime)
         except Exception:
             logger.exception("ask: turn failed")
             return JSONResponse({"error": "assistant failed"}, status_code=502)
         finally:
-            runtime.context.clear_pins()
+            if pin_token is not None:
+                # Token-scoped: a concurrent request's cleanup can never
+                # wipe this turn's pin, and vice versa.
+                runtime.context.clear_pins(pin_token)
 
         demo_history.append({"role": "user", "content": text})
         demo_history.append({"role": "assistant", "content": reply})
@@ -4028,7 +4052,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         return JSONResponse({
             "reply": reply,
             "cameras_used": list(runtime.tools.last_cameras_used),
-            "frames": _frames_for(runtime),
+            "frames": frames,
             "latency_ms": int((_t.perf_counter() - t0) * 1000),
         })
 

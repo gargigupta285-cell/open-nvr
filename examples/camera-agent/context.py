@@ -97,15 +97,24 @@ class CameraContext:
         self._frame_cache: dict[str, _CachedFrame] = {}
         self._cache_ttl = float(frame_cache_ttl_seconds)
         # Frames pinned by the operator ("ask about THIS frame") — served
-        # by get_frame verbatim, bypassing fetch + TTL, until clear_pins().
-        self._pinned: dict[str, bytes] = {}
+        # by get_frame verbatim (conversation path only; autonomous pollers
+        # pass allow_pinned=False), keyed camera -> (owner token, jpeg) so
+        # one request's cleanup can never wipe another request's pin.
+        self._pinned: dict[str, tuple[int, bytes]] = {}
+        self._pin_seq = 0
         # Short review ring per camera: (wall-clock ts, jpeg) appended on
         # every REAL fetch (thumbnail polls, tool calls, monitor polls all
         # feed it for free). Powers the per-camera screen's scrub-back
         # timeline — the honest "last few minutes", NOT NVR storage
-        # (recordings live in the main OpenNVR UI).
+        # (recordings live in the main OpenNVR UI). Bounded BOTH by frame
+        # count and by bytes: pollers feed this 24/7, and 90 uncapped 4K
+        # JPEGs per camera would eat hundreds of MB on the modest boxes
+        # the lite profile targets.
         self._review: dict[str, deque[tuple[float, bytes]]] = {}
+        self._review_bytes: dict[str, int] = {}
         self._review_size = 90
+        self._review_byte_budget = 24 * 1024 * 1024   # per camera
+        self._review_frame_cap = 2_000_000            # same cap as _frames_for
         # Per-camera fetch locks: a fetch on cam1 (which can take seconds —
         # RTSP keyframe wait, up to the source timeout) must not block a
         # concurrent tool call or monitor poll on cam2. One global lock here
@@ -163,11 +172,17 @@ class CameraContext:
 
     # ── Frame fetch + cache ────────────────────────────────────────
 
-    async def get_frame(self, camera_id: str) -> bytes:
+    async def get_frame(self, camera_id: str, *, allow_pinned: bool = True) -> bytes:
         """Return the most recent JPEG for ``camera_id``, fetching if
         the cache is empty or stale. Raises ``LookupError`` if the
         camera isn't configured; ``FrameSourceError`` if the fetch
-        itself fails."""
+        itself fails.
+
+        ``allow_pinned=False`` is for AUTONOMOUS callers (alarm/monitor/
+        hosted-detector polls, the live-thumbnail endpoint): they must
+        always see the real current frame — an operator pinning a
+        historical frame for a question must never ring an alarm or
+        freeze a monitor on it."""
         if camera_id not in self._cameras:
             raise LookupError(
                 f"camera_id {camera_id!r} is not configured; "
@@ -175,9 +190,10 @@ class CameraContext:
             )
         # An operator-pinned frame wins over any fetch: the user asked
         # about the exact frame they clicked, not the current moment.
-        pinned = self._pinned.get(camera_id)
-        if pinned is not None:
-            return pinned
+        if allow_pinned:
+            pinned = self._pinned.get(camera_id)
+            if pinned is not None:
+                return pinned[1]
         source = self._frame_sources.get(camera_id)
         if source is None:
             raise LookupError(
@@ -208,9 +224,19 @@ class CameraContext:
             )
             # Feed the review ring on every real fetch (cache hits and
             # pins deliberately don't — one ring entry per real moment).
-            self._review.setdefault(
-                camera_id, deque(maxlen=self._review_size)
-            ).append((time.time(), frame))
+            # Oversized frames are skipped (same 2 MB cap as _frames_for),
+            # and the ring is trimmed to a per-camera byte budget as well
+            # as a frame count, so high-resolution cameras can't balloon
+            # a 24/7-fed ring into hundreds of MB.
+            if len(frame) <= self._review_frame_cap:
+                ring = self._review.setdefault(camera_id, deque())
+                ring.append((time.time(), frame))
+                total = self._review_bytes.get(camera_id, 0) + len(frame)
+                while ring and (len(ring) > self._review_size
+                                or total > self._review_byte_budget):
+                    _, old = ring.popleft()
+                    total -= len(old)
+                self._review_bytes[camera_id] = total
             return frame
 
     def get_cached_frame(self, camera_id: str) -> bytes | None:
@@ -219,33 +245,44 @@ class CameraContext:
         show the operator the exact frame a tool looked at, in the chat."""
         pinned = self._pinned.get(camera_id)
         if pinned is not None:
-            return pinned
+            return pinned[1]
         cached = self._frame_cache.get(camera_id)
         return cached.bytes_ if cached is not None else None
 
     # ── Pinned frames ("ask about THIS frame") ─────────────────────
 
-    def pin_frame(self, camera_id: str, jpeg: bytes) -> None:
-        """Pin a specific JPEG as ``camera_id``'s frame: ``get_frame``
-        returns it verbatim (no fetch, no TTL) until :meth:`clear_pins`.
+    def pin_frame(self, camera_id: str, jpeg: bytes) -> int:
+        """Pin a specific JPEG as ``camera_id``'s frame: the conversation
+        path's ``get_frame`` returns it verbatim (no fetch, no TTL) until
+        the owning request clears it. Returns an owner token — pass it to
+        :meth:`clear_pins` so cleanup removes ONLY this pin (a concurrent
+        request's ``finally`` must never wipe someone else's pin).
 
         Powers the demo's click-a-thumbnail flow — the user asks about
         the exact frame they clicked, not whatever the camera shows by
-        the time the tools run. Scoped to ONE conversation turn by the
-        caller (pin → run turn → clear in a ``finally``); the demo is a
-        single-operator surface, so turns don't interleave."""
+        the time the tools run. Autonomous pollers are immune
+        (``allow_pinned=False``). Residual single-operator edge, accepted:
+        a VOICE turn overlapping a pinned typed turn reads the pin for
+        those seconds (both turns belong to the same operator)."""
         if camera_id not in self._cameras:
             raise LookupError(f"camera_id {camera_id!r} is not configured")
-        self._pinned[camera_id] = jpeg
-        # Seed the regular cache too: the turn's "here's what I saw"
-        # (get_cached_frame) must still show the pinned frame after
-        # clear_pins() — the next question invalidates the cache anyway.
-        self._frame_cache[camera_id] = _CachedFrame(
-            bytes_=jpeg, fetched_at=time.monotonic()
-        )
+        self._pin_seq += 1
+        token = self._pin_seq
+        self._pinned[camera_id] = (token, jpeg)
+        # Deliberately NOT seeded into _frame_cache: autonomous callers
+        # (allow_pinned=False) read the cache, and pinned bytes there
+        # would poison an alarm/monitor poll. The turn's "what I saw"
+        # reads get_cached_frame (pin-aware) BEFORE the pin is cleared.
+        return token
 
-    def clear_pins(self) -> None:
-        self._pinned.clear()
+    def clear_pins(self, token: int | None = None) -> None:
+        """Remove pins. With a token, only the pin(s) that request
+        created; with no token, everything (tests / shutdown)."""
+        if token is None:
+            self._pinned.clear()
+            return
+        for cam in [c for c, (t, _) in self._pinned.items() if t == token]:
+            self._pinned.pop(cam, None)
 
     # ── Review ring (per-camera scrub-back) ────────────────────────
 

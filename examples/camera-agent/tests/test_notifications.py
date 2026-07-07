@@ -21,7 +21,7 @@ def _runtime(webhooks=None, events=None, detections=None, apprise=None):
     )
     rt = CameraAgentRuntime(cfg)
 
-    async def fake_get_frame(cam):
+    async def fake_get_frame(cam, **_kw):
         return b"\xff\xd8\xff"
 
     async def fake_infer(*, frame_jpeg, **kw):

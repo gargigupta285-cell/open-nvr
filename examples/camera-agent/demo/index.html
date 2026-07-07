@@ -570,7 +570,12 @@
     function openLightbox(src,label){ let ov=document.getElementById("lightbox");
       if(!ov){ ov=document.createElement("div"); ov.id="lightbox"; ov.className="lightbox";
         ov.addEventListener("click",()=>ov.classList.remove("show")); document.body.appendChild(ov); }
-      ov.innerHTML=`<figure style="margin:0"><img src="${src}" alt="${label||""}"><figcaption>${label||""}</figcaption></figure>`;
+      // DOM + textContent — label is server-configured (camera role) and
+      // must never reach innerHTML (a hostile role would execute on click).
+      ov.innerHTML=""; const fig=document.createElement("figure"); fig.style.margin="0";
+      const im=document.createElement("img"); im.src=src; im.alt=label||"";
+      const cap=document.createElement("figcaption"); cap.textContent=label||"";
+      fig.appendChild(im); fig.appendChild(cap); ov.appendChild(fig);
       ov.classList.add("show"); }
     function showLatency(t){ const el=$("lat"); if(!el||!t)return;
       const ms=(t.total!=null?t.total:0); if(!ms){el.hidden=true;return;}
@@ -620,7 +625,9 @@
       const cams=((await r.json()).cameras||[]);
       for(const cam of cams){ const lab=document.createElement("label");
         const role=(cam.role||"").trim(); const txt=role&&role!=="(no role configured)"?`${cam.camera_id} · ${role.slice(0,28)}`:cam.camera_id;
-        lab.innerHTML=`<input type="checkbox" class="cam-cb" value="${cam.camera_id}"> ${txt}`; camboxEl.appendChild(lab); }
+        // DOM + textContent: camera ids/roles are server-configured strings.
+        const cb=document.createElement("input"); cb.type="checkbox"; cb.className="cam-cb"; cb.value=cam.camera_id;
+        lab.appendChild(cb); lab.appendChild(document.createTextNode(" "+txt)); camboxEl.appendChild(lab); }
       const all=$("cam-all"), cbs=()=>[...document.querySelectorAll(".cam-cb")];
       all.addEventListener("change",()=>{ if(all.checked) cbs().forEach(c=>{c.checked=false;}); });
       camboxEl.addEventListener("change",(e)=>{ if(e.target.classList.contains("cam-cb")&&e.target.checked) all.checked=false;
@@ -651,9 +658,12 @@
         const img=t.querySelector("img"), off=t.querySelector(".ct-off");
         try{ const r=await fetch("/frame/"+encodeURIComponent(cam)+"?t="+Date.now());
           if(!r.ok) throw new Error();
-          const url=URL.createObjectURL(await r.blob());
-          img.onload=()=>URL.revokeObjectURL(url); img.src=url; img.hidden=false; off.hidden=true;
+          setBlobSrc(img,await r.blob()); img.hidden=false; off.hidden=true;
         }catch{ img.hidden=true; off.hidden=false; } } }
+    // One blob URL per <img>: revoke the previous BEFORE assigning — onload
+    // revocation leaks when a new src lands before the old one loaded.
+    function setBlobSrc(img,blob){ if(img.dataset.blobUrl) URL.revokeObjectURL(img.dataset.blobUrl);
+      const url=URL.createObjectURL(blob); img.dataset.blobUrl=url; img.src=url; }
     async function fetchFrameB64(cam,at){
       const q=at?("?at="+encodeURIComponent(at)):("?t="+Date.now());
       const r=await fetch("/frame/"+encodeURIComponent(cam)+q);
@@ -697,8 +707,13 @@
 
     // ── per-camera screen (URL: /demo/camera/{id}) ─────────────────
     let _liveTimer=null, _tl=null, _revTs=null, _playing=true, _stepTimer=null;
+    // View generation: bumped on every mode/frame change so an in-flight
+    // fetch from a previous state can never overwrite the current picture
+    // (live tick landing after a scrub, or two scrubs racing).
+    let _viewGen=0;
     function openCamScreen(cam,push=true){
-      window._camScreenCam=cam;
+      if(window._camScreenCam===cam) return;   // already here — no dup history
+      window._camScreenCam=cam; _tl=null;      // stale timeline never drives the new camera
       $("mainScreen").hidden=true; $("camScreen").hidden=false;
       $("camTitle").textContent=cam; $("camSub").textContent=_camRoles[cam]||"";
       const rec=$("camRecordings");
@@ -721,26 +736,32 @@
     function fmtClock(ts){ const d=new Date(ts*1000);
       return ("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2)+":"+("0"+d.getSeconds()).slice(-2); }
     async function refreshPlayerLive(){ const cam=window._camScreenCam; if(!cam) return;
-      const img=$("camImg"), off=$("camNoFrame");
+      const gen=_viewGen, img=$("camImg"), off=$("camNoFrame");
       try{ const r=await fetch("/frame/"+encodeURIComponent(cam)+"?t="+Date.now());
+        if(gen!==_viewGen||cam!==window._camScreenCam) return;   // view moved on
         if(!r.ok) throw new Error();
-        const url=URL.createObjectURL(await r.blob());
-        img.onload=()=>URL.revokeObjectURL(url); img.src=url; img.hidden=false; off.hidden=true;
+        setBlobSrc(img,await r.blob()); img.hidden=false; off.hidden=true;
         $("camTs").textContent=fmtClock(Date.now()/1000);
-      }catch{ img.hidden=true; off.hidden=false; } }
+      }catch{ if(gen===_viewGen){ img.hidden=true; off.hidden=false; } } }
     function setMode(live){ $("camMode").classList.toggle("review",!live);
       $("camModeText").textContent=live?"LIVE":"REVIEW";
       $("camPlayer").classList.toggle("review",!live);
       $("camLive").classList.toggle("on",live);
       $("camTnote").textContent=live?"Live · marks = detections · drag to review the last few minutes"
         :("Reviewing "+(_revTs?fmtClock(_revTs):"")+" — ● LIVE snaps back"); }
-    function goLive(){ _revTs=null; setMode(true);
+    function goLive(){ _revTs=null; _viewGen++; setMode(true);
+      // LIVE always plays: a ⏸ from a previous visit (or from review) must
+      // not leave a frozen picture under a green LIVE pill.
+      _playing=true; const pb=$("camPlay"); if(pb) pb.textContent="⏸";
       if(_stepTimer){clearInterval(_stepTimer);_stepTimer=null;}
-      const s=$("camScrub"); if(_tl&&_tl.frames.length){ s.value=s.max; }
+      const s=$("camScrub"); if(_tl&&_tl.frames&&_tl.frames.length){ s.value=s.max; }
       refreshPlayerLive();
       if(!_liveTimer) _liveTimer=setInterval(()=>{ if(window._camScreenCam&&!_revTs&&_playing) refreshPlayerLive(); },2000); }
     async function loadTimeline(cam){
-      try{ _tl=await (await fetch("/timeline/"+encodeURIComponent(cam))).json(); }catch{ _tl=null; }
+      let tl=null;
+      try{ tl=await (await fetch("/timeline/"+encodeURIComponent(cam))).json(); }catch{ tl=null; }
+      if(window._camScreenCam!==cam) return;   // user switched cameras mid-fetch
+      _tl=tl;
       const s=$("camScrub"), marks=$("camMarks");
       marks.innerHTML="";
       if(!_tl||!_tl.frames||_tl.frames.length<2){ s.disabled=true; s.max=0;
@@ -755,14 +776,14 @@
           s.value=best; reviewAt(best); });
         marks.appendChild(mk); } }
     async function reviewAt(idx){ if(!_tl||!_tl.frames[idx]) return;
-      _revTs=_tl.frames[idx]; setMode(false);
-      const img=$("camImg"), off=$("camNoFrame");
-      try{ const r=await fetch("/frame/"+encodeURIComponent(window._camScreenCam)+"?at="+encodeURIComponent(_revTs));
+      _revTs=_tl.frames[idx]; _viewGen++; const gen=_viewGen; setMode(false);
+      const ts=_revTs, img=$("camImg"), off=$("camNoFrame");
+      try{ const r=await fetch("/frame/"+encodeURIComponent(window._camScreenCam)+"?at="+encodeURIComponent(ts));
+        if(gen!==_viewGen) return;                               // a newer scrub/live won
         if(!r.ok) throw new Error();
-        const url=URL.createObjectURL(await r.blob());
-        img.onload=()=>URL.revokeObjectURL(url); img.src=url; img.hidden=false; off.hidden=true;
-        $("camTs").textContent=fmtClock(_revTs);
-      }catch{ img.hidden=true; off.hidden=false; } }
+        setBlobSrc(img,await r.blob()); img.hidden=false; off.hidden=true;
+        $("camTs").textContent=fmtClock(ts);
+      }catch{ if(gen===_viewGen){ img.hidden=true; off.hidden=false; } } }
     (function(){ const s=$("camScrub"); let deb=null;
       if(s) s.addEventListener("input",()=>{ const v=+s.value;
         if(_tl&&v>=+s.max){ goLive(); return; }
@@ -903,6 +924,9 @@
     async function startSession(){ ensureOutputAudio();
       try{ await ensureMic(); }catch(err){ setStatus("Microphone access denied.","error"); addMsg("Microphone access denied: "+err,"sys"); return; }
       sessionActive=true; lastActivity=performance.now(); loudFrames=0;
+      // Voice turns answer from LIVE frames — an armed pin would be a lie
+      // (only typed asks carry it), so unpin loudly instead of silently.
+      if(_pinnedFrame){ clearPin(); addMsg("Unpinned — voice questions use live frames; type to ask about a pinned frame.","sys"); }
       talkBtn.innerHTML=IC.stop+" Stop"; talkBtn.classList.add("listening");
       if(!introPlayed){ introPlayed=true; await playIntro(); }
       if(!sessionActive) return;
@@ -1004,7 +1028,7 @@
     // Click Talk to start/stop the listening session.
     talkBtn.addEventListener("click",()=>{ ensureOutputAudio();
       if(busy&&sessionActive)return; if(sessionActive)stopSession(); else startSession(); });
-    resetBtn.addEventListener("click",async()=>{ stopSpeaking(); try{ await fetch("/reset",{method:"POST"}); logEl.innerHTML=""; addMsg("Conversation reset.","sys"); }catch{} });
+    resetBtn.addEventListener("click",async()=>{ stopSpeaking(); clearPin(); try{ await fetch("/reset",{method:"POST"}); logEl.innerHTML=""; addMsg("Conversation reset.","sys"); }catch{} });
 
     async function loadNotify(){
       try{ const s=await (await fetch("/notify")).json();
