@@ -127,6 +127,10 @@
       background:transparent;color:var(--muted);font-size:1.05rem;cursor:pointer;display:flex;align-items:center;justify-content:center;}
     .addbtn:hover{color:var(--accent);border-color:var(--accent);}
     .addbtn.open{background:var(--accent);color:#fff;border-color:var(--accent);}
+    .headbtns{display:flex;align-items:center;gap:.4rem;flex:0 0 auto;}
+    .restorebtn{background:transparent;border:1px solid var(--border);border-radius:6px;
+      color:var(--muted);font-size:.68rem;padding:.18rem .45rem;cursor:pointer;white-space:nowrap;}
+    .restorebtn:hover{color:var(--accent);border-color:var(--accent);}
     .skillhint{color:var(--muted);font-size:0.72rem;margin:-.15rem 0 .5rem;}
     .skill{display:flex;align-items:center;gap:.5rem;padding:.42rem .5rem;background:var(--panel2);
       border:1px solid var(--border);border-radius:8px;margin:.3rem 0;font-size:0.82rem;}
@@ -218,7 +222,7 @@
 
       <div class="side">
         <div class="card" id="skillsCard">
-          <div class="cardhead"><h2>Skills</h2><button class="addbtn" id="skillAdd" type="button" title="Add a skill" aria-label="Add a skill">+</button></div>
+          <div class="cardhead"><h2>Skills</h2><span class="headbtns"><button class="restorebtn" id="skillRestore" type="button" hidden title="Re-enable every default skill you've removed">Restore defaults</button><button class="addbtn" id="skillAdd" type="button" title="Add a skill" aria-label="Add a skill">+</button></span></div>
           <div class="skillhint">Capabilities the agent carries. × to remove.</div>
           <div id="skillsList"></div>
           <div id="skillBrowse" hidden>
@@ -695,15 +699,25 @@
     function gateRailCards(enabledIds){ const map={alarm:"alarmCard",watch:"watchCard",task:"taskCard",report:"reportCard"};
       const set=new Set(enabledIds);
       for(const id in map){ const card=$(map[id]); if(card) card.style.display=set.has(id)?"":"none"; } }
+    // Core task-shaped skills: removing one takes a whole rail panel's
+    // capability away, so the ✕ asks first. Value = what the agent loses.
+    const CORE_SKILLS={alarm:"set or silence alarms",watch:"keep watches and live counts",
+      report:"run scheduled reports",task:"work on longer jobs in the background"};
     function renderSkills(){ const el=$("skillsList"); if(!el) return; el.innerHTML="";
       const on=_skills.filter(s=>s.enabled);
       gateRailCards(on.map(s=>s.id));
+      // "Restore defaults" appears only when something is actually restorable:
+      // a skill that's off but whose backend is available (backend-gated
+      // skills aren't the toggle's fault and restoring can't enable them).
+      const rb=$("skillRestore"); if(rb) rb.hidden=!_skills.some(s=>!s.enabled&&s.available);
       if(!on.length) el.innerHTML='<div class="empty-note">No skills enabled — tap + to add.</div>';
       for(const s of on){ const d=document.createElement("div"); d.className="skill";
         d.innerHTML=`<span class="sk-ic">${s.icon}</span><span class="sk-body"><span class="sk-nm"></span><span class="sk-uses"></span></span><button class="sk-x" title="Remove skill">✕</button>`;
         d.querySelector(".sk-nm").textContent=s.name;
         d.querySelector(".sk-uses").textContent="uses "+s.uses;
-        d.querySelector(".sk-x").addEventListener("click",()=>toggleSkill(s.id,"disable"));
+        d.querySelector(".sk-x").addEventListener("click",()=>{
+          if(CORE_SKILLS[s.id] && !window.confirm('Turn off "'+s.name+'"? The agent will no longer be able to '+CORE_SKILLS[s.id]+' until you add it back.')) return;
+          toggleSkill(s.id,"disable"); });
         el.appendChild(d); }
       renderBrowse(); }
     // Pretty display names for the reference adapters named in tasks.yml's
@@ -769,11 +783,21 @@
         _skills=d.skills||_skills; renderSkills();
         addMsg((action==="enable"?"Enabled":"Removed")+" a skill — the agent reconfigured its tools.","sys");
       }catch(err){ addMsg("Couldn't "+action+" skill: "+err.message,"sys"); } }
-    // + / browse / search wiring
-    (function(){ const add=$("skillAdd"), br=$("skillBrowse"), close=$("skillBrowseClose"), search=$("skillSearch");
+    // One-click undo for an over-pruned agent: clears every runtime toggle
+    // server-side (fresh-boot state). Backend-gated skills stay gated.
+    async function restoreSkills(){
+      try{ const r=await fetch("/skills/restore",{method:"POST"});
+        const d=await r.json().catch(()=>({}));
+        if(!r.ok){ addMsg("Couldn't restore default skills: "+(d.error||("HTTP "+r.status)),"sys"); return; }
+        _skills=d.skills||_skills; renderSkills();
+        addMsg(d.restored?("Restored "+d.restored+" default skill"+(d.restored===1?"":"s")+" — the agent reconfigured its tools."):"Skills already at defaults.","sys");
+      }catch(err){ addMsg("Couldn't restore default skills: "+err.message,"sys"); } }
+    // + / browse / search / restore wiring
+    (function(){ const add=$("skillAdd"), br=$("skillBrowse"), close=$("skillBrowseClose"), search=$("skillSearch"), restore=$("skillRestore");
       if(add&&br) add.addEventListener("click",()=>{ br.hidden=!br.hidden; add.classList.toggle("open",!br.hidden); if(!br.hidden){ renderBrowse(); search&&search.focus(); } });
       if(close) close.addEventListener("click",()=>{ br.hidden=true; add.classList.remove("open"); });
-      if(search) search.addEventListener("input", renderBrowse); })();
+      if(search) search.addEventListener("input", renderBrowse);
+      if(restore) restore.addEventListener("click", restoreSkills); })();
 
     // Alarms: + reveals a small custom-alarm form (POST /alarms via addAlarm).
     (function(){ const add=$("alarmAdd"), f=$("alarmForm"), arm=$("alarmArm");

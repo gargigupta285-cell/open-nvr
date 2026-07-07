@@ -84,3 +84,30 @@ def test_enable_links_are_guide_only(script: str) -> None:
     assert not re.search(
         r"fetch\([^)]*apps/[^)]*/(enable|disable|config)", script
     ), "skills UI must not POST to an app enable/disable/config route"
+
+
+def test_core_skill_disable_asks_first(script: str) -> None:
+    # Removing a core task-shaped skill (alarm/watch/report/task) takes a
+    # whole rail panel's capability away, so the ✕ must confirm before
+    # calling the disable endpoint. If the confirm gate or the core map
+    # goes missing, a stray click silently de-tools the agent.
+    assert "CORE_SKILLS" in script, "core-skill map missing"
+    for sid in ("alarm", "watch", "report", "task"):
+        assert re.search(rf'CORE_SKILLS\s*=\s*{{[^}}]*\b{sid}\b', script), (
+            f"core-skill map lost entry {sid!r}"
+        )
+    assert re.search(r"CORE_SKILLS\[s\.id\][^\n]*confirm", script), (
+        "disable path no longer confirms before removing a core skill"
+    )
+
+
+def test_restore_defaults_wired(script: str, html: str) -> None:
+    # The Skills header's "Restore defaults" is the one-click undo for an
+    # over-pruned agent: the button must exist, call the restore endpoint,
+    # and only show when something is actually restorable.
+    assert 'id="skillRestore"' in html, "restore-defaults button missing"
+    assert "function restoreSkills" in script, "restoreSkills handler missing"
+    assert '"/skills/restore"' in script, "restore endpoint call missing"
+    assert re.search(r'skillRestore[\s\S]{0,200}hidden\s*=\s*!_skills\.some', script), (
+        "restore button visibility no longer keyed to restorable skills"
+    )

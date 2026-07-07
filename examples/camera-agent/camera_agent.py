@@ -2572,6 +2572,21 @@ class CameraAgentRuntime:
         self._configure_tools()
         return True
 
+    def restore_default_skills(self) -> int:
+        """Clear every runtime skill toggle — the fresh-boot default is
+        "nothing disabled". Returns how many toggles were cleared.
+
+        Availability is a SEPARATE gate from the operator toggle: a skill
+        whose backend isn't configured (faces without faces_url, …) stays
+        unavailable after this, exactly as on a fresh boot — so restoring
+        can never advertise a tool the deployment can't back."""
+        n = len(self.disabled_skills)
+        if n:
+            self.disabled_skills.clear()
+            self._configure_tools()
+            self.persist()
+        return n
+
     def _emergency_contact_for(self, name: str, target: str) -> str | None:
         contacts = self.cfg.emergency_contacts or {}
         for key in (target.lower(), name.lower()):
@@ -3447,6 +3462,20 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             await runtime.app_registry.list_apps()   # 60s TTL; never raises
         return {"skills": runtime.skills_payload()}
 
+    @app.post("/skills/restore")
+    async def _skills_restore() -> JSONResponse:
+        """One-click "Restore defaults" for the Skills panel: clear every
+        runtime skill toggle. Fresh-boot state is all-on; backend-gated
+        skills stay gated by availability, never by the toggle."""
+        restored = runtime.restore_default_skills()
+        await runtime.kaic_capabilities.refresh()   # 60s TTL; never raises
+        if restored:
+            logger.info("skills restored to defaults (%d toggle(s) cleared, "
+                        "%d tools advertised)", restored,
+                        len(runtime.tool_definitions))
+        return JSONResponse({"restored": restored,
+                             "skills": runtime.skills_payload()})
+
     @app.post("/skills/{skill_id}/{action}")
     async def _skill_toggle(skill_id: str, action: str) -> JSONResponse:
         """Turn a skill on/off. This reconfigures the agent's live toolset, so
@@ -3465,6 +3494,10 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             return JSONResponse(
                 {"error": "skill can't be enabled yet", "hint": skill["hint"]},
                 status_code=409)
+        # A toggle is durable agent state (persist() writes disabled_skills)
+        # — without this, an off-switch silently reverts on restart unless
+        # some later alarm/watch action happened to save state.
+        runtime.persist()
         logger.info("skill %r %sd — tools reconfigured (%d advertised)",
                     skill_id, action, len(runtime.tool_definitions))
         return JSONResponse({"skills": runtime.skills_payload()})
