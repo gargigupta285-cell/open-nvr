@@ -99,6 +99,13 @@ class CameraContext:
         # Frames pinned by the operator ("ask about THIS frame") — served
         # by get_frame verbatim, bypassing fetch + TTL, until clear_pins().
         self._pinned: dict[str, bytes] = {}
+        # Short review ring per camera: (wall-clock ts, jpeg) appended on
+        # every REAL fetch (thumbnail polls, tool calls, monitor polls all
+        # feed it for free). Powers the per-camera screen's scrub-back
+        # timeline — the honest "last few minutes", NOT NVR storage
+        # (recordings live in the main OpenNVR UI).
+        self._review: dict[str, deque[tuple[float, bytes]]] = {}
+        self._review_size = 90
         # Per-camera fetch locks: a fetch on cam1 (which can take seconds —
         # RTSP keyframe wait, up to the source timeout) must not block a
         # concurrent tool call or monitor poll on cam2. One global lock here
@@ -199,6 +206,11 @@ class CameraContext:
             self._frame_cache[camera_id] = _CachedFrame(
                 bytes_=frame, fetched_at=now
             )
+            # Feed the review ring on every real fetch (cache hits and
+            # pins deliberately don't — one ring entry per real moment).
+            self._review.setdefault(
+                camera_id, deque(maxlen=self._review_size)
+            ).append((time.time(), frame))
             return frame
 
     def get_cached_frame(self, camera_id: str) -> bytes | None:
@@ -234,6 +246,21 @@ class CameraContext:
 
     def clear_pins(self) -> None:
         self._pinned.clear()
+
+    # ── Review ring (per-camera scrub-back) ────────────────────────
+
+    def review_timestamps(self, camera_id: str) -> list[float]:
+        """Wall-clock timestamps of the ring frames, oldest→newest."""
+        return [ts for ts, _ in self._review.get(camera_id, ())]
+
+    def review_frame_at(self, camera_id: str, at: float) -> bytes | None:
+        """The ring frame nearest ``at`` (wall-clock), or None if the
+        ring is empty. Nearest-match: the scrub sends the timestamp it
+        got from review_timestamps, but never trust float round-trips."""
+        ring = self._review.get(camera_id)
+        if not ring:
+            return None
+        return min(ring, key=lambda e: abs(e[0] - at))[1]
 
     def invalidate_frame_cache(self, camera_id: str | None = None) -> None:
         """Drop cached frames. Without an arg, drops all — useful for

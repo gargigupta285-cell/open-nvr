@@ -141,19 +141,51 @@
       font-size:.8rem;padding:0;}
     .camtile .ct-x:hover,.camtile:hover .ct-nm{color:var(--text);}
     .camtile:hover{border-color:var(--accent);}
-    /* per-camera overlay. NOTE: a display: rule beats the hidden attribute,
-       so [hidden] must win explicitly or the overlay leaks open on load. */
+    /* NOTE: a display: rule beats the hidden attribute, so [hidden] must
+       win explicitly or flex containers leak open on load. */
     [hidden]{display:none !important;}
-    #camOverlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:60;
-      display:flex;align-items:center;justify-content:center;padding:1rem;}
-    .cam-sheet{background:var(--panel);border:1px solid var(--border);border-radius:12px;
-      width:min(680px,96vw);max-height:92vh;overflow-y:auto;padding:1rem;}
-    .ov-live{margin:.4rem 0;}
-    .ov-live img{display:block;width:100%;border-radius:8px;border:1px solid var(--border);}
-    .ov-actions{flex-wrap:wrap;gap:.4rem;}
-    .ov-actions a.ghost{text-decoration:none;display:inline-flex;align-items:center;}
-    .ov-sec{margin-top:.6rem;}
-    .ov-sec .item{font-size:.78rem;}
+    .camlbl{font-size:.7rem;color:var(--text-dim);margin:.2rem 0 .1rem;}
+    /* per-camera screen (in-page navigation; URL = /demo/camera/{id}) */
+    .ctop{display:flex;align-items:center;gap:.6rem;margin-bottom:.5rem;}
+    .ctitle{font-size:1rem;font-weight:600;}
+    .csub{font-size:.72rem;color:var(--text-dim);}
+    .ctop .recl{margin-left:auto;text-decoration:none;display:inline-flex;align-items:center;font-size:.75rem;}
+    .player{position:relative;border-radius:10px;overflow:hidden;border:1px solid var(--border);
+      background:var(--bg-2);cursor:pointer;min-height:120px;}
+    .player img{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;}
+    .player .ovl{position:absolute;top:7px;left:8px;font-size:.72rem;color:#fff;
+      background:rgba(0,0,0,.55);padding:2px 7px;border-radius:6px;font-variant-numeric:tabular-nums;}
+    .modepill{position:absolute;top:7px;right:8px;font-size:.65rem;color:#fff;
+      background:rgba(0,0,0,.55);padding:2px 8px;border-radius:999px;display:flex;align-items:center;gap:5px;}
+    .modepill .mdot{width:7px;height:7px;border-radius:50%;background:#4fd18a;}
+    .modepill.review .mdot{background:#f6c453;}
+    .player.review::after{content:"";position:absolute;inset:0;background:rgba(246,196,83,.06);pointer-events:none;}
+    .transport{display:flex;align-items:center;gap:.5rem;margin-top:.45rem;}
+    .pbtn{background:var(--bg-2);border:1px solid var(--border);color:var(--text);border-radius:7px;
+      width:30px;height:28px;cursor:pointer;font-size:.75rem;}
+    .pbtn:hover{border-color:var(--accent,var(--text-dim));}
+    .track{position:relative;flex:1;height:28px;display:flex;align-items:center;}
+    .track input{width:100%;accent-color:var(--accent,#4fd1c5);}
+    .track .mk{position:absolute;top:4px;width:8px;height:8px;border-radius:50%;background:#f6c453;
+      transform:translateX(-50%);cursor:pointer;border:1px solid var(--bg-1);}
+    .livebtn{background:var(--danger,#e53e3e);color:#fff;border:none;border-radius:7px;
+      padding:0 10px;height:28px;font-size:.7rem;cursor:pointer;font-weight:700;}
+    .livebtn.on{background:var(--bg-2);color:var(--text-dim);border:1px solid var(--border);font-weight:400;}
+    .tnote{font-size:.66rem;color:var(--text-dim);margin-top:.2rem;}
+    .acts{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.55rem;position:relative;}
+    .apill{background:transparent;border:1px solid var(--border);color:var(--text);border-radius:999px;
+      padding:.35rem .75rem;font-size:.75rem;cursor:pointer;}
+    .apill:hover{border-color:var(--accent,var(--text-dim));color:var(--accent,var(--text));}
+    .apill.talk2{background:var(--accent,#4fd1c5);color:#062321;border-color:var(--accent,#4fd1c5);font-weight:700;}
+    .pop{position:absolute;top:38px;left:0;z-index:20;background:var(--bg-1);border:1px solid var(--border);
+      border-radius:9px;padding:.6rem;width:250px;box-shadow:0 8px 22px rgba(0,0,0,.5);display:none;}
+    .pop.show{display:block;}
+    .pop h4{margin:0 0 .4rem;font-size:.78rem;font-weight:600;}
+    .pop input,.pop select{width:100%;background:var(--bg-2);color:var(--text);border:1px solid var(--border);
+      border-radius:6px;padding:.35rem .5rem;font-size:.75rem;margin-bottom:.35rem;}
+    .pop .go{background:var(--accent,#4fd1c5);color:#062321;border:none;font-weight:700;border-radius:6px;
+      padding:.4rem .6rem;font-size:.75rem;cursor:pointer;width:100%;}
+    #camScoped{margin-top:.5rem;}
     .hwrow{padding:.42rem .5rem;background:var(--panel2);border:1px solid var(--border);
       border-radius:8px;margin:.3rem 0;font-size:.74rem;}
     .hwrow .hw-nm{font-weight:600;font-size:.78rem;}
@@ -231,13 +263,60 @@
             </div>
           </div>
 
+          <div id="mainScreen">
           <label class="field">Cameras</label>
           <div class="cambox" id="cambox">
             <label><input type="checkbox" id="cam-all" checked> All cameras</label>
           </div>
+          <div class="camlbl">tap a camera to peek · ⤢ to open it</div>
           <div id="camstrip" class="camstrip"></div>
           <div class="row">
             <button id="useLocalCam" class="ghost" type="button" title="Use a camera attached to this machine — webcam, USB, Pi or drone"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h3l2-2h8l2 2h3v12H3z"/><circle cx="12" cy="13" r="3.5"/></svg> Use this machine's camera</button>
+          </div>
+          </div>
+
+          <!-- Per-camera screen: NVR-style player over the review ring
+               (the honest last-few-minutes; full playback lives in the
+               main OpenNVR UI), camera-scoped talk/ask, quick watch/alarm
+               popovers. The rail and the chat below are SHARED with the
+               main screen — nothing lost. -->
+          <div id="camScreen" hidden>
+            <div class="ctop">
+              <button class="ghost" id="camBack" type="button">‹ Back to agent</button>
+              <div><div class="ctitle" id="camTitle">camera</div><div class="csub" id="camSub"></div></div>
+              <a class="ghost recl" id="camRecordings" target="_blank" rel="noopener" hidden>Recordings ↗</a>
+            </div>
+            <div class="player" id="camPlayer" title="Click the picture to pin this exact frame into the chat">
+              <img id="camImg" alt="camera view" hidden>
+              <div id="camNoFrame" class="empty-note" hidden>No frame — camera off or unreachable.</div>
+              <span class="ovl" id="camTs"></span>
+              <span class="modepill" id="camMode"><span class="mdot"></span><span id="camModeText">LIVE</span></span>
+            </div>
+            <div class="transport">
+              <button class="pbtn" id="camPlay" title="Play / pause">⏸</button>
+              <div class="track"><input type="range" id="camScrub" min="0" max="0" value="0" disabled><div id="camMarks"></div></div>
+              <button class="livebtn on" id="camLive" type="button">● LIVE</button>
+            </div>
+            <div class="tnote" id="camTnote">Live · marks = detections · drag to review the last few minutes</div>
+            <div class="acts">
+              <button class="apill talk2" id="camTalk" type="button">🎙 Talk</button>
+              <button class="apill" id="camAsk" type="button">💬 Ask</button>
+              <button class="apill" id="camWatch" type="button">👁 Watch</button>
+              <button class="apill" id="camAlarm" type="button">🔔 Alarm</button>
+              <div class="pop" id="popWatch">
+                <h4>Watch this camera</h4>
+                <select id="pwKind" aria-label="Watch kind"><option value="notify">Notify when seen</option><option value="count">Keep a live count</option></select>
+                <input id="pwTarget" type="text" placeholder="Watch for, e.g. car / person" autocomplete="off">
+                <button class="go" id="pwGo" type="button">Start watch</button>
+              </div>
+              <div class="pop" id="popAlarm">
+                <h4>Alarm on this camera</h4>
+                <input id="paTarget" type="text" placeholder="Alert on, e.g. person / fire" autocomplete="off">
+                <label class="addform-lbl">Only after <input id="paAfter" type="time"></label>
+                <button class="go" id="paGo" type="button">Arm alarm</button>
+              </div>
+            </div>
+            <div class="empty-note" id="camScoped"></div>
           </div>
 
           <button id="talk" class="talk" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg> Talk</button>
@@ -327,30 +406,6 @@
           <div id="hwDetail" hidden></div>
         </div>
       </div>
-    </div>
-  </div>
-
-  <!-- Per-camera detail view: live view + this camera's watches/alarms +
-       one-click actions. Opened from a strip tile's ⤢. -->
-  <div id="camOverlay" hidden>
-    <div class="cam-sheet">
-      <div class="cardhead">
-        <h2 id="ovTitle">camera</h2>
-        <button class="addbtn" id="ovClose" type="button" aria-label="Close camera view">✕</button>
-      </div>
-      <div class="ov-role empty-note" id="ovRole"></div>
-      <div class="ov-live">
-        <img id="ovImg" alt="live view">
-        <div id="ovNoFrame" class="empty-note" hidden>No frame available — camera off or unreachable.</div>
-      </div>
-      <div class="row ov-actions">
-        <button class="ghost primary" id="ovAsk" type="button">📌 Ask about this frame</button>
-        <button class="ghost" id="ovWatch" type="button">👁 Watch</button>
-        <button class="ghost" id="ovAlarm" type="button">🔔 Alarm</button>
-        <a class="ghost" id="ovRecordings" target="_blank" rel="noopener" hidden>Recordings ↗</a>
-      </div>
-      <div class="ov-sec"><div class="hw-min">Watching on this camera</div><div id="ovWatches" class="empty-note">—</div></div>
-      <div class="ov-sec"><div class="hw-min">Alarms on this camera</div><div id="ovAlarms" class="empty-note">—</div></div>
     </div>
   </div>
 
@@ -574,22 +629,23 @@
     }catch{} }
 
     // ── camera strip: live thumbnails ──────────────────────────────
-    // Click a tile → pin that exact frame into the next chat question.
-    // ⤢ → the per-camera view (live view + this camera's watches/alarms).
+    // tap = PEEK (the agent drops the camera's current frame into the
+    // chat with an Open link) · ⤢ / name = the camera's own screen.
     const _camRoles={};
     function buildCamStrip(cams){ const strip=$("camstrip"); if(!strip||!cams.length) return;
       strip.innerHTML="";
       for(const cam of cams){ _camRoles[cam.camera_id]=(cam.role||"").trim();
         const t=document.createElement("div"); t.className="camtile"; t.dataset.cam=cam.camera_id;
-        t.title="Click to ask about this camera's current frame";
+        t.title="Tap to peek — the agent shows this camera in the chat";
         t.innerHTML='<img alt="" hidden><div class="ct-off" hidden>no frame</div>'+
-          '<div class="ct-nm"><span></span><button class="ct-x" title="Open camera view" aria-label="Open camera view">⤢</button></div>';
+          '<div class="ct-nm"><span></span><button class="ct-x" title="Open this camera’s screen" aria-label="Open camera screen">⤤</button></div>';
         t.querySelector(".ct-nm span").textContent=cam.camera_id;
-        t.querySelector("img").addEventListener("click",()=>pinFrame(cam.camera_id));
-        t.querySelector(".ct-off").addEventListener("click",()=>pinFrame(cam.camera_id));
-        t.querySelector(".ct-x").addEventListener("click",(e)=>{ e.stopPropagation(); openCamView(cam.camera_id); });
+        t.querySelector("img").addEventListener("click",()=>peekCam(cam.camera_id));
+        t.querySelector(".ct-off").addEventListener("click",()=>peekCam(cam.camera_id));
+        t.querySelector(".ct-nm span").addEventListener("click",()=>openCamScreen(cam.camera_id));
+        t.querySelector(".ct-x").addEventListener("click",(e)=>{ e.stopPropagation(); openCamScreen(cam.camera_id); });
         strip.appendChild(t); }
-      refreshCamStrip(); setInterval(()=>{ if(document.visibilityState==="visible") refreshCamStrip(); },6000); }
+      refreshCamStrip(); setInterval(()=>{ if(document.visibilityState==="visible" && !window._camScreenCam) refreshCamStrip(); },6000); }
     async function refreshCamStrip(){
       for(const t of document.querySelectorAll(".camtile")){ const cam=t.dataset.cam;
         const img=t.querySelector("img"), off=t.querySelector(".ct-off");
@@ -598,62 +654,173 @@
           const url=URL.createObjectURL(await r.blob());
           img.onload=()=>URL.revokeObjectURL(url); img.src=url; img.hidden=false; off.hidden=true;
         }catch{ img.hidden=true; off.hidden=false; } } }
+    async function fetchFrameB64(cam,at){
+      const q=at?("?at="+encodeURIComponent(at)):("?t="+Date.now());
+      const r=await fetch("/frame/"+encodeURIComponent(cam)+q);
+      if(!r.ok) return null;
+      const buf=new Uint8Array(await r.arrayBuffer());
+      let bin=""; for(let i=0;i<buf.length;i+=0x8000) bin+=String.fromCharCode.apply(null,buf.subarray(i,i+0x8000));
+      return btoa(bin); }
+
+    // PEEK: agent-style bubble with the live frame + Open / Pin actions.
+    async function peekCam(cam){
+      const b64=await fetchFrameB64(cam);
+      if(!b64){ addMsg(cam+" is offline — no frame right now.","sys"); return; }
+      const d=document.createElement("div"); d.className="msg agent";
+      d.innerHTML='<span class="who">agent</span>';
+      d.appendChild(document.createTextNode("Here’s "+cam+(_camRoles[cam]?(" · "+_camRoles[cam]):"")+" now:"));
+      const fr=document.createElement("div"); fr.className="frames";
+      const wrap=document.createElement("div"); const im=document.createElement("img"); im.className="frame-thumb";
+      im.src="data:image/jpeg;base64,"+b64; im.alt=cam;
+      im.addEventListener("click",()=>openLightbox(im.src,cam));
+      wrap.appendChild(im); fr.appendChild(wrap); d.appendChild(fr);
+      const row=document.createElement("div");
+      const ob=document.createElement("button"); ob.className="ghost olink"; ob.textContent="Open "+cam+" →";
+      ob.addEventListener("click",()=>openCamScreen(cam));
+      const pb=document.createElement("button"); pb.className="ghost olink"; pb.textContent="📌 Ask about this frame";
+      pb.addEventListener("click",()=>{ setPin(cam,b64); });
+      row.appendChild(ob); row.appendChild(document.createTextNode(" ")); row.appendChild(pb);
+      d.appendChild(row);
+      logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight; }
 
     // ── pinned frame ("ask about THIS frame") ──────────────────────
     let _pinnedFrame=null;   // {camera, b64}
-    async function pinFrame(cam){
-      try{ const r=await fetch("/frame/"+encodeURIComponent(cam)+"?t="+Date.now());
-        if(!r.ok){ addMsg("No frame available from "+cam+" right now.","sys"); return; }
-        const buf=new Uint8Array(await r.arrayBuffer());
-        let bin=""; for(let i=0;i<buf.length;i+=0x8000) bin+=String.fromCharCode.apply(null,buf.subarray(i,i+0x8000));
-        _pinnedFrame={camera:cam,b64:btoa(bin)};
-        $("pinCam").textContent=cam; $("pinChip").hidden=false;
-        addMsg("Pinned this frame from "+cam+" — ask your question.","user",[{jpeg_b64:_pinnedFrame.b64,camera_id:cam,role:_camRoles[cam]||cam}]);
-        closeCamView(); $("askInput").focus();
-      }catch(err){ addMsg("Couldn't grab a frame from "+cam+": "+err.message,"sys"); } }
+    function setPin(cam,b64){ _pinnedFrame={camera:cam,b64:b64};
+      $("pinCam").textContent=cam; $("pinChip").hidden=false; $("askInput").focus(); }
+    async function pinFrame(cam,at){
+      const b64=await fetchFrameB64(cam,at);
+      if(!b64){ addMsg("No frame available from "+cam+" right now.","sys"); return; }
+      addMsg("Pinned this frame from "+cam+" — ask your question.","user",[{jpeg_b64:b64,camera_id:cam,role:_camRoles[cam]||cam}]);
+      setPin(cam,b64); }
     function clearPin(){ _pinnedFrame=null; $("pinChip").hidden=true; }
     (function(){ const c=$("pinClear"); if(c) c.addEventListener("click",clearPin); })();
 
-    // ── per-camera view ────────────────────────────────────────────
-    let _ovTimer=null, _ovCam=null;
-    function openCamView(cam){ _ovCam=cam;
-      $("ovTitle").textContent=cam; $("ovRole").textContent=_camRoles[cam]||"";
-      const rec=$("ovRecordings");
-      if(window._opennvrUi){ rec.href=window._opennvrUi.replace(/\/$/,"")+"/recordings"; rec.hidden=false; }
-      else rec.hidden=true;
-      $("camOverlay").hidden=false;
-      refreshOvImg(); _ovTimer=setInterval(refreshOvImg,2000);
-      loadOvLists(cam); }
-    function closeCamView(){ if(_ovTimer){clearInterval(_ovTimer);_ovTimer=null;} _ovCam=null; $("camOverlay").hidden=true; }
-    async function refreshOvImg(){ if(!_ovCam) return;
-      const img=$("ovImg"), off=$("ovNoFrame");
-      try{ const r=await fetch("/frame/"+encodeURIComponent(_ovCam)+"?t="+Date.now());
+    // ── per-camera screen (URL: /demo/camera/{id}) ─────────────────
+    let _liveTimer=null, _tl=null, _revTs=null, _playing=true, _stepTimer=null;
+    function openCamScreen(cam,push=true){
+      window._camScreenCam=cam;
+      $("mainScreen").hidden=true; $("camScreen").hidden=false;
+      $("camTitle").textContent=cam; $("camSub").textContent=_camRoles[cam]||"";
+      const rec=$("camRecordings");
+      if(window._opennvrUi){ rec.href=window._opennvrUi.replace(/\/$/,"")+"/recordings"; rec.hidden=false; } else rec.hidden=true;
+      if(push) history.pushState({cam:cam},"","/demo/camera/"+encodeURIComponent(cam));
+      goLive(); loadTimeline(cam); loadCamScoped(cam);
+      addMsg("Focused on "+cam+" — talk or type, everything is scoped to this camera. ‹ Back returns to all cameras.","sys"); }
+    function closeCamScreen(push=true){
+      window._camScreenCam=null;
+      if(_liveTimer){clearInterval(_liveTimer);_liveTimer=null;}
+      if(_stepTimer){clearInterval(_stepTimer);_stepTimer=null;}
+      $("camScreen").hidden=true; $("mainScreen").hidden=false;
+      if(push) history.pushState({},"","/demo");
+      refreshCamStrip(); }
+    window.addEventListener("popstate",()=>{
+      const m=location.pathname.match(/\/demo\/camera\/([^/]+)$/);
+      if(m) openCamScreen(decodeURIComponent(m[1]),false); else if(window._camScreenCam) closeCamScreen(false); });
+    (function(){ const b=$("camBack"); if(b) b.addEventListener("click",()=>closeCamScreen()); })();
+
+    function fmtClock(ts){ const d=new Date(ts*1000);
+      return ("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2)+":"+("0"+d.getSeconds()).slice(-2); }
+    async function refreshPlayerLive(){ const cam=window._camScreenCam; if(!cam) return;
+      const img=$("camImg"), off=$("camNoFrame");
+      try{ const r=await fetch("/frame/"+encodeURIComponent(cam)+"?t="+Date.now());
         if(!r.ok) throw new Error();
         const url=URL.createObjectURL(await r.blob());
         img.onload=()=>URL.revokeObjectURL(url); img.src=url; img.hidden=false; off.hidden=true;
+        $("camTs").textContent=fmtClock(Date.now()/1000);
       }catch{ img.hidden=true; off.hidden=false; } }
-    // This camera's standing state: watches + alarms whose camera_ids
-    // include it (a watch on "all cameras" lists every configured id).
-    async function loadOvLists(cam){
-      const w=$("ovWatches"), a=$("ovAlarms");
+    function setMode(live){ $("camMode").classList.toggle("review",!live);
+      $("camModeText").textContent=live?"LIVE":"REVIEW";
+      $("camPlayer").classList.toggle("review",!live);
+      $("camLive").classList.toggle("on",live);
+      $("camTnote").textContent=live?"Live · marks = detections · drag to review the last few minutes"
+        :("Reviewing "+(_revTs?fmtClock(_revTs):"")+" — ● LIVE snaps back"); }
+    function goLive(){ _revTs=null; setMode(true);
+      if(_stepTimer){clearInterval(_stepTimer);_stepTimer=null;}
+      const s=$("camScrub"); if(_tl&&_tl.frames.length){ s.value=s.max; }
+      refreshPlayerLive();
+      if(!_liveTimer) _liveTimer=setInterval(()=>{ if(window._camScreenCam&&!_revTs&&_playing) refreshPlayerLive(); },2000); }
+    async function loadTimeline(cam){
+      try{ _tl=await (await fetch("/timeline/"+encodeURIComponent(cam))).json(); }catch{ _tl=null; }
+      const s=$("camScrub"), marks=$("camMarks");
+      marks.innerHTML="";
+      if(!_tl||!_tl.frames||_tl.frames.length<2){ s.disabled=true; s.max=0;
+        s.title="Review fills up as frames arrive — leave the page open a minute."; return; }
+      s.disabled=false; s.max=_tl.frames.length-1; s.value=s.max; s.title="";
+      const t0=_tl.frames[0], t1=_tl.frames[_tl.frames.length-1], span=(t1-t0)||1;
+      for(const ev of (_tl.events||[])){ if(ev.ts<t0||ev.ts>t1) continue;
+        const mk=document.createElement("span"); mk.className="mk";
+        mk.style.left=(((ev.ts-t0)/span)*100)+"%"; mk.title=(ev.summary||"detection")+" · "+fmtClock(ev.ts);
+        mk.addEventListener("click",()=>{ let best=0,bd=1e18;
+          _tl.frames.forEach((f,i)=>{ const d=Math.abs(f-ev.ts); if(d<bd){bd=d;best=i;} });
+          s.value=best; reviewAt(best); });
+        marks.appendChild(mk); } }
+    async function reviewAt(idx){ if(!_tl||!_tl.frames[idx]) return;
+      _revTs=_tl.frames[idx]; setMode(false);
+      const img=$("camImg"), off=$("camNoFrame");
+      try{ const r=await fetch("/frame/"+encodeURIComponent(window._camScreenCam)+"?at="+encodeURIComponent(_revTs));
+        if(!r.ok) throw new Error();
+        const url=URL.createObjectURL(await r.blob());
+        img.onload=()=>URL.revokeObjectURL(url); img.src=url; img.hidden=false; off.hidden=true;
+        $("camTs").textContent=fmtClock(_revTs);
+      }catch{ img.hidden=true; off.hidden=false; } }
+    (function(){ const s=$("camScrub"); let deb=null;
+      if(s) s.addEventListener("input",()=>{ const v=+s.value;
+        if(_tl&&v>=+s.max){ goLive(); return; }
+        if(deb) clearTimeout(deb); deb=setTimeout(()=>reviewAt(v),120); });
+      const lb=$("camLive"); if(lb) lb.addEventListener("click",goLive);
+      const pb=$("camPlay"); if(pb) pb.addEventListener("click",()=>{ _playing=!_playing;
+        pb.textContent=_playing?"⏸":"▶";
+        if(_playing&&_revTs&&!_stepTimer){ _stepTimer=setInterval(()=>{ const s2=$("camScrub");
+          const nxt=+s2.value+1; if(nxt>=+s2.max){ goLive(); } else { s2.value=nxt; reviewAt(nxt); } },1000); }
+        if(!_playing&&_stepTimer){ clearInterval(_stepTimer); _stepTimer=null; } });
+      const player=$("camPlayer");
+      if(player) player.addEventListener("click",(e)=>{ if(e.target.closest(".modepill,.ovl")) return;
+        const cam=window._camScreenCam; if(!cam) return;
+        pinFrame(cam,_revTs||undefined); }); })();
+
+    // camera-screen actions: talk/ask scoped by cameraParam(); quick popovers.
+    function closePops(){ document.querySelectorAll(".pop").forEach(p=>p.classList.remove("show")); }
+    function togglePop(id){ const el=$(id.slice(1)); const show=!el.classList.contains("show"); closePops(); if(show) el.classList.add("show"); }
+    async function loadCamScoped(cam){
+      const el=$("camScoped"); const bits=[];
       try{ const d=await (await fetch("/monitors")).json();
         const mine=(d.monitors||[]).filter(m=>m.active&&(m.camera_ids||[]).includes(cam));
-        w.textContent=mine.length?mine.map(m=>"#"+m.id+" "+m.kind+" "+m.target).join(" · "):"none";
-      }catch{ w.textContent="—"; }
+        bits.push("Watching: "+(mine.length?mine.map(m=>"#"+m.id+" "+m.kind+" "+m.target).join(", "):"none"));
+      }catch{}
       try{ const d=await (await fetch("/alarms")).json();
-        const mine=(d.alarms||[]).filter(al=>al.active&&(al.camera_ids||[]).includes(cam));
-        a.textContent=mine.length?mine.map(al=>"#"+al.id+" "+al.name+" ("+al.window+")").join(" · "):"none";
-      }catch{ a.textContent="—"; } }
-    function scopeToCamera(cam){ const all=$("cam-all"); if(all) all.checked=false;
-      document.querySelectorAll(".cam-cb").forEach(c=>{ c.checked=(c.value===cam); }); }
-    (function(){ const close=$("ovClose"), ov=$("camOverlay");
-      if(close) close.addEventListener("click",closeCamView);
-      if(ov) ov.addEventListener("click",(e)=>{ if(e.target===ov) closeCamView(); });
-      const askB=$("ovAsk"); if(askB) askB.addEventListener("click",()=>{ if(_ovCam) pinFrame(_ovCam); });
-      const wB=$("ovWatch"); if(wB) wB.addEventListener("click",()=>{ if(!_ovCam) return; scopeToCamera(_ovCam); closeCamView();
-        const f=$("watchForm"), add=$("watchAdd"); if(f&&f.hidden&&add) add.click(); $("watchTarget").focus(); });
-      const aB=$("ovAlarm"); if(aB) aB.addEventListener("click",()=>{ if(!_ovCam) return; scopeToCamera(_ovCam); closeCamView();
-        const f=$("alarmForm"), add=$("alarmAdd"); if(f&&f.hidden&&add) add.click(); $("alarmTarget").focus(); }); })();
+        const mine=(d.alarms||[]).filter(a=>a.active&&(a.camera_ids||[]).includes(cam));
+        bits.push("Alarms: "+(mine.length?mine.map(a=>"#"+a.id+" "+a.name).join(", "):"none"));
+      }catch{}
+      el.textContent=bits.join("  ·  "); }
+    (function(){
+      const t=$("camTalk"); if(t) t.addEventListener("click",()=>{ closePops(); const tb=$("talk"); if(tb) tb.click(); });
+      const a=$("camAsk"); if(a) a.addEventListener("click",()=>{ closePops(); $("askInput").focus(); });
+      const w=$("camWatch"); if(w) w.addEventListener("click",()=>togglePop("#popWatch"));
+      const al=$("camAlarm"); if(al) al.addEventListener("click",()=>togglePop("#popAlarm"));
+      const wg=$("pwGo"); if(wg) wg.addEventListener("click",async()=>{
+        const cam=window._camScreenCam, target=($("pwTarget").value||"").trim();
+        if(!cam||!target){ $("pwTarget").focus(); return; }
+        try{ const r=await fetch("/monitors",{method:"POST",headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({kind:$("pwKind").value,target,camera_ids:[cam]})});
+          const d=await r.json().catch(()=>({}));
+          addMsg(r.ok?(d.message||("Watching "+cam+" for "+target+".")):("Couldn't start the watch: "+(d.error||("HTTP "+r.status))),r.ok?"sys":"sys");
+        }catch(err){ addMsg("Couldn't start the watch: "+err.message,"sys"); }
+        $("pwTarget").value=""; closePops(); pollMonitors(); loadCamScoped(cam); });
+      const ag=$("paGo"); if(ag) ag.addEventListener("click",async()=>{
+        const cam=window._camScreenCam, target=($("paTarget").value||"").trim();
+        if(!cam||!target){ $("paTarget").focus(); return; }
+        const body={name:"Alarm: "+target+" on "+cam,target,camera_ids:[cam]};
+        const after=$("paAfter").value; if(after) body.after=after;
+        try{ const r=await fetch("/alarms",{method:"POST",headers:{"Content-Type":"application/json"},
+            body:JSON.stringify(body)});
+          const d=await r.json().catch(()=>({}));
+          addMsg(r.ok?(d.message||("Armed on "+cam+" for "+target+".")):("Couldn't arm the alarm: "+(d.error||("HTTP "+r.status))),"sys");
+        }catch(err){ addMsg("Couldn't arm the alarm: "+err.message,"sys"); }
+        $("paTarget").value=""; closePops(); pollAlarms(); loadCamScoped(cam); }); })();
+    // deep link: /demo/camera/{id} opens that camera once the strip knows roles
+    function openDeepLinkedCamera(){
+      const m=location.pathname.match(/\/demo\/camera\/([^/]+)$/);
+      if(m) openCamScreen(decodeURIComponent(m[1]),false); }
     async function useLocalCamera(){
       const btn=$("useLocalCam"); if(btn) btn.disabled=true;
       setStatus("Looking for a camera on this machine…");
@@ -672,7 +839,10 @@
       }catch(err){ setStatus("Could not access a local camera: "+err.message,"error"); }
       finally{ if(btn) btn.disabled=false; }
     }
-    function cameraParam(){ const all=$("cam-all"); if(all&&all.checked) return "all";
+    function cameraParam(){
+      // On a camera's own screen every ask/talk is scoped to that camera.
+      if(window._camScreenCam) return window._camScreenCam;
+      const all=$("cam-all"); if(all&&all.checked) return "all";
       const picked=[...document.querySelectorAll(".cam-cb:checked")].map(c=>c.value); return picked.length?picked.join(","):"all"; }
 
     function pickMimeType(){ for(const t of ["audio/webm;codecs=opus","audio/webm","audio/ogg;codecs=opus","audio/mp4"])
@@ -1056,7 +1226,7 @@
       if(qi) qi.addEventListener("keydown",e=>{ if(e.key==="Enter") go(); }); })();
 
     const _ulc=$("useLocalCam"); if(_ulc) _ulc.addEventListener("click", useLocalCamera);
-    loadAgent(); loadCameras(); loadNotify(); loadSkills(); loadHardware(); setAvatar("idle");
+    loadAgent(); loadCameras().then(openDeepLinkedCamera); loadNotify(); loadSkills(); loadHardware(); setAvatar("idle");
     renderTasks([]); renderMonitors([]); renderAlarms([]); renderReports([]);
     alarmTimer = setInterval(pollAlarms, 2500);   // alarms ring even before Talk
   </script>

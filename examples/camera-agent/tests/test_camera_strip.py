@@ -135,3 +135,47 @@ def test_agent_exposes_opennvr_ui_url():
                     cameras=[CameraSpec(camera_id="c", frame_url="http://x/1.jpg", role="r")])
     client2 = TestClient(build_app(CameraAgentRuntime(cfg)))
     assert client2.get("/agent").json()["opennvr_ui_url"] == "https://nvr.example"
+
+
+# ── review ring + timeline (per-camera scrub-back) ─────────────────────
+
+
+def test_review_ring_fills_on_real_fetches_only():
+    rt = _runtime()
+    rt.context.register_frame_source("cam1", _Source())
+    # two real fetches (cache expires in between), one cache hit, one pin
+    async def go():
+        await rt.context.get_frame("cam1")
+        await rt.context.get_frame("cam1")            # cache hit — no ring entry
+        rt.context.invalidate_frame_cache()
+        await rt.context.get_frame("cam1")            # real fetch #2
+    asyncio.run(go())
+    rt.context.pin_frame("cam1", b"PINNED")           # pins don't feed the ring
+    ts = rt.context.review_timestamps("cam1")
+    assert len(ts) == 2 and ts == sorted(ts)
+    assert rt.context.review_frame_at("cam1", ts[-1]) == JPEG
+    assert rt.context.review_frame_at("cam2", 0.0) is None   # empty ring
+
+
+def test_frame_at_serves_ring_and_timeline_shape():
+    rt = _runtime()
+    rt.context.register_frame_source("cam1", _Source())
+    asyncio.run(rt.context.get_frame("cam1"))
+    client = TestClient(build_app(rt))
+    ts = rt.context.review_timestamps("cam1")[0]
+    r = client.get(f"/frame/cam1?at={ts}")
+    assert r.status_code == 200 and r.content == JPEG
+    assert client.get("/frame/cam1?at=1.0").status_code == 200   # nearest match
+    assert client.get("/frame/cam2?at=1.0").status_code == 404   # empty ring
+    tl = client.get("/timeline/cam1").json()
+    assert tl["camera_id"] == "cam1" and tl["frames"] == rt.context.review_timestamps("cam1")
+    assert isinstance(tl["events"], list)
+    assert client.get("/timeline/nope").status_code == 404
+
+
+def test_demo_camera_deep_link_route():
+    rt = _runtime()
+    client = TestClient(build_app(rt))
+    ok = client.get("/demo/camera/cam1")
+    assert ok.status_code == 200 and "camScreen" in ok.text
+    assert client.get("/demo/camera/nope").status_code == 404

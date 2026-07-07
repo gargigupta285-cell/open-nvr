@@ -3582,11 +3582,20 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         return HTMLResponse(_load_demo_html())
 
     @app.get("/frame/{camera_id}")
-    async def _frame(camera_id: str) -> Response:
-        """Current JPEG for one camera — the strip thumbnails and the
-        per-camera view poll this. Rides the context's frame cache
-        (TTL ~2s), so a page of thumbnails coalesces with tool calls
-        instead of hammering the camera. no-store: every poll wants NOW."""
+    async def _frame(camera_id: str, at: float | None = None) -> Response:
+        """JPEG for one camera. No ``at`` → the CURRENT frame (rides the
+        context's frame cache, TTL ~2s, so a page of thumbnails coalesces
+        with tool calls instead of hammering the camera). With ``at`` (a
+        wall-clock ts from /timeline) → the nearest review-ring frame,
+        for the per-camera screen's scrub-back. no-store either way."""
+        if at is not None:
+            if not runtime.context.known_camera(camera_id):
+                return Response(status_code=404)
+            jpeg = runtime.context.review_frame_at(camera_id, at)
+            if jpeg is None:
+                return Response(status_code=404)   # ring empty (fresh boot)
+            return Response(content=jpeg, media_type="image/jpeg",
+                            headers={"Cache-Control": "no-store"})
         try:
             jpeg = await runtime.context.get_frame(camera_id)
         except LookupError:
@@ -3597,6 +3606,32 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             return Response(status_code=503)
         return Response(content=jpeg, media_type="image/jpeg",
                         headers={"Cache-Control": "no-store"})
+
+    @app.get("/timeline/{camera_id}")
+    async def _timeline(camera_id: str) -> Any:
+        """The per-camera screen's scrub-back data: the review ring's
+        frame timestamps (the honest "last few minutes" — real NVR
+        playback lives in the main OpenNVR UI) + recent detection
+        events for the timeline's markers."""
+        if not runtime.context.known_camera(camera_id):
+            return JSONResponse({"error": "unknown camera"}, status_code=404)
+        events = runtime.context.recent_events(
+            camera_id=camera_id, window_seconds=15 * 60)
+        return {
+            "camera_id": camera_id,
+            "frames": runtime.context.review_timestamps(camera_id),
+            "events": [{"ts": e.received_at, "summary": e.summary,
+                        "adapter": e.adapter} for e in events[:40]],
+        }
+
+    @app.get("/demo/camera/{camera_id}", response_class=HTMLResponse)
+    async def _demo_camera(camera_id: str) -> HTMLResponse:
+        """Deep link into one camera's screen — same demo page; the page
+        JS reads the path and opens that camera. 404 for unknown ids so
+        a typo'd link fails loudly instead of showing an empty player."""
+        if not runtime.context.known_camera(camera_id):
+            return HTMLResponse("<h1>unknown camera</h1>", status_code=404)
+        return HTMLResponse(_load_demo_html())
 
     @app.get("/cameras")
     async def _cameras() -> dict[str, Any]:

@@ -155,18 +155,28 @@ def test_hardware_panel_wired(script: str, html: str) -> None:
     )
 
 
-def test_camera_strip_and_pin_wired(script: str, html: str) -> None:
-    # The live-thumbnail strip, the pin-a-frame flow, and the per-camera
-    # overlay. Clicking a tile pins that EXACT frame into the next /ask
-    # (pinned_jpeg_b64 + camera); ⤢ opens the camera view.
-    for eid in ("camstrip", "pinChip", "pinClear", "camOverlay", "ovImg",
-                "ovAsk", "ovWatch", "ovAlarm", "ovRecordings"):
-        assert f'id="{eid}"' in html, f"camera strip element missing: {eid!r}"
-    for fn in ("function buildCamStrip", "function refreshCamStrip",
-               "async function pinFrame", "function openCamView"):
-        assert fn in script, f"camera strip handler missing: {fn!r}"
-    assert '"/frame/"' in script, "strip no longer polls GET /frame/{id}"
+def test_camera_strip_peek_and_camera_screen_wired(script: str, html: str) -> None:
+    # tap = peek (agent bubble with the live frame + Open/Pin actions),
+    # ⤤/name = the camera's own screen at /demo/camera/{id} with the
+    # review player. The pin stays one-shot on the next /ask.
+    for eid in ("camstrip", "pinChip", "pinClear", "mainScreen", "camScreen",
+                "camPlayer", "camImg", "camScrub", "camMarks", "camLive",
+                "camPlay", "camTalk", "camAsk", "camWatch", "camAlarm",
+                "popWatch", "popAlarm", "camRecordings", "camBack"):
+        assert f'id="{eid}"' in html, f"camera UI element missing: {eid!r}"
+    for fn in ("function buildCamStrip", "async function peekCam",
+               "function openCamScreen", "function closeCamScreen",
+               "async function loadTimeline", "async function reviewAt",
+               "function goLive"):
+        assert fn in script, f"camera screen handler missing: {fn!r}"
+    assert '"/timeline/"' in script, "player no longer loads /timeline"
+    assert "?at=" in script, "review scrub no longer fetches /frame?at="
+    assert "history.pushState" in script and "/demo/camera/" in script, (
+        "camera screen lost its URL (pushState /demo/camera/{id})"
+    )
     assert "pinned_jpeg_b64" in script, "ask() no longer sends the pinned frame"
     assert re.search(r"if\(_pinnedFrame\)[\s\S]{0,120}clearPin\(\)", script), (
         "pin is no longer one-shot (must clear after the send)"
     )
+    # scoping: on a camera screen every ask/talk goes to that camera
+    assert "_camScreenCam" in script and "function cameraParam" in script
