@@ -153,3 +153,20 @@ def test_hardware_panel_wired(script: str, html: str) -> None:
     assert script.count("loadHardware();") >= 3, (
         "hardware panel no longer recomputes on initial load + skill changes"
     )
+
+
+def test_camera_strip_and_pin_wired(script: str, html: str) -> None:
+    # The live-thumbnail strip, the pin-a-frame flow, and the per-camera
+    # overlay. Clicking a tile pins that EXACT frame into the next /ask
+    # (pinned_jpeg_b64 + camera); ⤢ opens the camera view.
+    for eid in ("camstrip", "pinChip", "pinClear", "camOverlay", "ovImg",
+                "ovAsk", "ovWatch", "ovAlarm", "ovRecordings"):
+        assert f'id="{eid}"' in html, f"camera strip element missing: {eid!r}"
+    for fn in ("function buildCamStrip", "function refreshCamStrip",
+               "async function pinFrame", "function openCamView"):
+        assert fn in script, f"camera strip handler missing: {fn!r}"
+    assert '"/frame/"' in script, "strip no longer polls GET /frame/{id}"
+    assert "pinned_jpeg_b64" in script, "ask() no longer sends the pinned frame"
+    assert re.search(r"if\(_pinnedFrame\)[\s\S]{0,120}clearPin\(\)", script), (
+        "pin is no longer one-shot (must clear after the send)"
+    )

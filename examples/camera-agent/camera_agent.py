@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import binascii
 import difflib
 import json
 import logging
@@ -3580,6 +3581,23 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
     async def _demo() -> HTMLResponse:
         return HTMLResponse(_load_demo_html())
 
+    @app.get("/frame/{camera_id}")
+    async def _frame(camera_id: str) -> Response:
+        """Current JPEG for one camera — the strip thumbnails and the
+        per-camera view poll this. Rides the context's frame cache
+        (TTL ~2s), so a page of thumbnails coalesces with tool calls
+        instead of hammering the camera. no-store: every poll wants NOW."""
+        try:
+            jpeg = await runtime.context.get_frame(camera_id)
+        except LookupError:
+            return Response(status_code=404)
+        except Exception:
+            # FrameSourceError et al — camera off / unreachable. 503 lets
+            # the UI show a quiet placeholder instead of a broken image.
+            return Response(status_code=503)
+        return Response(content=jpeg, media_type="image/jpeg",
+                        headers={"Cache-Control": "no-store"})
+
     @app.get("/cameras")
     async def _cameras() -> dict[str, Any]:
         """Camera roster for the demo dropdown (id + role description)."""
@@ -3622,7 +3640,10 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 "text_mode": runtime.cfg.text_mode,
                 "wake_phrase": f"Hey {wake.title()}",
                 "wake_required": runtime.cfg.wake_word_required,
-                "avatar_video": runtime.cfg.avatar_video}
+                "avatar_video": runtime.cfg.avatar_video,
+                # Deep-link base for the main OpenNVR UI (recordings /
+                # playback live there, not in this agent). "" = unset.
+                "opennvr_ui_url": runtime.cfg.opennvr_ui_url or ""}
 
     @app.get("/skills")
     async def _skills() -> dict[str, Any]:
@@ -3931,12 +3952,30 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 camera_hint = part
                 break
 
+        # Optional pinned frame ("ask about THIS frame"): the UI sends the
+        # exact JPEG the user clicked, base64. For this ONE turn the vision
+        # tools see that frame for the pinned camera instead of fetching
+        # live — cleared in the finally, so the next question is live again.
+        pinned_jpeg: bytes | None = None
+        raw_pin = (body or {}).get("pinned_jpeg_b64")
+        if raw_pin and camera_hint:
+            try:
+                pinned_jpeg = base64.b64decode(str(raw_pin), validate=True)
+            except (binascii.Error, ValueError):
+                return JSONResponse({"error": "pinned_jpeg_b64 is not valid base64"},
+                                    status_code=400)
+            if len(pinned_jpeg) > 2_000_000:   # same cap as _frames_for
+                return JSONResponse({"error": "pinned frame too large (2 MB cap)"},
+                                    status_code=400)
+
         import time as _t
         t0 = _t.perf_counter()
         runtime.tools.last_cameras_used = []
         # Fresh frame per question (see /converse): each turn sees the current
         # moment, not a frame cached from a question seconds ago.
         runtime.context.invalidate_frame_cache()
+        if pinned_jpeg is not None:
+            runtime.context.pin_frame(camera_hint, pinned_jpeg)
         try:
             reply = await _run_conversation_turn(
                 runtime, demo_history, text, preferred_camera=camera_hint
@@ -3944,6 +3983,8 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         except Exception:
             logger.exception("ask: turn failed")
             return JSONResponse({"error": "assistant failed"}, status_code=502)
+        finally:
+            runtime.context.clear_pins()
 
         demo_history.append({"role": "user", "content": text})
         demo_history.append({"role": "assistant", "content": reply})

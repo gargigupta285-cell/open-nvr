@@ -96,6 +96,9 @@ class CameraContext:
         self._frame_sources: dict[str, FrameSource] = {}
         self._frame_cache: dict[str, _CachedFrame] = {}
         self._cache_ttl = float(frame_cache_ttl_seconds)
+        # Frames pinned by the operator ("ask about THIS frame") — served
+        # by get_frame verbatim, bypassing fetch + TTL, until clear_pins().
+        self._pinned: dict[str, bytes] = {}
         # Per-camera fetch locks: a fetch on cam1 (which can take seconds —
         # RTSP keyframe wait, up to the source timeout) must not block a
         # concurrent tool call or monitor poll on cam2. One global lock here
@@ -163,6 +166,11 @@ class CameraContext:
                 f"camera_id {camera_id!r} is not configured; "
                 f"available: {sorted(self._cameras.keys())}"
             )
+        # An operator-pinned frame wins over any fetch: the user asked
+        # about the exact frame they clicked, not the current moment.
+        pinned = self._pinned.get(camera_id)
+        if pinned is not None:
+            return pinned
         source = self._frame_sources.get(camera_id)
         if source is None:
             raise LookupError(
@@ -197,8 +205,35 @@ class CameraContext:
         """Return the JPEG bytes most recently fetched for ``camera_id`` this
         session, or None if nothing is cached. Best-effort, no fetch — used to
         show the operator the exact frame a tool looked at, in the chat."""
+        pinned = self._pinned.get(camera_id)
+        if pinned is not None:
+            return pinned
         cached = self._frame_cache.get(camera_id)
         return cached.bytes_ if cached is not None else None
+
+    # ── Pinned frames ("ask about THIS frame") ─────────────────────
+
+    def pin_frame(self, camera_id: str, jpeg: bytes) -> None:
+        """Pin a specific JPEG as ``camera_id``'s frame: ``get_frame``
+        returns it verbatim (no fetch, no TTL) until :meth:`clear_pins`.
+
+        Powers the demo's click-a-thumbnail flow — the user asks about
+        the exact frame they clicked, not whatever the camera shows by
+        the time the tools run. Scoped to ONE conversation turn by the
+        caller (pin → run turn → clear in a ``finally``); the demo is a
+        single-operator surface, so turns don't interleave."""
+        if camera_id not in self._cameras:
+            raise LookupError(f"camera_id {camera_id!r} is not configured")
+        self._pinned[camera_id] = jpeg
+        # Seed the regular cache too: the turn's "here's what I saw"
+        # (get_cached_frame) must still show the pinned frame after
+        # clear_pins() — the next question invalidates the cache anyway.
+        self._frame_cache[camera_id] = _CachedFrame(
+            bytes_=jpeg, fetched_at=time.monotonic()
+        )
+
+    def clear_pins(self) -> None:
+        self._pinned.clear()
 
     def invalidate_frame_cache(self, camera_id: str | None = None) -> None:
         """Drop cached frames. Without an arg, drops all — useful for
