@@ -225,6 +225,12 @@ class AppConfig:
     # NOTIFICATIONS.md.
     notify_webhooks: list[str] | None = None
     notify_events: list[str] | None = None
+    # Apprise URLs (https://github.com/caronc/apprise) — one line per service:
+    # mailto://, tgram://, ntfy://, pover://, twilio://, … 100+ services
+    # through one optional dependency (`pip install apprise`). Same event
+    # filter as the webhooks; URLs no-op with a warning if the package is
+    # missing. See NOTIFICATIONS.md.
+    notify_apprise: list[str] | None = None
 
     # Optional path to a JSON file that persists alarms, watches, and report
     # schedules so they survive a restart. Unset → in-memory only.
@@ -1480,16 +1486,52 @@ class Notifier:
     plus structured fields, so it works with Slack/Discord/Teams incoming
     webhooks, n8n/Home Assistant, and custom JSON consumers unchanged."""
 
-    def __init__(self, runtime: "CameraAgentRuntime", *, webhooks=None, events=None) -> None:
+    def __init__(self, runtime: "CameraAgentRuntime", *, webhooks=None, events=None,
+                 apprise_urls=None) -> None:
         self._runtime = runtime
         self._webhooks = list(webhooks or [])
         self._events = set(events or ("alarm", "notify"))
         self._client = None
         self._deliveries: list[dict[str, Any]] = []
+        # Apprise: 100+ services (mailto:// tgram:// ntfy:// pover:// …)
+        # through one OPTIONAL dependency. URLs are held either way; the
+        # library import is lazy so an unconfigured or undeployed apprise
+        # never costs anything.
+        self._apprise_urls = list(apprise_urls or [])
+        self._apprise = None
+        self._apprise_warned = False
 
     @property
     def enabled(self) -> bool:
-        return bool(self._webhooks)
+        return bool(self._webhooks or self._apprise_urls)
+
+    def _apprise_client(self):
+        """Lazy optional import. None (with ONE warning) when the package
+        isn't installed — configured Apprise URLs then no-op instead of
+        taking the agent down. Invalid URLs are dropped at add() time;
+        only the scheme is logged (Apprise URLs embed tokens)."""
+        if not self._apprise_urls:
+            return None
+        if self._apprise is None:
+            try:
+                import apprise
+            except ImportError:
+                if not self._apprise_warned:
+                    self._apprise_warned = True
+                    logger.warning(
+                        "notify: %d Apprise URL(s) configured but the "
+                        "'apprise' package is not installed — "
+                        "pip install apprise to activate them",
+                        len(self._apprise_urls))
+                return None
+            client = apprise.Apprise()
+            for url in self._apprise_urls:
+                if not client.add(url):
+                    scheme = str(url).split("://", 1)[0]
+                    logger.warning("notify: invalid Apprise URL ignored "
+                                   "(scheme %r)", scheme)
+            self._apprise = client
+        return self._apprise
 
     def _http(self):
         import httpx
@@ -1531,16 +1573,37 @@ class Notifier:
                     logger.warning("notify: %s returned HTTP %s", url, resp.status_code)
             except Exception as exc:
                 logger.warning("notify: delivery to %s failed: %s", url, exc)
+        # Apprise fan-out (email/Telegram/ntfy/…). The library is sync
+        # blocking I/O, so it runs on a worker thread — the poll loops and
+        # the chat never wait on an SMTP handshake. Group-level result:
+        # apprise reports one bool for the batch.
+        client = self._apprise_client()
+        if client is not None:
+            try:
+                sent = await asyncio.to_thread(
+                    client.notify,
+                    title=payload["title"],
+                    body=payload["detail"] or payload["title"],
+                )
+                if sent:
+                    ok += len(self._apprise_urls)
+                else:
+                    logger.warning("notify: apprise delivery failed "
+                                   "(%d URL(s))", len(self._apprise_urls))
+            except Exception as exc:
+                logger.warning("notify: apprise delivery errored: %s", exc)
         import time as _t
 
         self._deliveries.append({"type": kind, "title": payload["title"],
-                                 "ok": ok, "channels": len(self._webhooks), "ts": _t.time()})
+                                 "ok": ok,
+                                 "channels": len(self._webhooks) + len(self._apprise_urls),
+                                 "ts": _t.time()})
         del self._deliveries[:-50]
         return ok
 
     def fire(self, event: dict[str, Any]) -> None:
         """Fire-and-forget from sync/poll contexts (never blocks)."""
-        if not self._webhooks:
+        if not self.enabled:
             return
         try:
             asyncio.create_task(self.send(event))
@@ -1548,7 +1611,10 @@ class Notifier:
             pass
 
     def status(self) -> dict[str, Any]:
-        return {"enabled": self.enabled, "channels": len(self._webhooks),
+        return {"enabled": self.enabled,
+                "channels": len(self._webhooks) + len(self._apprise_urls),
+                "webhooks": len(self._webhooks),
+                "apprise": len(self._apprise_urls),
                 "events": sorted(self._events), "recent": self._deliveries[-20:]}
 
 
@@ -2145,6 +2211,10 @@ def load_config(path: str | Path) -> AppConfig:
             list(raw["notify_events"])
             if isinstance(raw.get("notify_events"), list) else None
         ),
+        notify_apprise=(
+            list(raw["notify_apprise"])
+            if isinstance(raw.get("notify_apprise"), list) else None
+        ),
         host=_str("host", "127.0.0.1"),
         port=_int("port", 9100),
         system_prompt=str(raw.get("system_prompt") or _DEFAULT_SYSTEM_PROMPT),
@@ -2350,7 +2420,8 @@ class CameraAgentRuntime:
 
         self.agent_name = agent_name_for(cfg.agent_name)
         self.faces = FaceClient(url=cfg.faces_url, token=cfg.faces_token) if cfg.faces_url else None
-        self.notifier = Notifier(self, webhooks=cfg.notify_webhooks, events=cfg.notify_events)
+        self.notifier = Notifier(self, webhooks=cfg.notify_webhooks, events=cfg.notify_events,
+                                 apprise_urls=cfg.notify_apprise)
         self.tasks = TaskManager(self)
         self.monitors = MonitorManager(self)
         self.alarms = AlarmManager(self)

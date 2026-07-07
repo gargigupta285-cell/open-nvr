@@ -196,3 +196,14 @@ system_prompt: |
   data — don't guess. Respond in 1-2 short sentences because your
   reply is spoken aloud. If the user's question can't be answered
   from the cameras, say so briefly.
+
+# External notifications (see NOTIFICATIONS.md). Webhooks take a JSON POST
+# (Slack / Discord / Teams / Home Assistant / n8n); Apprise URLs cover
+# everything else — email, Telegram, ntfy phone push, Pushover, SMS, 100+
+# services (`pip install apprise`, or the [notify] extra).
+# notify_webhooks:
+#   - https://hooks.slack.com/services/XXX/YYY/ZZZ
+# notify_apprise:
+#   - mailto://user:app-password@gmail.com
+#   - ntfy://opennvr-alerts
+# notify_events: [alarm, notify]   # add: task, report

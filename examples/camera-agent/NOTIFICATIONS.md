@@ -44,20 +44,42 @@ Event categories:
 Delivery is best-effort and non-blocking: a webhook that errors or times out
 is logged and skipped — it never stalls detection.
 
+## Everything else: Apprise (email, Telegram, phone push, SMS, …)
+
+For targets that don't take a JSON webhook, the agent speaks
+[Apprise](https://github.com/caronc/apprise) — 100+ services through one
+**optional** dependency (`pip install apprise`) and one URL per service:
+
+```yaml
+# config.yml
+notify_apprise:
+  - mailto://user:app-password@gmail.com          # email (SMTP)
+  - tgram://123456:ABC-bot-token/987654           # Telegram
+  - ntfy://opennvr-alerts                         # phone push (self-hostable)
+  - pover://user-key@app-token                    # Pushover
+```
+
+Same `notify_events` filter, same best-effort contract as the webhooks, and
+delivery runs on a worker thread so an SMTP handshake never stalls a poll
+loop. If URLs are configured but the package isn't installed, they no-op
+with a single log warning — the agent never fails to boot over a
+notification channel. Apprise URLs embed tokens: keep `config.yml`
+permissions tight; the agent logs only a rejected URL's scheme, never the
+full URL.
+
 ## Endpoints
-- `GET /notify` → `{enabled, channels, events, recent}` (status + recent deliveries)
-- `POST /notify/test` → send a test event to every configured webhook
+- `GET /notify` → `{enabled, channels, webhooks, apprise, events, recent}`
+  (status + recent deliveries)
+- `POST /notify/test` → send a test event to every configured channel
 
 ## Roadmap — richer channels (not yet built)
 
-Webhooks cover most automation/chat targets today. Planned first-class channels:
-
-- **SMS / phone** via Twilio (pairs with the emergency-calling hook in
-  `ALARMS.md`). Keep provider secrets server-side; rate-limit; per-alarm opt-in.
-- **Mobile push** (FCM / APNs / ntfy.sh) for a phone app or PWA.
-- **Email** (SMTP) digests for non-urgent summaries.
+- **Emergency calling** — a *placed phone call* on alarm trigger (pairs with
+  the emergency-calling hook in `ALARMS.md`). Twilio Voice / SIP; keep
+  provider secrets server-side; rate-limit; per-alarm opt-in. (SMS itself
+  already works today via Apprise's `twilio://`.)
 - **Per-rule routing** — send a given alarm/watch to a specific channel, and
   set quiet hours / severity thresholds per channel.
 
-These are intentionally deferred; the webhook layer is the generic foundation
-they'd build on.
+These are intentionally deferred; the webhook + Apprise layer is the generic
+foundation they'd build on.

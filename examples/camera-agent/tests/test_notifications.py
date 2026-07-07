@@ -13,10 +13,10 @@ from camera_agent import AppConfig, CameraAgentRuntime, Notifier, build_app
 from context import CameraSpec
 
 
-def _runtime(webhooks=None, events=None, detections=None):
+def _runtime(webhooks=None, events=None, detections=None, apprise=None):
     cfg = AppConfig(
         kaic_url="http://k", kaic_api_key="x", system_prompt="t",
-        notify_webhooks=webhooks, notify_events=events,
+        notify_webhooks=webhooks, notify_events=events, notify_apprise=apprise,
         cameras=[CameraSpec(camera_id="cam1", frame_url="http://x/1.jpg", role="front")],
     )
     rt = CameraAgentRuntime(cfg)
@@ -138,3 +138,74 @@ def test_notify_test_400_when_unconfigured():
     rt = _runtime(webhooks=None)
     client = TestClient(build_app(rt))
     assert client.post("/notify/test").status_code == 400
+
+
+# ── Apprise sink (optional dependency) ─────────────────────────────────
+
+
+class _StubApprise:
+    """Stands in for apprise.Apprise — records adds + notifies."""
+
+    instances: list["_StubApprise"] = []
+
+    def __init__(self):
+        self.urls: list[str] = []
+        self.notifies: list[dict] = []
+        _StubApprise.instances.append(self)
+
+    def add(self, url):
+        if url.startswith("bad://"):
+            return False
+        self.urls.append(url)
+        return True
+
+    def notify(self, *, title, body):
+        self.notifies.append({"title": title, "body": body})
+        return True
+
+
+def _stub_apprise_module(monkeypatch):
+    import types as _types
+    mod = _types.ModuleType("apprise")
+    mod.Apprise = _StubApprise
+    _StubApprise.instances = []
+    monkeypatch.setitem(__import__("sys").modules, "apprise", mod)
+
+
+def test_apprise_fans_out_alongside_webhooks(monkeypatch):
+    _stub_apprise_module(monkeypatch)
+    rt = _runtime(webhooks=["http://hook"], apprise=["mailto://u:p@example.com", "ntfy://topic"])
+    posts = []
+    _capture_client(rt, posts)
+    ok = asyncio.run(rt.notifier.send({"type": "alarm", "title": "Fire", "text": "fire on cam1"}))
+    assert ok == 3 and len(posts) == 1                 # 1 webhook + 2 apprise URLs
+    stub = _StubApprise.instances[-1]
+    assert stub.urls == ["mailto://u:p@example.com", "ntfy://topic"]
+    assert stub.notifies == [{"title": "Fire", "body": "fire on cam1"}]
+
+
+def test_apprise_only_config_enables_notifier(monkeypatch):
+    _stub_apprise_module(monkeypatch)
+    rt = _runtime(webhooks=None, apprise=["ntfy://topic"])
+    assert rt.notifier.enabled is True
+    status = rt.notifier.status()
+    assert status["channels"] == 1 and status["apprise"] == 1 and status["webhooks"] == 0
+
+
+def test_apprise_missing_package_degrades_to_webhooks_only(monkeypatch):
+    # sys.modules[name] = None makes `import apprise` raise ImportError.
+    monkeypatch.setitem(__import__("sys").modules, "apprise", None)
+    rt = _runtime(webhooks=["http://hook"], apprise=["ntfy://topic"])
+    posts = []
+    _capture_client(rt, posts)
+    ok = asyncio.run(rt.notifier.send({"type": "alarm", "title": "Fire", "text": "x"}))
+    assert ok == 1 and len(posts) == 1                 # webhook delivered, apprise no-op
+    assert rt.notifier.enabled is True                 # still enabled: URLs are configured
+
+
+def test_apprise_invalid_url_dropped_at_add_time(monkeypatch):
+    _stub_apprise_module(monkeypatch)
+    rt = _runtime(apprise=["bad://nope", "ntfy://topic"])
+    asyncio.run(rt.notifier.send({"type": "alarm", "title": "T", "text": "b"}))
+    stub = _StubApprise.instances[-1]
+    assert stub.urls == ["ntfy://topic"]               # bad:// rejected by add()
