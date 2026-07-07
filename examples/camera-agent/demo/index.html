@@ -127,6 +127,14 @@
       background:transparent;color:var(--muted);font-size:1.05rem;cursor:pointer;display:flex;align-items:center;justify-content:center;}
     .addbtn:hover{color:var(--accent);border-color:var(--accent);}
     .addbtn.open{background:var(--accent);color:#fff;border-color:var(--accent);}
+    .hwrow{padding:.42rem .5rem;background:var(--panel2);border:1px solid var(--border);
+      border-radius:8px;margin:.3rem 0;font-size:.74rem;}
+    .hwrow .hw-nm{font-weight:600;font-size:.78rem;}
+    .hwrow .hw-min,.hwtips .hw-min{color:var(--muted);}
+    .hwrow .hw-rec{color:var(--accent);}
+    .hwrow .hw-rec.ok{color:var(--muted);}
+    .hwrow .hw-note,.hwtips .hw-note{color:var(--muted);font-size:.68rem;}
+    .hwtips{margin-top:.4rem;font-size:.74rem;}
     .headbtns{display:flex;align-items:center;gap:.4rem;flex:0 0 auto;}
     .restorebtn{background:transparent;border:1px solid var(--border);border-radius:6px;
       color:var(--muted);font-size:.68rem;padding:.18rem .45rem;cursor:pointer;white-space:nowrap;}
@@ -280,6 +288,11 @@
             <button class="ghost primary" id="reportCreate" type="button">Schedule report</button>
           </div>
           <div id="reportList"></div>
+        </div>
+        <div class="card" id="hwCard">
+          <div class="cardhead"><h2>Hardware</h2><button class="addbtn" id="hwToggle" type="button" title="Show the per-skill breakdown" aria-label="Toggle hardware detail">▸</button></div>
+          <div id="hwSummary" class="empty-note">Checking…</div>
+          <div id="hwDetail" hidden></div>
         </div>
       </div>
     </div>
@@ -796,7 +809,7 @@
       try{ const r=await fetch("/skills/"+encodeURIComponent(id)+"/"+action,{method:"POST"});
         const d=await r.json().catch(()=>({}));
         if(!r.ok){ addMsg("Couldn't "+action+" skill: "+(d.hint||d.error||("HTTP "+r.status)),"sys"); return; }
-        _skills=d.skills||_skills; renderSkills();
+        _skills=d.skills||_skills; renderSkills(); loadHardware();
         addMsg((action==="enable"?"Enabled":"Removed")+" a skill — the agent reconfigured its tools.","sys");
       }catch(err){ addMsg("Couldn't "+action+" skill: "+err.message,"sys"); } }
     // One-click undo for an over-pruned agent: clears every runtime toggle
@@ -805,7 +818,7 @@
       try{ const r=await fetch("/skills/restore",{method:"POST"});
         const d=await r.json().catch(()=>({}));
         if(!r.ok){ addMsg("Couldn't restore default skills: "+(d.error||("HTTP "+r.status)),"sys"); return; }
-        _skills=d.skills||_skills; renderSkills();
+        _skills=d.skills||_skills; renderSkills(); loadHardware();
         addMsg(d.restored?("Restored "+d.restored+" default skill"+(d.restored===1?"":"s")+" — the agent reconfigured its tools."):"Skills already at defaults.","sys");
       }catch(err){ addMsg("Couldn't restore default skills: "+err.message,"sys"); } }
     // + / browse / search / restore wiring
@@ -823,6 +836,29 @@
         const body={name:$("alarmName").value.trim()||("Alarm: "+target),target,camera_id:cameraParam()};
         const after=$("alarmAfter").value; if(after) body.after=after; addAlarm(body);
         $("alarmName").value=""; $("alarmTarget").value=""; $("alarmAfter").value=""; f.hidden=true; add.classList.remove("open"); }); })();
+
+    // ── hardware: what the ENABLED skills run on vs. what makes them fast.
+    // Advisory (fallbacks always work); recomputed whenever skills change.
+    async function loadHardware(){
+      const sum=$("hwSummary"), det=$("hwDetail"); if(!sum) return;
+      let hw; try{ hw=await (await fetch("/hardware")).json(); }catch{ sum.textContent="Hardware guidance unavailable."; return; }
+      sum.textContent=hw.summary||"";
+      if(!det) return; det.innerHTML="";
+      for(const r of (hw.rows||[])){
+        const d=document.createElement("div"); d.className="hwrow";
+        d.innerHTML='<div class="hw-nm"></div><div class="hw-min"></div><div class="hw-rec"></div><div class="hw-note"></div>';
+        d.querySelector(".hw-nm").textContent=r.label+(r.adapters&&r.adapters.length?" · "+r.adapters.join(", "):"");
+        d.querySelector(".hw-min").textContent="Runs on: "+(r.min||"—");
+        const rec=d.querySelector(".hw-rec");
+        if(r.recommended){ rec.textContent="Faster with: "+r.recommended; } else { rec.textContent="CPU is fine"; rec.classList.add("ok"); }
+        d.querySelector(".hw-note").textContent=r.note||"";
+        det.appendChild(d); }
+      if(hw.tips&&hw.tips.length){ const t=document.createElement("div"); t.className="hwtips";
+        t.innerHTML="<div class='hw-min'>Tips</div>"+hw.tips.map(()=>'<div class="hw-note"></div>').join("");
+        const nodes=t.querySelectorAll(".hw-note"); hw.tips.forEach((tip,i)=>{nodes[i].textContent="• "+tip;});
+        det.appendChild(t); } }
+    (function(){ const btn=$("hwToggle"), det=$("hwDetail");
+      if(btn&&det) btn.addEventListener("click",()=>{ det.hidden=!det.hidden; btn.textContent=det.hidden?"▸":"▾"; btn.classList.toggle("open",!det.hidden); }); })();
 
     // Watching: + reveals a small watch form (POST /monitors). Only the
     // notify/count kinds — a line-crossing watch needs the operator to place
@@ -874,7 +910,7 @@
       if(qi) qi.addEventListener("keydown",e=>{ if(e.key==="Enter") go(); }); })();
 
     const _ulc=$("useLocalCam"); if(_ulc) _ulc.addEventListener("click", useLocalCamera);
-    loadAgent(); loadCameras(); loadNotify(); loadSkills(); setAvatar("idle");
+    loadAgent(); loadCameras(); loadNotify(); loadSkills(); loadHardware(); setAvatar("idle");
     renderTasks([]); renderMonitors([]); renderAlarms([]); renderReports([]);
     alarmTimer = setInterval(pollAlarms, 2500);   // alarms ring even before Talk
   </script>

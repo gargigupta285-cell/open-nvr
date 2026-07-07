@@ -140,3 +140,16 @@ def test_report_add_form_wired(script: str, html: str) -> None:
     assert re.search(r"every_minutes\s*=\s*every[\s\S]{0,80}reportAt", script), (
         "interval-beats-daily precedence lost in the report form"
     )
+
+
+def test_hardware_panel_wired(script: str, html: str) -> None:
+    # The Hardware card: collapsed summary + expandable per-skill breakdown,
+    # fed by GET /hardware, recomputed whenever the toolset changes (both
+    # the single-skill toggle and restore-defaults paths).
+    for eid in ("hwCard", "hwToggle", "hwSummary", "hwDetail"):
+        assert f'id="{eid}"' in html, f"hardware panel element missing: {eid!r}"
+    assert "function loadHardware" in script, "loadHardware handler missing"
+    assert '"/hardware"' in script, "hardware endpoint call missing"
+    assert script.count("loadHardware();") >= 3, (
+        "hardware panel no longer recomputes on initial load + skill changes"
+    )

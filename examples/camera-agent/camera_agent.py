@@ -486,6 +486,48 @@ def _derive_skill_suggested_apps() -> dict[str, list[str]]:
 _SKILL_SUGGESTED_APPS: dict[str, list[str]] = _derive_skill_suggested_apps()
 
 
+def _derive_skill_hardware() -> dict[str, list[dict[str, Any]]]:
+    """The ``hardware`` blocks of every task backing each skill, from the
+    bundled task registry — ``skill id -> [{task, label, adapters, min,
+    recommended, note}]``, canonical tasks only (aliases share the
+    canonical's block, so listing both would double-count).
+
+    Drives the demo UI's "Hardware" panel: editorial guidance about what
+    the enabled skills run on vs. what makes them fast. ADVISORY ONLY —
+    fallbacks always work; nothing gates on this. Inherited skills
+    (``_SKILL_TASK_INHERITS``) pick up their source's rows. On any error
+    the map is empty — a missing hint never breaks the UI."""
+    try:
+        raw = yaml.safe_load(TASKS_REGISTRY_PATH.read_text()) or []
+        derived: dict[str, list[dict[str, Any]]] = {}
+        for entry in raw:
+            skill = entry.get("agent_skill")
+            hw = entry.get("hardware")
+            if not skill or not isinstance(hw, dict):
+                continue
+            derived.setdefault(skill, []).append({
+                "task": entry["task"],
+                "label": entry.get("label") or entry["task"],
+                "adapters": list(entry.get("suggested_adapters") or []),
+                "min": str(hw.get("min") or ""),
+                "recommended": str(hw.get("recommended") or ""),
+                "note": str(hw.get("note") or ""),
+            })
+        for skill, source in _SKILL_TASK_INHERITS.items():
+            if source in derived:
+                derived[skill] = [dict(r) for r in derived[source]]
+        return derived
+    except Exception:                          # pragma: no cover - defensive
+        logger.warning(
+            "could not derive skill hardware hints from %s",
+            TASKS_REGISTRY_PATH, exc_info=True,
+        )
+        return {}
+
+
+_SKILL_HARDWARE: dict[str, list[dict[str, Any]]] = _derive_skill_hardware()
+
+
 # Phrases Whisper commonly hallucinates from silence / background noise / the
 # end of an utterance. Matched case-insensitively after stripping punctuation,
 # so noise doesn't trigger a turn. (English-only; extend per deployment.)
@@ -2643,6 +2685,69 @@ class CameraAgentRuntime:
         self._configure_tools()
         return True
 
+    def hardware_recommendation(self) -> dict[str, Any]:
+        """What the ENABLED skills run on vs. what makes them fast — the
+        demo UI's "Hardware" panel. Editorial rows from tasks.yml
+        (``_SKILL_HARDWARE``) + one row for the LLM every skill rides,
+        + the live "running on GPU/CPU" line from KAI-C's declared
+        adapter permissions. ADVISORY ONLY: fallbacks always work, so
+        the panel says "would be faster", never "won't work"."""
+        enabled = {s["id"] for s in self.skills_payload()
+                   if s.get("enabled") and not str(s.get("id", "")).startswith("app:")}
+        rows: list[dict[str, Any]] = []
+        seen_tasks: set[str] = set()
+        gpu_labels: list[str] = []
+        for sid, _icon, _name, _example, _req in _SKILL_META:  # stable order
+            if sid not in enabled:
+                continue
+            for row in _SKILL_HARDWARE.get(sid, []):
+                if row["task"] in seen_tasks:  # inherits (watch↔count) share tasks
+                    continue
+                seen_tasks.add(row["task"])
+                rows.append({**row, "skill": sid})
+                if row["recommended"]:
+                    gpu_labels.append(row["label"])
+        # Every skill funnels through the local LLM — measured guidance
+        # from MODELS_AND_LATENCY.md, not task-specific.
+        rows.append({
+            "skill": "*", "task": "llm",
+            "label": f"Language model ({self.cfg.llm_model})",
+            "adapters": ["ollama"],
+            "min": "~4 GB RAM (small models)",
+            "recommended": "GPU / Apple Silicon — ~10-20x faster generation",
+            "note": "Memory-bandwidth-bound on CPU: a smaller model is both "
+                    "lighter AND faster.",
+        })
+        gpu_map = self.kaic_capabilities.gpu_adapters
+        if gpu_map is None:
+            running_on = "unknown"
+        else:
+            running_on = "gpu" if any(gpu_map.values()) else "cpu"
+        if running_on == "gpu":
+            on_gpu = sorted(a for a, g in (gpu_map or {}).items() if g)
+            summary = f"Running on GPU ({', '.join(on_gpu)})."
+        elif running_on == "cpu":
+            summary = "Running on CPU only"
+            summary += (f" — an NVIDIA (CUDA) GPU would speed up "
+                        f"{', '.join(gpu_labels[:3])}." if gpu_labels else ".")
+        else:
+            summary = "Adapter hardware not visible (KAI-C unreachable)"
+            summary += (f" — a CUDA GPU is recommended for "
+                        f"{', '.join(gpu_labels[:3])}." if gpu_labels else ".")
+        return {
+            "running_on": running_on,
+            "gpu_adapters": sorted(a for a, g in (gpu_map or {}).items() if g),
+            "gpu_recommended": bool(gpu_labels),
+            "summary": summary,
+            "rows": rows,
+            "tips": [
+                "Chat mode instead of voice skips Piper TTS — the measured "
+                "CPU hog (~4 cores while speaking).",
+                "On CPU the LLM is memory-bandwidth-bound: a smaller model "
+                "is both lighter and faster.",
+            ],
+        }
+
     def restore_default_skills(self) -> int:
         """Clear every runtime skill toggle — the fresh-boot default is
         "nothing disabled". Returns how many toggles were cleared.
@@ -3532,6 +3637,14 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         if runtime.app_registry is not None:
             await runtime.app_registry.list_apps()   # 60s TTL; never raises
         return {"skills": runtime.skills_payload()}
+
+    @app.get("/hardware")
+    async def _hardware() -> dict[str, Any]:
+        """Hardware guidance for the ENABLED skills (the UI's Hardware
+        panel): editorial rows from tasks.yml + the live GPU/CPU line
+        from KAI-C's declared adapter permissions. Advisory only."""
+        await runtime.kaic_capabilities.refresh()   # 60s TTL; never raises
+        return runtime.hardware_recommendation()
 
     @app.post("/skills/restore")
     async def _skills_restore() -> JSONResponse:

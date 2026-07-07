@@ -163,11 +163,20 @@ class KaicCapabilitiesClient(_ReusableClientMixin):
         self._timeout = timeout_seconds
         self._fetched_at: float | None = None
         self._tasks: set[str] | None = None   # None = unknown / unreachable
+        # adapter name -> declared permissions.gpu (contract §6). Advisory
+        # like the task set (None = unknown); drives the Hardware panel's
+        # "running on GPU / CPU" honesty line.
+        self._gpu: dict[str, bool] | None = None
 
     @property
     def tasks_advertised(self) -> set[str] | None:
         """Last-known union of adapter task strings (``None`` = unknown)."""
         return self._tasks
+
+    @property
+    def gpu_adapters(self) -> dict[str, bool] | None:
+        """Last-known ``adapter name -> permissions.gpu`` (``None`` = unknown)."""
+        return self._gpu
 
     async def refresh(self) -> set[str] | None:
         """Fetch (at most once per TTL) and return the advertised-task set.
@@ -189,17 +198,22 @@ class KaicCapabilitiesClient(_ReusableClientMixin):
             resp.raise_for_status()
             data = resp.json()
             tasks: set[str] = set()
+            gpu: dict[str, bool] = {}
             adapters = data.get("adapters") or {}
-            for cap in adapters.values():
+            for name, cap in adapters.items():
                 for task in (cap or {}).get("tasks_advertised") or []:
                     tasks.add(str(task))
+                perms = (cap or {}).get("permissions") or {}
+                gpu[str(name)] = bool(perms.get("gpu"))
             self._tasks = tasks
+            self._gpu = gpu
         except Exception as exc:
             logger.debug(
                 "KAI-C capabilities fetch failed (%s); skills fall back to "
                 "config-based availability", exc,
             )
             self._tasks = None
+            self._gpu = None
         return self._tasks
 
 
