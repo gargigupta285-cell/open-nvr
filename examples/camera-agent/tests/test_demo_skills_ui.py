@@ -127,3 +127,16 @@ def test_watch_add_form_wired(script: str, html: str) -> None:
     assert '"/monitors"' in script and "cameraParam()" in script, (
         "watch form no longer POSTs /monitors with the camera selection"
     )
+
+
+def test_report_add_form_wired(script: str, html: str) -> None:
+    # The Scheduled-reports panel's + form (POST /reports). One schedule per
+    # report: every-N-minutes wins over the daily time; neither → the
+    # server's 08:00-daily default.
+    for eid in ("reportAdd", "reportForm", "reportName", "reportQuery",
+                "reportAt", "reportEvery", "reportCreate"):
+        assert f'id="{eid}"' in html, f"report form element missing: {eid!r}"
+    assert '"/reports"' in script, "report form no longer POSTs /reports"
+    assert re.search(r"every_minutes\s*=\s*every[\s\S]{0,80}reportAt", script), (
+        "interval-beats-daily precedence lost in the report form"
+    )

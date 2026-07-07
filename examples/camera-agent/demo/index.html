@@ -271,7 +271,14 @@
           <div id="taskList"></div>
         </div>
         <div class="card" id="reportCard">
-          <h2>Scheduled reports</h2>
+          <div class="cardhead"><h2>Scheduled reports</h2><button class="addbtn" id="reportAdd" type="button" title="Schedule a report" aria-label="Schedule a report">+</button></div>
+          <div class="addform" id="reportForm" hidden>
+            <input id="reportName" type="text" placeholder="Name, e.g. Morning summary" autocomplete="off">
+            <input id="reportQuery" type="text" placeholder="e.g. summarise overnight activity on all cameras" autocomplete="off">
+            <label class="addform-lbl">Daily at <input id="reportAt" type="time"></label>
+            <label class="addform-lbl">or every <input id="reportEvery" type="number" min="5" step="5" placeholder="—"> minutes</label>
+            <button class="ghost primary" id="reportCreate" type="button">Schedule report</button>
+          </div>
           <div id="reportList"></div>
         </div>
       </div>
@@ -833,6 +840,26 @@
         }catch(err){ addMsg("Couldn't start the watch: "+err.message,"sys"); } }
       if(go) go.addEventListener("click", start);
       if(ti) ti.addEventListener("keydown",e=>{ if(e.key==="Enter") start(); }); })();
+
+    // Scheduled reports: + reveals a small schedule form (POST /reports).
+    // One schedule per report: an interval ("every N minutes") wins when
+    // given, else a daily time, else the server's 08:00-daily default.
+    (function(){ const add=$("reportAdd"), f=$("reportForm"), go=$("reportCreate"), qi=$("reportQuery");
+      if(add&&f) add.addEventListener("click",()=>{ f.hidden=!f.hidden; add.classList.toggle("open",!f.hidden); if(!f.hidden) qi.focus(); });
+      async function schedule(){ const query=(qi.value||"").trim(); if(!query){ qi.focus(); return; }
+        const body={name:$("reportName").value.trim()||("Report: "+query.slice(0,40)),query};
+        const every=parseInt($("reportEvery").value,10);
+        if(every>0) body.every_minutes=every; else if($("reportAt").value) body.at=$("reportAt").value;
+        try{ const r=await fetch("/reports",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+          const d=await r.json().catch(()=>({}));
+          if(!r.ok){ addMsg("Couldn't schedule the report: "+(d.error||("HTTP "+r.status)),"sys"); return; }
+          addMsg(d.message||("Scheduled: "+body.name),"sys");
+          qi.value=""; $("reportName").value=""; $("reportAt").value=""; $("reportEvery").value="";
+          f.hidden=true; add.classList.remove("open");
+          pollReports(); if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();},POLL_MS);
+        }catch(err){ addMsg("Couldn't schedule the report: "+err.message,"sys"); } }
+      if(go) go.addEventListener("click", schedule);
+      if(qi) qi.addEventListener("keydown",e=>{ if(e.key==="Enter") schedule(); }); })();
 
     // Background tasks: + reveals a query input (POST /tasks).
     (function(){ const add=$("taskAdd"), f=$("taskForm"), run=$("taskRun"), qi=$("taskQuery");
