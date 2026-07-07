@@ -111,3 +111,19 @@ def test_restore_defaults_wired(script: str, html: str) -> None:
     assert re.search(r'skillRestore[\s\S]{0,200}hidden\s*=\s*!_skills\.some', script), (
         "restore button visibility no longer keyed to restorable skills"
     )
+
+
+def test_watch_add_form_wired(script: str, html: str) -> None:
+    # The Watching panel's + form (notify/count watches via POST /monitors).
+    # Crossing is deliberately absent — placing the line is a conversation,
+    # not a text field — so the form must offer exactly the two typed kinds.
+    for eid in ("watchAdd", "watchForm", "watchKind", "watchTarget", "watchStart"):
+        assert f'id="{eid}"' in html, f"watch form element missing: {eid!r}"
+    for kind in ('value="notify"', 'value="count"'):
+        assert kind in html, f"watch kind option missing: {kind}"
+    assert 'value="crossing"' not in html, (
+        "crossing must stay chat-only (needs the agent to place the line)"
+    )
+    assert '"/monitors"' in script and "cameraParam()" in script, (
+        "watch form no longer POSTs /monitors with the camera selection"
+    )

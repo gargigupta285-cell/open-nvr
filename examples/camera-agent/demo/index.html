@@ -141,9 +141,9 @@
     .skill .sk-x{background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:.95rem;flex:0 0 auto;padding:0 .1rem;}
     .skill .sk-x:hover{color:var(--danger);}
     #skillBrowse{margin-top:.5rem;border-top:1px solid var(--border);padding-top:.5rem;}
-    #skillSearch,.addform input{width:100%;background:var(--bg2);color:var(--text);border:1px solid var(--border);
+    #skillSearch,.addform input,.addform select{width:100%;background:var(--bg2);color:var(--text);border:1px solid var(--border);
       border-radius:6px;padding:.4rem .5rem;font-size:.8rem;margin-bottom:.4rem;}
-    #skillSearch:focus,.addform input:focus{outline:none;border-color:var(--accent);}
+    #skillSearch:focus,.addform input:focus,.addform select:focus{outline:none;border-color:var(--accent);}
     .brow{display:flex;align-items:center;gap:.5rem;padding:.4rem .5rem;border-radius:8px;margin:.25rem 0;font-size:0.8rem;background:var(--panel2);}
     .brow .b-ic{width:18px;text-align:center;flex:0 0 auto;}
     .brow .b-nm{flex:1;min-width:0;}.brow .b-nm small{display:block;color:var(--muted);font-size:.66rem;}
@@ -250,7 +250,16 @@
           <div id="alarmList"></div>
         </div>
         <div class="card" id="watchCard">
-          <h2>Watching</h2>
+          <div class="cardhead"><h2>Watching</h2><button class="addbtn" id="watchAdd" type="button" title="Add a watch" aria-label="Add a watch">+</button></div>
+          <div class="addform" id="watchForm" hidden>
+            <select id="watchKind" aria-label="Watch kind">
+              <option value="notify">Notify when seen</option>
+              <option value="count">Keep a live count</option>
+            </select>
+            <input id="watchTarget" type="text" placeholder="Watch for, e.g. person / car / package" autocomplete="off">
+            <button class="ghost primary" id="watchStart" type="button">Start watching</button>
+            <div class="empty-note">For line-crossing counts, ask in chat — the agent will ask you where to place the line.</div>
+          </div>
           <div id="monitorList"></div>
         </div>
         <div class="card" id="taskCard">
@@ -807,6 +816,23 @@
         const body={name:$("alarmName").value.trim()||("Alarm: "+target),target,camera_id:cameraParam()};
         const after=$("alarmAfter").value; if(after) body.after=after; addAlarm(body);
         $("alarmName").value=""; $("alarmTarget").value=""; $("alarmAfter").value=""; f.hidden=true; add.classList.remove("open"); }); })();
+
+    // Watching: + reveals a small watch form (POST /monitors). Only the
+    // notify/count kinds — a line-crossing watch needs the operator to place
+    // the line, which is a conversation (the agent asks), not a text field.
+    (function(){ const add=$("watchAdd"), f=$("watchForm"), go=$("watchStart"), ti=$("watchTarget");
+      if(add&&f) add.addEventListener("click",()=>{ f.hidden=!f.hidden; add.classList.toggle("open",!f.hidden); if(!f.hidden) ti.focus(); });
+      async function start(){ const target=(ti.value||"").trim(); if(!target){ ti.focus(); return; }
+        const body={kind:$("watchKind").value,target,camera_id:cameraParam()};
+        try{ const r=await fetch("/monitors",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+          const d=await r.json().catch(()=>({}));
+          if(!r.ok){ addMsg("Couldn't start the watch: "+(d.error||("HTTP "+r.status)),"sys"); return; }
+          addMsg(d.message||("Watching for "+target+"."),"sys");
+          ti.value=""; f.hidden=true; add.classList.remove("open");
+          pollMonitors(); if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();},POLL_MS);
+        }catch(err){ addMsg("Couldn't start the watch: "+err.message,"sys"); } }
+      if(go) go.addEventListener("click", start);
+      if(ti) ti.addEventListener("keydown",e=>{ if(e.key==="Enter") start(); }); })();
 
     // Background tasks: + reveals a query input (POST /tasks).
     (function(){ const add=$("taskAdd"), f=$("taskForm"), run=$("taskRun"), qi=$("taskQuery");
