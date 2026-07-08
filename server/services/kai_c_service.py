@@ -914,6 +914,23 @@ class KaiCService:
             main_logger.error(f"Failed to fetch schema from KAI-C: {e}")
             raise
 
+    async def get_fleet_metrics(self) -> dict[str, Any]:
+        """Every adapter's metrics rollup in ONE call (KAI-C's
+        /api/v1/adapters-metrics) — feeds the AI Adapters page's fleet
+        strip without a per-adapter fan-out. Same auth/error contract
+        as get_adapter_metrics."""
+        headers = {"Accept": "application/json"}
+        internal_key = self._internal_api_key()
+        if internal_key:
+            headers["X-Internal-Api-Key"] = internal_key
+        response = await self.http_client.get(
+            f"{self.kai_c_url}/api/v1/adapters-metrics",
+            timeout=10.0,
+            headers=headers,
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def get_adapter_metrics(self, adapter_name: str) -> dict[str, Any]:
         """
         Fetch the windowed metrics rollup for one adapter from KAI-C's
