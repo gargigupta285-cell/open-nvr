@@ -292,6 +292,19 @@ def test_webrtc_live_player_wired(script: str, html: str) -> None:
     assert script.count("stopWebrtc()") >= 4
 
 
+def test_rail_pollers_gate_on_auth(script: str) -> None:
+    # With auth on, the rail must not spam 401s behind the login overlay:
+    # every gated poller short-circuits until a token is held.
+    assert "function authReady()" in script, "authReady gate missing"
+    assert '_authMode!=="opennvr"||!!_token' in script.replace(" ", ""), (
+        "authReady must pass when auth is off OR a token is held"
+    )
+    for fn in ("pollAlarms", "pollTasks", "pollMonitors", "pollReports",
+               "loadEvents", "refreshCamStrip"):
+        body = script.split(f"function {fn}(", 1)[1][:120]
+        assert "authReady()" in body, f"{fn} is not gated on authReady"
+
+
 def test_login_error_shows_message_not_object(script: str) -> None:
     # OpenNVR nests the error as {detail:{error,message,...}}; rendering
     # d.detail directly printed "[object Object]". errText pulls the message.
