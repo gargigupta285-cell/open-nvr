@@ -32,6 +32,7 @@ import argparse
 import asyncio
 import base64
 import binascii
+import contextlib
 import difflib
 import json
 import logging
@@ -1017,6 +1018,7 @@ class MonitorManager:
             notify=self._hosted_notify,
             dedup=lambda dets: runtime.tools._dedup_detections(dets),
             stop_check=lambda: runtime._stop_event.is_set(),
+            busy_check=lambda: runtime.interactive_busy(),
             default_interval_s=default_interval,
         )
 
@@ -1108,13 +1110,27 @@ class MonitorManager:
                 for m in self._monitors.values() if m.active]
 
     def restore(self, specs: list[dict[str, Any]]) -> None:
+        # Collapse semantically-identical watches from the persisted state:
+        # each one is a live detection loop, and testing tends to pile up
+        # duplicates (same kind+target+cameras). Re-arm one per distinct rule.
+        seen: set[tuple] = set()
+        skipped = 0
         for s in specs or []:
+            key = (str(s.get("kind")), str(s.get("target")),
+                   frozenset(s.get("camera_ids") or []),
+                   tuple(s.get("line") or ()))
+            if key in seen:
+                skipped += 1
+                continue
+            seen.add(key)
             try:
                 self.create(kind=s["kind"], camera_ids=s["camera_ids"],
                             target=s["target"], interval_s=s.get("interval_s"),
                             line=s.get("line"))
             except Exception:  # pragma: no cover
                 logger.exception("monitor restore failed for %r", s)
+        if skipped:
+            logger.info("monitor restore: dropped %d duplicate watch(es)", skipped)
 
     def list(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -1182,10 +1198,12 @@ class MonitorManager:
     async def _loop(self, mon: Monitor) -> None:
         try:
             while mon.active and not self._runtime._stop_event.is_set():
-                for cam in mon.camera_ids:
-                    if not mon.active:
-                        break
-                    await self._poll(mon, cam)
+                # Yield to an in-flight interactive turn; catch up next cycle.
+                if not self._runtime.interactive_busy():
+                    for cam in mon.camera_ids:
+                        if not mon.active:
+                            break
+                        await self._poll(mon, cam)
                 await asyncio.sleep(mon.interval_s)
         except asyncio.CancelledError:  # pragma: no cover
             pass
@@ -1440,7 +1458,18 @@ class AlarmManager:
                 for a in self._alarms.values() if a.active]
 
     def restore(self, specs: list[dict[str, Any]], *, contact_for=None) -> None:
+        # Collapse duplicate alarms (same name+target+cameras+window): each is
+        # a 5-second detection loop, and a testing session accumulates them.
+        seen: set[tuple] = set()
+        skipped = 0
         for s in specs or []:
+            key = (str(s.get("name") or "").strip().lower(), str(s.get("target")),
+                   frozenset(s.get("camera_ids") or []),
+                   s.get("after_min"), s.get("before_min"))
+            if key in seen:
+                skipped += 1
+                continue
+            seen.add(key)
             try:
                 self.create(name=s["name"], target=s["target"], camera_ids=s["camera_ids"],
                             after_min=s.get("after_min"), before_min=s.get("before_min"),
@@ -1448,6 +1477,8 @@ class AlarmManager:
                             emergency_contact=(contact_for(s["name"], s["target"]) if contact_for else None))
             except Exception:  # pragma: no cover
                 logger.exception("alarm restore failed for %r", s)
+        if skipped:
+            logger.info("alarm restore: dropped %d duplicate alarm(s)", skipped)
 
     def list(self) -> list[dict[str, Any]]:
         return [self._alarms[i].to_dict() for i in self._order if i in self._alarms]
@@ -1472,7 +1503,10 @@ class AlarmManager:
     async def _loop(self, alarm: Alarm) -> None:
         try:
             while alarm.active and not self._runtime._stop_event.is_set():
-                if self._in_window(alarm):
+                # Yield to an in-flight interactive turn — a skipped cycle is
+                # caught on the next one (self._interval later). Stand-down and
+                # window logic still run so timing stays correct.
+                if self._in_window(alarm) and not self._runtime.interactive_busy():
                     for cam in alarm.camera_ids:
                         if not alarm.active:
                             break
@@ -1861,12 +1895,24 @@ class ReportScheduler:
                 for s in self._schedules.values() if s.active]
 
     def restore(self, specs: list[dict[str, Any]]) -> None:
+        # Collapse duplicate schedules so a pile-up doesn't fan out repeated
+        # (and identically-timed) report runs.
+        seen: set[tuple] = set()
+        skipped = 0
         for s in specs or []:
+            key = (str(s.get("name") or "").strip().lower(), str(s.get("query")),
+                   s.get("at_min"), s.get("every_minutes"))
+            if key in seen:
+                skipped += 1
+                continue
+            seen.add(key)
             try:
                 self.create(name=s["name"], query=s["query"],
                             at_min=s.get("at_min"), every_minutes=s.get("every_minutes"))
             except Exception:  # pragma: no cover
                 logger.exception("report restore failed for %r", s)
+        if skipped:
+            logger.info("report restore: dropped %d duplicate schedule(s)", skipped)
 
     def reports(self) -> list[dict[str, Any]]:
         return list(self._reports[-20:])
@@ -2606,6 +2652,12 @@ class CameraAgentRuntime:
         self.alarms = AlarmManager(self)
         self.reports = ReportScheduler(self)
         self._stop_event = asyncio.Event()
+        # >0 while an interactive voice/chat turn is being served. STT, the
+        # LLM, TTS, and the vision adapter all share one machine on a typical
+        # single-box install, so background detection loops (alarms/monitors)
+        # yield their per-cycle inference while the user is mid-turn — the
+        # thing they're waiting on stays snappy. See interactive_turn().
+        self._interactive_turns = 0
         self._subscriber_task: asyncio.Task | None = None
         self._app_alert_subscriber_task: asyncio.Task | None = None
         self._camera_reconcile_task: asyncio.Task | None = None
@@ -3148,9 +3200,22 @@ class CameraAgentRuntime:
         for sid in (data.get("disabled_skills") or []):
             if self.set_skill_enabled(sid, False):
                 restored_disabled.append(sid)
-        logger.info("restored %d watches, %d alarms, %d reports, %d disabled skills from %s",
-                    len(data.get("monitors") or []), len(data.get("alarms") or []),
-                    len(data.get("reports") or []), len(restored_disabled), self.cfg.state_path)
+        # Count what was actually armed (post-dedup), not the raw persisted
+        # rows — and rewrite the state file so the collapsed set is durable
+        # (the pile-up doesn't come back on the next restart).
+        n_mon, n_alarm, n_report = (
+            len(data.get("monitors") or []), len(data.get("alarms") or []),
+            len(data.get("reports") or []))
+        armed_mon, armed_alarm, armed_report = (
+            len(self.monitors.export()), len(self.alarms.export()),
+            len(self.reports.export()))
+        if (armed_mon, armed_alarm, armed_report) != (n_mon, n_alarm, n_report):
+            self.persist()
+        logger.info(
+            "restored %d watches, %d alarms, %d reports (from %d/%d/%d persisted), "
+            "%d disabled skills from %s",
+            armed_mon, armed_alarm, armed_report, n_mon, n_alarm, n_report,
+            len(restored_disabled), self.cfg.state_path)
 
     async def _handle_create_monitor(self, args: dict[str, Any]) -> str:
         kind = str(args.get("kind") or "").strip().lower()
@@ -3432,6 +3497,21 @@ class CameraAgentRuntime:
             self.cfg.cameras.append(spec)
             added.append(spec)
         return added
+
+    def interactive_busy(self) -> bool:
+        """True while a voice/chat turn is being served. Background detection
+        loops check this and skip their (expensive) frame-fetch + inference for
+        that cycle, freeing the shared local models for the user's turn."""
+        return self._interactive_turns > 0
+
+    @contextlib.contextmanager
+    def interactive_turn(self):
+        """Mark an interactive turn in flight for its duration."""
+        self._interactive_turns += 1
+        try:
+            yield
+        finally:
+            self._interactive_turns = max(0, self._interactive_turns - 1)
 
     async def _reconcile_opennvr_cameras(self) -> None:
         """Keep the agent's camera list in sync with OpenNVR without a restart.
@@ -3918,6 +3998,22 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 status_code=403)
         request.state.agent_user = user
         request.state.agent_tier = tier
+        return await call_next(request)
+
+    # ── Interactive priority ───────────────────────────────────────
+    # Bracket a discrete voice/chat turn so background detection loops
+    # (alarms/monitors) yield the shared local models (STT/LLM/TTS/vision
+    # all run on one box) for its duration — the user's turn stays snappy.
+    # Streaming /ws is intentionally excluded: it's a long-lived session,
+    # not a turn, so pausing background work for its whole lifetime would
+    # be wrong.
+    _INTERACTIVE_PATHS = {"/converse", "/ask", "/say"}
+
+    @app.middleware("http")
+    async def _interactive_priority(request: Request, call_next):
+        if request.url.path in _INTERACTIVE_PATHS:
+            with runtime.interactive_turn():
+                return await call_next(request)
         return await call_next(request)
 
     @app.post("/auth/login")
