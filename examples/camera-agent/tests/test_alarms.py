@@ -255,3 +255,53 @@ def test_ring_defaults_are_site_configurable():
         assert rings == {"S": "siren", "C": "chime"}
 
     asyncio.run(go())
+
+
+def test_ui_ring_overrides_layer_and_persist(tmp_path):
+    """The UI-edited overrides beat config, which beats built-ins; junk
+    is dropped; the layer survives a restart via the state file."""
+    from camera_agent import AppConfig, CameraAgentRuntime
+    from context import CameraSpec
+
+    state = tmp_path / "s.json"
+    cfg = AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+                    state_path=str(state),
+                    alarm_ring_defaults={"person": "chime"},
+                    cameras=[CameraSpec(camera_id="cam1", frame_url="http://x/1.jpg", role="r")])
+    rt = CameraAgentRuntime(cfg)
+    merged = rt.set_ring_overrides({"person": "siren", "snake": "siren",
+                                    "junk": "loudest", "": "siren"})
+    assert merged["person"] == "siren"           # override beats config
+    assert merged["snake"] == "siren"
+    assert merged["fire"] == "siren"             # built-in survives
+    assert "junk" not in merged and "" not in merged
+
+    rt2 = CameraAgentRuntime(cfg)
+    rt2.load_state()
+    assert rt2.ring_defaults()["person"] == "siren"
+    assert rt2.ring_defaults()["snake"] == "siren"
+
+
+def test_alarm_defaults_endpoints_and_admin_gate():
+    from fastapi.testclient import TestClient
+
+    from camera_agent import build_app
+    from tests.test_auth_gate import USERS, _FakeAuth  # reuse the tier fakes
+    from camera_agent import AppConfig, CameraAgentRuntime
+    from context import CameraSpec
+
+    cfg = AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+                    auth_mode="opennvr", opennvr_api_url="http://srv",
+                    cameras=[CameraSpec(camera_id="cam1", frame_url="http://x/1.jpg", role="r")])
+    rt = CameraAgentRuntime(cfg)
+    rt.auth = _FakeAuth()
+    c = TestClient(build_app(rt))
+    h = lambda t: {"Authorization": f"Bearer {t}"}
+
+    assert c.get("/alarm-defaults", headers=h("tok-viewer")).status_code == 200
+    put = {"overrides": {"snake": "siren"}}
+    assert c.put("/alarm-defaults", json=put, headers=h("tok-op")).status_code == 403
+    ok = c.put("/alarm-defaults", json=put, headers=h("tok-admin"))
+    assert ok.status_code == 200 and ok.json()["defaults"]["snake"] == "siren"
+    assert c.put("/alarm-defaults", json={"overrides": "nope"},
+                 headers=h("tok-admin")).status_code == 400

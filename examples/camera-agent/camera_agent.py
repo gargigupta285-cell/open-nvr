@@ -797,12 +797,12 @@ def greeting_for(name: str | None = None) -> str:
     # No persona name by design — the agent introduces itself by the product
     # name, "the OpenNVR Agent" (formerly "Camera Agent"), described as your
     # camera agent. (``name`` is accepted for call-site compat.)
+    # Short by design: this is SPOKEN (Piper) before the first
+    # interaction — every extra word delays the user's first question.
     return (
-        "Hi, I'm the OpenNVR Agent — your camera agent. I keep an eye on all your "
-        "cameras and run the checks you ask for. I can tell you what's "
-        "happening right now, look back at what happened earlier, set up "
-        "alarms and watches, and take on longer searches in the background "
-        "while we keep talking. Ask me anything about your cameras."
+        "Hi, I'm the OpenNVR Agent — your camera agent. "
+        "Ask me anything about your cameras; I can also set alarms, "
+        "watches, and reports."
     )
 
 
@@ -2552,6 +2552,10 @@ class CameraAgentRuntime:
         # minus any skills switched off at runtime. disabled_skills starts empty.
         self._camera_ids = [cam.camera_id for cam in cfg.cameras]
         self.disabled_skills: set[str] = set()
+        # UI-edited target→annunciation overrides (admin action) — the
+        # LAST layer over config + built-ins in ring_defaults(); durable
+        # via persist()/load_state like the skill toggles.
+        self._ring_overrides: dict[str, str] = {}
         self._configure_tools()
         self.tool_handlers = {
             "describe_camera": self.tools.describe_camera,
@@ -2647,10 +2651,24 @@ class CameraAgentRuntime:
         site's config (a farm's snake, a bank's person). Values are
         sanitized to the four known levels."""
         merged = dict(self._RING_BUILTIN_DEFAULTS)
-        for k, v in (self.cfg.alarm_ring_defaults or {}).items():
-            if v in ("siren", "pulse", "chime", "silent"):
-                merged[k] = v
+        for layer in (self.cfg.alarm_ring_defaults or {}), self._ring_overrides:
+            for k, v in layer.items():
+                if v in ("siren", "pulse", "chime", "silent"):
+                    merged[k] = v
         return merged
+
+    def set_ring_overrides(self, overrides: dict[str, str]) -> dict[str, str]:
+        """Replace the UI-edited overrides (sanitized), persist, return
+        the merged map. Junk levels and blank targets are dropped."""
+        clean = {}
+        for k, v in (overrides or {}).items():
+            k = str(k).strip().lower()
+            v = str(v).strip().lower()
+            if k and v in ("siren", "pulse", "chime", "silent"):
+                clean[k] = v
+        self._ring_overrides = clean
+        self.persist()
+        return self.ring_defaults()
 
     def events_feed(self, limit: int = 50) -> list[dict[str, Any]]:
         """ONE feed of what happened — alarm rings, watch hits, and app
@@ -3076,6 +3094,7 @@ class CameraAgentRuntime:
             # too — without this a skill switched off at runtime silently
             # comes back on the next restart (its tools re-advertised).
             "disabled_skills": sorted(self.disabled_skills),
+            "ring_overrides": dict(self._ring_overrides),
         }
         try:
             d = os.path.dirname(self.cfg.state_path) or "."
@@ -3107,6 +3126,11 @@ class CameraAgentRuntime:
         # advertised toolset reflects them (a disabled skill's tools stay
         # unadvertised). Ignore unknown ids so a stale state file can't
         # break boot.
+        ro = data.get("ring_overrides")
+        if isinstance(ro, dict):
+            self._ring_overrides = {
+                str(k).lower(): str(v).lower() for k, v in ro.items()
+                if str(v).lower() in ("siren", "pulse", "chime", "silent")}
         restored_disabled: list[str] = []
         for sid in (data.get("disabled_skills") or []):
             if self.set_skill_enabled(sid, False):
@@ -3773,6 +3797,8 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         if method == "POST" and (path.startswith("/skills/")
                                  or path == "/notify/test"):
             return "admin"          # governance surface
+        if method == "PUT" and path == "/alarm-defaults":
+            return "admin"          # site policy, same shelf as skills
         if method in ("POST", "DELETE") and (
             path.startswith(("/monitors", "/alarms", "/tasks", "/reports"))
             or path in ("/devices/use", "/reset")
@@ -3933,6 +3959,31 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 {"error": "no recordings for this camera yet", "recordings": []},
                 status_code=200), None
         return None, (token, path)
+
+    @app.get("/alarm-defaults")
+    async def _alarm_defaults() -> dict[str, Any]:
+        """The merged target→level map + which entries are UI overrides
+        (the editor edits ONLY the overrides; config/built-ins show as
+        inherited)."""
+        return {"defaults": runtime.ring_defaults(),
+                "overrides": dict(runtime._ring_overrides)}
+
+    @app.put("/alarm-defaults")
+    async def _put_alarm_defaults(request: Request) -> JSONResponse:
+        """Replace the UI-edited overrides (ADMIN: this is site policy,
+        same governance shelf as skill toggles)."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        overrides = (body or {}).get("overrides")
+        if not isinstance(overrides, dict):
+            return JSONResponse({"error": "overrides must be a mapping of "
+                                          "target -> siren|pulse|chime|silent"},
+                                status_code=400)
+        merged = runtime.set_ring_overrides(overrides)
+        return JSONResponse({"defaults": merged,
+                             "overrides": dict(runtime._ring_overrides)})
 
     @app.get("/events")
     async def _events() -> dict[str, Any]:

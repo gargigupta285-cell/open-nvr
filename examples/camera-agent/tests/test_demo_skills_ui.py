@@ -261,3 +261,17 @@ def test_alarm_ring_levels_wired(script: str, html: str) -> None:
     assert "flashChime" in script and 'playChime("bell")' in script
     assert ".alarmbar.chime" in html, "chime banner style missing"
     assert 'data-ring="siren"' in html, "presets lost their siren grade"
+
+
+def test_ring_defaults_editor_wired(script: str, html: str) -> None:
+    # ⚙ in the Alarms header opens the site alert-defaults editor:
+    # override rows (target + level), inherited entries shown read-only,
+    # save PUTs /alarm-defaults and refreshes the live preselect map.
+    for eid in ("ringCfg", "ringCfgForm", "ringRows", "ringAddRow",
+                "ringSave", "ringInherited"):
+        assert f'id="{eid}"' in html, f"ring editor element missing: {eid!r}"
+    assert '"/alarm-defaults"' in script
+    assert re.search(r'method:"PUT"[\s\S]{0,120}overrides', script)
+    assert "window._ringDefaults=d.defaults" in script.replace(" ", ""), (
+        "saving must refresh the live preselect map"
+    )

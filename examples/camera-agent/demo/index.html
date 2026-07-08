@@ -253,6 +253,9 @@
     .evt .ev-body{flex:1;min-width:0;}
     .evt .ev-title{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
     .evt .ev-sub{display:block;color:var(--muted);font-size:.66rem;}
+    .ringrow{display:flex;gap:.35rem;align-items:center;margin-bottom:.35rem;}
+    .ringrow input{flex:1;margin-bottom:0;}
+    .ringrow select{flex:1;margin-bottom:0;}
     .ev-scope{font-size:.66rem;color:var(--muted);}
     .ev-scope a{color:var(--accent);text-decoration:none;}
     .hwrow{padding:.42rem .5rem;background:var(--panel2);border:1px solid var(--border);
@@ -440,7 +443,14 @@
           </div>
         </div>
         <div class="card" id="alarmCard">
-          <div class="cardhead"><h2>Alarms</h2><button class="addbtn" id="alarmAdd" type="button" title="Add an alarm" aria-label="Add an alarm">+</button></div>
+          <div class="cardhead"><h2>Alarms</h2><span class="headbtns"><button class="addbtn" id="ringCfg" type="button" title="Alert-level defaults for this site" aria-label="Alert-level defaults">⚙</button><button class="addbtn" id="alarmAdd" type="button" title="Add an alarm" aria-label="Add an alarm">+</button></span></div>
+          <div class="addform" id="ringCfgForm" hidden>
+            <div class="rec-lbl">Default alert level by target</div>
+            <div class="empty-note" id="ringInherited"></div>
+            <div id="ringRows"></div>
+            <button class="ghost" id="ringAddRow" type="button">+ add target</button>
+            <button class="ghost primary" id="ringSave" type="button">Save defaults</button>
+          </div>
           <div class="presets">
             <button class="ghost preset" data-name="Fire" data-target="fire" data-ring="siren" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 2c1 3 4 4 4 8a4 4 0 0 1-8 0c0-2 1-3 2-4 0 2 2 2 2 0 0-2-2-2-2-4z"/></svg> Fire</button>
             <button class="ghost preset" data-name="After-hours person" data-target="person" data-after="18:00" data-ring="siren" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A8 8 0 1 1 11.2 3 6 6 0 0 0 21 12.8z"/></svg> After-hours</button>
@@ -1534,6 +1544,44 @@
       if(close) close.addEventListener("click",()=>{ br.hidden=true; add.classList.remove("open"); });
       if(search) search.addEventListener("input", renderBrowse);
       if(restore) restore.addEventListener("click", restoreSkills); })();
+
+    // ── Site alert-level defaults editor (admin): edits the OVERRIDE
+    // layer; config/built-in entries show as inherited. Saving updates
+    // the form preselects live (window._ringDefaults).
+    const RING_LEVELS=[["chime","🔔 Notice"],["pulse","⚠️ Urgent"],["siren","🚨 Critical"],["silent","🤫 Silent"]];
+    function _ringRow(target,level){ const d=document.createElement("div"); d.className="ringrow";
+      const t=document.createElement("input"); t.type="text"; t.placeholder="target, e.g. snake"; t.value=target||"";
+      const sel=document.createElement("select");
+      for(const [v,lbl] of RING_LEVELS){ const o=document.createElement("option"); o.value=v; o.textContent=lbl; sel.appendChild(o); }
+      sel.value=level||"chime";
+      const x=document.createElement("button"); x.type="button"; x.className="sk-x"; x.textContent="✕";
+      x.title="Remove"; x.addEventListener("click",()=>d.remove());
+      d.appendChild(t); d.appendChild(sel); d.appendChild(x); return d; }
+    async function openRingCfg(){
+      const f=$("ringCfgForm"); if(!f.hidden){ f.hidden=true; return; }
+      let d=null; try{ d=await (await fetch("/alarm-defaults")).json(); }catch{}
+      if(!d){ addMsg("Couldn't load alert defaults.","sys"); return; }
+      const rows=$("ringRows"); rows.innerHTML="";
+      for(const [k,v] of Object.entries(d.overrides||{})) rows.appendChild(_ringRow(k,v));
+      const inherited=Object.entries(d.defaults||{}).filter(([k])=>!(k in (d.overrides||{})));
+      $("ringInherited").textContent=inherited.length?
+        ("Inherited: "+inherited.map(([k,v])=>k+" → "+v).join(", ")):"";
+      f.hidden=false; }
+    (function(){ const g=$("ringCfg"); if(g) g.addEventListener("click",openRingCfg);
+      const add=$("ringAddRow"); if(add) add.addEventListener("click",()=>{ $("ringRows").appendChild(_ringRow("","chime")); });
+      const save=$("ringSave"); if(save) save.addEventListener("click",async()=>{
+        const overrides={};
+        for(const row of document.querySelectorAll("#ringRows .ringrow")){
+          const t=row.querySelector("input").value.trim().toLowerCase();
+          if(t) overrides[t]=row.querySelector("select").value; }
+        try{ const r=await fetch("/alarm-defaults",{method:"PUT",
+            headers:{"Content-Type":"application/json"},body:JSON.stringify({overrides})});
+          const d=await r.json().catch(()=>({}));
+          if(!r.ok){ addMsg("Couldn't save alert defaults: "+(d.error||("HTTP "+r.status)),"sys"); return; }
+          window._ringDefaults=d.defaults||{};
+          addMsg("Alert-level defaults saved — new alarms will follow them.","sys");
+          $("ringCfgForm").hidden=true;
+        }catch(err){ addMsg("Couldn't save alert defaults: "+err.message,"sys"); } }); })();
 
     // The SITE decides its defaults (config alarm_ring_defaults — a farm
     // maps snake→siren, a bank maps person→siren): an untouched select
