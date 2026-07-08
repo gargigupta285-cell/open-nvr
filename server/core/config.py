@@ -290,6 +290,17 @@ class Settings(BaseSettings):
     # posture" — the trust-boundary rationale.
     inference_use_mediamtx_tap: bool = True
 
+    # When on, provision a low-res SUBSTREAM MediaMTX path alongside each
+    # camera's main path and hand THAT to the camera-agent's live view. The
+    # agent decodes a 640x360-ish feed instead of full 1080p, so a live
+    # WebRTC view costs a fraction of the CPU on a single-box install (the
+    # STT/LLM/TTS share that CPU). Off by default: the substream URL is
+    # derived from vendor conventions (Hikvision .../101->/102, Dahua
+    # subtype=0->1) and not every camera exposes one, so opting in is a
+    # deployment choice. The sub path is source-on-demand — it only pulls
+    # from the camera while the agent is actually watching.
+    agent_live_use_substream: bool = False
+
     # MediaMTX webhook settings
     mediamtx_webhook_token: str | None = None  # Token for webhook verification (legacy)
 

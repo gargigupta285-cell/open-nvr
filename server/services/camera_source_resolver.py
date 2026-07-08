@@ -60,6 +60,30 @@ _FALLBACK_PATHS = (
 )
 
 
+def derive_substream_url(main_url: str | None) -> str | None:
+    """Derive a camera's low-res SUBSTREAM RTSP URL from its main-stream URL
+    using vendor path conventions. Returns None when the URL doesn't match a
+    known convention — callers must fall back to the main stream rather than
+    guess (a wrong sub URL just fails to pull and the agent shows stills).
+
+    Conventions covered (the bulk of the SMB market):
+    * Hikvision / Uniview: ``/Streaming/Channels/N01`` (main) -> ``/N02`` (sub).
+    * Dahua / CP Plus: ``subtype=0`` (main) -> ``subtype=1`` (sub).
+    """
+    if not main_url:
+        return None
+    # Dahua / CP Plus — flip the subtype query flag.
+    if "subtype=0" in main_url:
+        return main_url.replace("subtype=0", "subtype=1")
+    # Hikvision / Uniview — /Streaming/Channels/<channel><stream>, stream 01 =
+    # main, 02 = sub (e.g. 101 -> 102, 201 -> 202, 1001 -> 1002).
+    m = re.search(r"(/Streaming/Channels/)(\d+)01(?=$|[/?&])", main_url)
+    if m:
+        return (main_url[: m.start()] + m.group(1) + m.group(2)
+                + "02" + main_url[m.end():])
+    return None
+
+
 def inject_credentials(url: str | None, username: str | None, password: str | None) -> str | None:
     """Embed ``user:pass@`` into an rtsp(s) URL's authority (no-op if the URL
     already has userinfo, isn't rtsp, or no username is given)."""

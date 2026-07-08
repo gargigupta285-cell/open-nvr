@@ -132,6 +132,31 @@ def test_live_proxy_returns_whep_with_jwt():
     assert "USERTOK" in rt.recordings.tokens_seen   # caller's token, never the service key
 
 
+def test_live_proxy_prefers_substream_when_offered():
+    # When the server offers a low-res substream WHEP, the agent's live view
+    # uses it (less decode CPU); the full-res main is the fallback.
+    rt, c = _client()
+
+    async def stream_info(token, oid):
+        return 200, {"urls": {"webrtc": "http://mtx:8889/cam-7/whep",
+                              "webrtc_sub": "http://mtx:8889/cam-7-sub/whep"},
+                     "token": "MMTX", "stream_name": "cam-7"}
+
+    rt.recordings.stream_info = stream_info
+    body = c.get("/streams/cam1/live",
+                 headers={"Authorization": "Bearer T"}).json()
+    assert body["whep_url"] == "http://mtx:8889/cam-7-sub/whep?jwt=MMTX"
+
+    async def stream_info_main_only(token, oid):
+        return 200, {"urls": {"webrtc": "http://mtx:8889/cam-7/whep"},
+                     "token": "MMTX", "stream_name": "cam-7"}
+
+    rt.recordings.stream_info = stream_info_main_only
+    body = c.get("/streams/cam1/live",
+                 headers={"Authorization": "Bearer T"}).json()
+    assert body["whep_url"] == "http://mtx:8889/cam-7/whep?jwt=MMTX"   # fallback
+
+
 def test_live_proxy_states():
     rt, c = _client()
     # unlinked camera → labelled 404 (page falls back to stills)

@@ -4236,7 +4236,12 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             token, cam.opennvr_camera_id)
         if status != 200:
             return JSONResponse(data, status_code=status)
-        whep = ((data.get("urls") or {}).get("webrtc") or "")
+        # Prefer the low-res substream when the server offers it: the agent's
+        # live view decodes a smaller frame, so a WebRTC stream costs far less
+        # CPU on a single-box install (where it shares the machine with the
+        # STT/LLM/TTS). Falls back to the full-res main stream when absent.
+        _urls = data.get("urls") or {}
+        whep = (_urls.get("webrtc_sub") or _urls.get("webrtc") or "")
         mmtx_token = data.get("token") or ""
         if not whep:
             return JSONResponse({"error": "server returned no WebRTC URL"},
