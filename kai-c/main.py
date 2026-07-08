@@ -407,11 +407,19 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Add CORS middleware
+# CORS. KAI-C is an internal, server-to-server service: the OpenNVR backend
+# reaches it over loopback with X-Internal-Api-Key, and no browser calls it
+# directly (it has no host port and no nginx route). So cross-origin browser
+# access is CLOSED by default instead of the previous "*" + credentials (which
+# is spec-invalid anyway). Set KAI_C_CORS_ORIGINS=https://a,https://b to allow
+# specific origins if a browser ever needs direct access.
+_cors_origins = [
+    o.strip() for o in os.getenv("KAI_C_CORS_ORIGINS", "").split(",") if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=bool(_cors_origins),
     allow_methods=["*"],
     allow_headers=["*"],
 )
