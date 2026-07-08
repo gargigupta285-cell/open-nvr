@@ -472,6 +472,13 @@ class OllamaClient(_ReusableClientMixin):
         # spends its token budget on the ANSWER, not a hidden <think> block
         # (which otherwise leaves message.content empty → "Sorry…").
         think: bool | None = None,
+        # How long Ollama keeps the model resident after a request. -1 =
+        # forever (default) so the model never unloads between turns and no
+        # turn pays a cold reload + full re-prefill. Sent on EVERY request so
+        # residency holds no matter how the Ollama server was launched (a
+        # host-run `ollama serve` without OLLAMA_KEEP_ALIVE in its env still
+        # stays warm). On a very RAM-tight box, set a duration like "5m".
+        keep_alive: str | float = -1,
     ) -> None:
         # Talk to Ollama's NATIVE chat API. The deployment points
         # ``ollama_url`` at the raw ollama runtime (http://ollama:11434),
@@ -486,6 +493,7 @@ class OllamaClient(_ReusableClientMixin):
         self._num_thread = num_thread
         self._num_ctx = num_ctx
         self._think = think
+        self._keep_alive = keep_alive
 
     async def chat(
         self,
@@ -512,6 +520,10 @@ class OllamaClient(_ReusableClientMixin):
             "model": self._model,
             "messages": messages,
             "stream": False,
+            # Keep the model resident (see __init__): belt-and-suspenders with
+            # the server's OLLAMA_KEEP_ALIVE, and the ONLY thing that keeps a
+            # host-run Ollama warm when that env var isn't set.
+            "keep_alive": self._keep_alive,
             "options": {
                 "temperature": temperature,
                 "num_predict": max_tokens,

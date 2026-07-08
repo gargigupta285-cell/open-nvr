@@ -72,6 +72,12 @@ llm_model: qwen2.5:1.5b
 llm_temperature: 0.4
 llm_max_tokens: 256
 
+# How long Ollama keeps the model resident. Sent on every request, so a
+# host-run `ollama serve` stays warm even without OLLAMA_KEEP_ALIVE in its
+# environment — no turn pays a cold reload + full re-prefill. -1 = forever
+# (default). Set a duration like "5m" on a RAM-tight box to free it when idle.
+# llm_keep_alive: -1
+
 # How long to keep a fetched camera frame in cache. The LLM often
 # calls multiple tools on the same camera (describe + detect +
 # recognise faces) inside one turn; caching avoids fetching the

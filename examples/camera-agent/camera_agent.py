@@ -151,6 +151,10 @@ class AppConfig:
     # faster prefill, but must hold the prompt).
     llm_num_threads: int | None = None
     llm_num_ctx: int = 4096
+    # How long Ollama keeps the model resident (sent on every request so a
+    # host-run Ollama stays warm even without OLLAMA_KEEP_ALIVE in its env).
+    # -1 = forever (default). A duration string like "5m" frees RAM when idle.
+    llm_keep_alive: str | float = -1
 
     # Text/chat mode: the UI defaults to a text box (no mic) and the voice
     # adapters (Whisper/Piper) aren't required. The lighter on-ramp — used by
@@ -2368,6 +2372,7 @@ def load_config(path: str | Path) -> AppConfig:
         llm_think=(None if raw.get("llm_think") is None else bool(raw.get("llm_think"))),
         llm_num_threads=(int(raw["llm_num_threads"]) if raw.get("llm_num_threads") else None),
         llm_num_ctx=int(raw.get("llm_num_ctx") or 4096),
+        llm_keep_alive=(raw["llm_keep_alive"] if raw.get("llm_keep_alive") is not None else -1),
         piper_url=_str("piper_url", "http://127.0.0.1:9001"),
         piper_token=_str("piper_token", ""),
         llm_model=_str("llm_model", "qwen2.5:1.5b"),
@@ -2524,7 +2529,7 @@ class CameraAgentRuntime:
             self.ollama = OllamaClient(
                 url=cfg.ollama_url, token=cfg.ollama_token, model=cfg.llm_model,
                 num_thread=cfg.llm_num_threads, num_ctx=cfg.llm_num_ctx,
-                think=_think,
+                think=_think, keep_alive=cfg.llm_keep_alive,
             )
         self.piper = PiperClient(url=cfg.piper_url, token=cfg.piper_token)
 
