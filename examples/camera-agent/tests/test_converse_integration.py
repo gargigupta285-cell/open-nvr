@@ -139,6 +139,27 @@ def test_converse_full_tool_turn(harness):
     assert set(data["timings_ms"]) >= {"transcode", "stt", "llm", "tts", "total"}
 
 
+def test_converse_logs_timings_breakdown(harness, caplog):
+    """The per-stage breakdown is logged so a slow turn can be diagnosed from
+    the agent logs (grep 'converse: timings_ms'), not only the browser."""
+    import logging
+
+    client, state = harness
+
+    async def chat(*, messages, tools=None, temperature=0.4, max_tokens=256, **kw):
+        return {"message": {"role": "assistant", "content": "All clear."}}
+    state["set_chat"](chat)
+
+    with caplog.at_level(logging.INFO):
+        resp = client.post("/converse", content=_wav_blob())
+    assert resp.status_code == 200, resp.text
+    line = next((r.getMessage() for r in caplog.records
+                 if "converse: timings_ms" in r.getMessage()), None)
+    assert line is not None
+    for stage in ("transcode", "stt", "llm", "tts", "total"):
+        assert stage in line
+
+
 # ── camera dropdown hint drives the forced-grounding default ───────────
 
 

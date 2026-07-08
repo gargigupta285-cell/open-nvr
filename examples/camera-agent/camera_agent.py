@@ -4741,6 +4741,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             if transcript:
                 logger.info("converse: dropped noise hallucination %r", transcript)
             timings["total"] = int((_t.perf_counter() - t0) * 1000)
+            logger.info("converse: timings_ms=%s (dropped: noise)", timings)
             return JSONResponse({"transcript": "", "reply": "", "audio_b64": None,
                                  "timings_ms": timings, "noise": bool(transcript)})
 
@@ -4769,6 +4770,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                             runtime.agent_name, transcript, score,
                             runtime.cfg.wake_fuzzy)
                 timings["total"] = int((_t.perf_counter() - t0) * 1000)
+                logger.info("converse: timings_ms=%s (dropped: wake)", timings)
                 return JSONResponse({"transcript": transcript, "reply": "",
                                      "audio_b64": None, "timings_ms": timings,
                                      "invoked": False})
@@ -4814,6 +4816,10 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             logger.exception("converse: TTS failed")  # text still returned
         _mark("tts", t3)
         timings["total"] = int((_t.perf_counter() - t0) * 1000)
+        # Log the per-stage breakdown so a slow turn can be diagnosed straight
+        # from the agent logs (grep "converse: timings_ms") instead of only the
+        # browser's Network tab: transcode / stt / llm / tts / total, in ms.
+        logger.info("converse: timings_ms=%s", timings)
 
         return JSONResponse({
             "transcript": transcript, "reply": reply, "audio_b64": audio_b64,
