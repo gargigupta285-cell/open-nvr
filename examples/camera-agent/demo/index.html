@@ -226,6 +226,22 @@
     .pop .go{background:var(--accent,#4fd1c5);color:#062321;border:none;font-weight:700;border-radius:6px;
       padding:.4rem .6rem;font-size:.75rem;cursor:pointer;width:100%;}
     #camScoped{margin-top:.5rem;}
+    .player video{display:block;width:100%;aspect-ratio:16/9;object-fit:contain;background:#000;}
+    #recRow{margin-top:.55rem;}
+    .rec-head{display:flex;align-items:center;gap:.5rem;}
+    .rec-lbl{font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;}
+    #recDay{background:var(--panel2);color:var(--text);border:1px solid var(--border);
+      border-radius:6px;font-size:.72rem;padding:.15rem .3rem;}
+    .rec-head .recl{margin-left:auto;font-size:.7rem;color:var(--muted);text-decoration:none;}
+    .rec-head .recl:hover{color:var(--accent);}
+    .rec-segs{display:flex;gap:.35rem;overflow-x:auto;padding:.35rem 0 .2rem;}
+    .rec-segs::-webkit-scrollbar{height:5px;}
+    .rec-segs::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px;}
+    .rec-seg{flex:0 0 auto;background:var(--panel2);border:1px solid var(--border);
+      border-radius:7px;padding:.3rem .55rem;font-size:.72rem;cursor:pointer;color:var(--text);}
+    .rec-seg small{display:block;color:var(--muted);font-size:.62rem;}
+    .rec-seg:hover,.rec-seg.on{border-color:var(--accent);color:var(--accent);}
+    .rec-note{font-size:.7rem;color:var(--muted);padding:.3rem 0;}
     .hwrow{padding:.42rem .5rem;background:var(--panel2);border:1px solid var(--border);
       border-radius:8px;margin:.3rem 0;font-size:.74rem;}
     .hwrow .hw-nm{font-weight:600;font-size:.78rem;}
@@ -324,10 +340,10 @@
             <div class="ctop">
               <button class="ghost" id="camBack" type="button">‹ Back to agent</button>
               <div><div class="ctitle" id="camTitle">camera</div><div class="csub" id="camSub"></div></div>
-              <a class="ghost recl" id="camRecordings" target="_blank" rel="noopener" hidden>Recordings ↗</a>
             </div>
             <div class="player" id="camPlayer" title="Click the picture to pin this exact frame into the chat">
               <img id="camImg" alt="camera view" hidden>
+              <video id="camVideo" controls playsinline hidden></video>
               <div id="camNoFrame" class="empty-note" hidden>No frame — camera off or unreachable.</div>
               <span class="ovl" id="camTs"></span>
               <span class="modepill" id="camMode"><span class="mdot"></span><span id="camModeText">LIVE</span></span>
@@ -338,6 +354,16 @@
               <button class="livebtn on" id="camLive" type="button">● LIVE</button>
             </div>
             <div class="tnote" id="camTnote">Live · marks = detections · drag to review the last few minutes</div>
+            <!-- Recorded segments from the MAIN server (the agent stores no
+                 video): user-token pass-through list + a direct player URL. -->
+            <div id="recRow" hidden>
+              <div class="rec-head">
+                <span class="rec-lbl">Recorded</span>
+                <select id="recDay" aria-label="Recording day" hidden></select>
+                <a class="recl" id="camRecordings" target="_blank" rel="noopener" hidden>All recordings ↗</a>
+              </div>
+              <div id="recSegs" class="rec-segs"></div>
+            </div>
             <div class="acts">
               <button class="apill talk2" id="camTalk" type="button">🎙 Talk</button>
               <button class="apill" id="camAsk" type="button">💬 Ask</button>
@@ -849,21 +875,21 @@
     // fetch from a previous state can never overwrite the current picture
     // (live tick landing after a scrub, or two scrubs racing).
     let _viewGen=0;
+    let _playback=false;   // a recorded segment is in the player
     function openCamScreen(cam,push=true){
       if(window._camScreenCam===cam) return;   // already here — no dup history
       window._camScreenCam=cam; _tl=null;      // stale timeline never drives the new camera
       $("mainScreen").hidden=true; $("camScreen").hidden=false;
       $("camTitle").textContent=cam; $("camSub").textContent=_camRoles[cam]||"";
-      const rec=$("camRecordings");
-      if(window._opennvrUi){ rec.href=window._opennvrUi.replace(/\/$/,"")+"/recordings"; rec.hidden=false; } else rec.hidden=true;
       if(push) history.pushState({cam:cam},"","/demo/camera/"+encodeURIComponent(cam));
-      goLive(); loadTimeline(cam); loadCamScoped(cam);
+      goLive(); loadTimeline(cam); loadCamScoped(cam); loadRecordings(cam);
       addMsg("Focused on "+cam+" — talk or type, everything is scoped to this camera. ‹ Back returns to all cameras.","sys"); }
     function closeCamScreen(push=true){
       window._camScreenCam=null;
       const inp=$("askInput"); if(inp) inp.placeholder="Type a question, e.g. how many people on cam1?";
       if(_liveTimer){clearInterval(_liveTimer);_liveTimer=null;}
       if(_stepTimer){clearInterval(_stepTimer);_stepTimer=null;}
+      stopPlayback();
       $("camScreen").hidden=true; $("mainScreen").hidden=false;
       if(push) history.pushState({},"","/demo");
       refreshCamStrip(); }
@@ -882,20 +908,25 @@
         setBlobSrc(img,await r.blob()); img.hidden=false; off.hidden=true;
         $("camTs").textContent=fmtClock(Date.now()/1000);
       }catch{ if(gen===_viewGen){ img.hidden=true; off.hidden=false; } } }
-    function setMode(live){ $("camMode").classList.toggle("review",!live);
-      $("camModeText").textContent=live?"LIVE":"REVIEW";
+    function setMode(kind){ const live=kind==="live";
+      $("camMode").classList.toggle("review",!live);
+      $("camModeText").textContent=live?"LIVE":(kind==="playback"?"PLAYBACK":"REVIEW");
       $("camPlayer").classList.toggle("review",!live);
       $("camLive").classList.toggle("on",live);
       $("camTnote").textContent=live?"Live · marks = detections · drag to review the last few minutes"
-        :("Reviewing "+(_revTs?fmtClock(_revTs):"")+" — ● LIVE snaps back"); }
-    function goLive(){ _revTs=null; _viewGen++; setMode(true);
+        :(kind==="playback"?"Playing a recorded segment — ● LIVE returns"
+          :("Reviewing "+(_revTs?fmtClock(_revTs):"")+" — ● LIVE snaps back")); }
+    function stopPlayback(){ _playback=false; const v=$("camVideo"); if(!v) return;
+      try{ v.pause(); }catch{} v.removeAttribute("src"); v.load(); v.hidden=true;
+      document.querySelectorAll(".rec-seg.on").forEach(el=>el.classList.remove("on")); }
+    function goLive(){ _revTs=null; _viewGen++; stopPlayback(); setMode("live");
       // LIVE always plays: a ⏸ from a previous visit (or from review) must
       // not leave a frozen picture under a green LIVE pill.
       _playing=true; const pb=$("camPlay"); if(pb) pb.textContent="⏸";
       if(_stepTimer){clearInterval(_stepTimer);_stepTimer=null;}
       const s=$("camScrub"); if(_tl&&_tl.frames&&_tl.frames.length){ s.value=s.max; }
       refreshPlayerLive();
-      if(!_liveTimer) _liveTimer=setInterval(()=>{ if(window._camScreenCam&&!_revTs&&_playing) refreshPlayerLive(); },2000); }
+      if(!_liveTimer) _liveTimer=setInterval(()=>{ if(window._camScreenCam&&!_revTs&&!_playback&&_playing) refreshPlayerLive(); },2000); }
     async function loadTimeline(cam){
       let tl=null;
       try{ tl=await (await fetch("/timeline/"+encodeURIComponent(cam))).json(); }catch{ tl=null; }
@@ -915,7 +946,7 @@
           s.value=best; reviewAt(best); });
         marks.appendChild(mk); } }
     async function reviewAt(idx){ if(!_tl||!_tl.frames[idx]) return;
-      _revTs=_tl.frames[idx]; _viewGen++; const gen=_viewGen; setMode(false);
+      _revTs=_tl.frames[idx]; _viewGen++; stopPlayback(); const gen=_viewGen; setMode("review");
       const ts=_revTs, img=$("camImg"), off=$("camNoFrame");
       try{ const r=await fetch("/frame/"+encodeURIComponent(window._camScreenCam)+"?at="+encodeURIComponent(ts));
         if(gen!==_viewGen) return;                               // a newer scrub/live won
@@ -935,8 +966,70 @@
         if(!_playing&&_stepTimer){ clearInterval(_stepTimer); _stepTimer=null; } });
       const player=$("camPlayer");
       if(player) player.addEventListener("click",(e)=>{ if(e.target.closest(".modepill,.ovl")) return;
+        if(!$("camVideo").hidden) return;   // playback has its own controls
         const cam=window._camScreenCam; if(!cam) return;
         pinFrame(cam,_revTs||undefined); }); })();
+
+    // ── Recorded row: segments from the MAIN server, played by URL ──
+    let _recs=[];   // [{start, duration}] for the open camera
+    function _dayKey(iso){ return String(iso).slice(0,10); }
+    function _dayLabel(key){ const today=new Date().toISOString().slice(0,10);
+      const y=new Date(Date.now()-86400000).toISOString().slice(0,10);
+      return key===today?"Today":(key===y?"Yesterday":key); }
+    async function loadRecordings(cam){
+      const row=$("recRow"), segs=$("recSegs"), day=$("recDay"), link=$("camRecordings");
+      row.hidden=true; segs.innerHTML=""; day.hidden=true; _recs=[];
+      if(link){ if(window._opennvrUi){ link.href=window._opennvrUi.replace(/\/$/,"")+"/recordings"; link.hidden=false; } else link.hidden=true; }
+      const fallback=(note)=>{ if(window._opennvrUi){ row.hidden=false;
+        segs.innerHTML='<div class="rec-note"></div>'; segs.firstChild.textContent=note; } };
+      if(_authMode!=="opennvr"){ fallback("Recorded playback needs auth_mode: opennvr — full history in OpenNVR ↗"); return; }
+      let d=null;
+      try{ const r=await fetch("/recordings/"+encodeURIComponent(cam));
+        d=await r.json().catch(()=>null);
+        if(r.status===404&&d&&d.unlinked){ fallback("Link this camera (opennvr_camera_id) to see its recordings here."); return; }
+        if(!r.ok||!d){ fallback("Recordings unavailable right now — full history in OpenNVR ↗"); return; }
+      }catch{ fallback("Recordings unavailable right now — full history in OpenNVR ↗"); return; }
+      _recs=(d.recordings||[]).filter(x=>x&&x.start);
+      if(!_recs.length){ fallback("No recordings for this camera yet."); return; }
+      row.hidden=false;
+      const days=[...new Set(_recs.map(x=>_dayKey(x.start)))].sort().reverse();
+      day.innerHTML=""; for(const k of days){ const o=document.createElement("option");
+        o.value=k; o.textContent=_dayLabel(k); day.appendChild(o); }
+      day.hidden=days.length<2&&_dayLabel(days[0])==="Today";
+      day.onchange=()=>renderSegs(cam,day.value);
+      renderSegs(cam,days[0]); }
+    function renderSegs(cam,dayKey){ const segs=$("recSegs"); segs.innerHTML="";
+      const list=_recs.filter(x=>_dayKey(x.start)===dayKey)
+        .sort((a,b)=>String(b.start).localeCompare(String(a.start)));
+      for(const seg of list){ const b=document.createElement("button");
+        b.type="button"; b.className="rec-seg";
+        const t=new Date(seg.start); const mins=Math.max(1,Math.round((seg.duration||0)/60));
+        b.innerHTML="<span></span><small></small>";
+        b.querySelector("span").textContent=("0"+t.getHours()).slice(-2)+":"+("0"+t.getMinutes()).slice(-2);
+        b.querySelector("small").textContent=mins+" min";
+        b.addEventListener("click",()=>playRecording(cam,seg,b));
+        segs.appendChild(b); } }
+    async function playRecording(cam,seg,btn){
+      try{ const r=await fetch("/recordings/"+encodeURIComponent(cam)+"/play?start="+
+          encodeURIComponent(seg.start)+"&duration="+encodeURIComponent(seg.duration||60));
+        const d=await r.json().catch(()=>({}));
+        if(!r.ok||!d.url){ addMsg("Couldn't get a playback URL: "+(d.error||("HTTP "+r.status)),"sys"); return; }
+        _revTs=null; _viewGen++; _playback=true;   // leave live/review cleanly
+        if(_stepTimer){clearInterval(_stepTimer);_stepTimer=null;}
+        const img=$("camImg"), off=$("camNoFrame"), v=$("camVideo");
+        img.hidden=true; off.hidden=true;
+        v.src=d.url; v.hidden=false;
+        // Autoplay: the click gesture is gone after the fetch, so an
+        // unmuted play() may be blocked — fall back to muted (controls
+        // let the user unmute), never to a frozen first frame.
+        v.muted=false;
+        v.play().catch(()=>{ v.muted=true; v.play().catch(()=>{}); });
+        setMode("playback");
+        document.querySelectorAll(".rec-seg.on").forEach(el=>el.classList.remove("on"));
+        if(btn) btn.classList.add("on");
+        const t=new Date(seg.start);
+        $("camTs").textContent=("0"+t.getHours()).slice(-2)+":"+("0"+t.getMinutes()).slice(-2)+":"+("0"+t.getSeconds()).slice(-2);
+      }catch(err){ addMsg("Couldn't play the recording: "+err.message,"sys"); } }
 
     // camera-screen actions: talk/ask scoped by cameraParam(); quick popovers.
     function closePops(){ document.querySelectorAll(".pop").forEach(p=>p.classList.remove("show")); }

@@ -204,3 +204,19 @@ def test_auth_login_overlay_wired(script: str, html: str) -> None:
     assert '"/auth/login"' in script and '"/auth/refresh"' in script
     assert "function showLogin" in script
     assert "sessionStorage" in script, "tokens must survive reload (mobile-parity contract)"
+
+
+def test_recorded_row_wired(script: str, html: str) -> None:
+    # The camera screen's Recorded row: server-side segments, direct-URL
+    # playback in the player's <video>, ● LIVE returns. The old ctop
+    # Recordings link is DEMOTED into this row.
+    for eid in ("recRow", "recDay", "recSegs", "camVideo", "camRecordings"):
+        assert f'id="{eid}"' in html, f"recorded-row element missing: {eid!r}"
+    for fn in ("async function loadRecordings", "function renderSegs",
+               "async function playRecording", "function stopPlayback"):
+        assert fn in script, f"recorded-row handler missing: {fn!r}"
+    assert '"/recordings/"' in script, "row no longer calls the agent proxy"
+    assert '"PLAYBACK"' in script, "player lost its PLAYBACK mode label"
+    # goLive must tear playback down — a lingering <video> under a LIVE
+    # pill is the same class of bug as the frozen-pause finding.
+    assert re.search(r"function goLive\(\)\{[^\n]*stopPlayback\(\)", script)

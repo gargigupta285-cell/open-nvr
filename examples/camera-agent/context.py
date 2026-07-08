@@ -42,6 +42,11 @@ class CameraSpec:
     camera_id: str
     frame_url: str
     role: str  # natural-language role description for the LLM
+    # The camera's id in the MAIN OpenNVR server (Camera.id), when this
+    # agent camera is also recorded there. Links the per-camera screen's
+    # Recorded row to the server's playback API — unset = no recordings
+    # surface for this camera (the agent itself stores nothing).
+    opennvr_camera_id: int | None = None
 
 
 @dataclass

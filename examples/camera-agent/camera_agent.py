@@ -55,6 +55,7 @@ from adapter_clients import (
     OllamaClient,
     OpenAILLMClient,
     OpennvrAuthClient,
+    OpennvrRecordingsClient,
     PiperClient,
     SyntheticDetectionClient,
     WhisperClient,
@@ -2145,10 +2146,12 @@ def load_config(path: str | Path) -> AppConfig:
         url = entry.get("frame_url")
         if not cam_id or not url:
             raise SystemExit("config: camera entries need camera_id + frame_url")
+        _oid = entry.get("opennvr_camera_id")
         cameras.append(CameraSpec(
             camera_id=str(cam_id),
             frame_url=str(url),
             role=str(entry.get("role") or "(no role configured)"),
+            opennvr_camera_id=int(_oid) if _oid is not None else None,
         ))
     if not cameras and raw.get("auto_discover_cameras"):
         # Run on whatever hardware we're already on — laptop webcam, USB/Pi
@@ -2496,6 +2499,8 @@ class CameraAgentRuntime:
         # it; only the middleware consults auth_mode.
         self.auth = (OpennvrAuthClient(base_url=cfg.opennvr_api_url)
                      if cfg.opennvr_api_url else None)
+        self.recordings = (OpennvrRecordingsClient(base_url=cfg.opennvr_api_url)
+                           if cfg.opennvr_api_url else None)
         self.tasks = TaskManager(self)
         self.monitors = MonitorManager(self)
         self.alarms = AlarmManager(self)
@@ -3395,6 +3400,8 @@ class CameraAgentRuntime:
             closers.append(self.faces.aclose())
         if self.auth:
             closers.append(self.auth.aclose())
+        if self.recordings:
+            closers.append(self.recordings.aclose())
         if self.app_registry:
             closers.append(self.app_registry.aclose())
         await asyncio.gather(*closers, return_exceptions=True)
@@ -3760,6 +3767,69 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             "events": [{"ts": e.received_at, "summary": e.summary,
                         "adapter": e.adapter} for e in events[:40]],
         }
+
+    def _bearer_of(request: Request) -> str:
+        authz = request.headers.get("authorization", "")
+        return authz[7:].strip() if authz.lower().startswith("bearer ") else ""
+
+    async def _recordings_path_for(request: Request, camera_id: str):
+        """Shared resolution for the two recordings proxies. Returns
+        (error_response | None, path). The agent stores NO video — these
+        endpoints forward to the main server with the CALLER's token."""
+        cam = runtime.context.get_camera(camera_id)
+        if cam is None:
+            return JSONResponse({"error": "unknown camera"}, status_code=404), None
+        if runtime.recordings is None:
+            return JSONResponse(
+                {"error": "recordings need opennvr_api_url"}, status_code=404), None
+        if cam.opennvr_camera_id is None:
+            return JSONResponse(
+                {"error": f"camera {camera_id!r} is not linked to an OpenNVR "
+                          "camera — set opennvr_camera_id in its config entry",
+                 "unlinked": True}, status_code=404), None
+        token = _bearer_of(request)
+        if not token:
+            return JSONResponse({"error": "authentication required"},
+                                status_code=401), None
+        status, path = await runtime.recordings.resolve_path(
+            token, cam.opennvr_camera_id)
+        if status != 200:
+            return JSONResponse({"error": "could not reach the OpenNVR server"},
+                                status_code=status), None
+        if not path:
+            return JSONResponse(
+                {"error": "no recordings for this camera yet", "recordings": []},
+                status_code=200), None
+        return None, (token, path)
+
+    @app.get("/recordings/{camera_id}")
+    async def _recordings_list(camera_id: str, request: Request) -> Any:
+        """Recorded segments for one agent camera — the camera screen's
+        Recorded row. User-token pass-through to the server's playback
+        list (viewer tier: recordings are LOOK, and the server enforces
+        its own per-user camera permissions on top)."""
+        err, ok = await _recordings_path_for(request, camera_id)
+        if err is not None:
+            return err
+        token, path = ok
+        status, data = await runtime.recordings.playback_list(token, path)
+        if status != 200:
+            return JSONResponse(data, status_code=status)
+        return {"camera_id": camera_id, "path": path,
+                "recordings": data.get("recordings") or []}
+
+    @app.get("/recordings/{camera_id}/play")
+    async def _recordings_play(camera_id: str, request: Request,
+                               start: str, duration: float) -> Any:
+        """A direct player URL for one segment (mobile-safe: plain URL,
+        no auth headers needed by the video element)."""
+        err, ok = await _recordings_path_for(request, camera_id)
+        if err is not None:
+            return err
+        token, path = ok
+        status, data = await runtime.recordings.playback_url(
+            token, path, start, duration)
+        return JSONResponse(data, status_code=status)
 
     @app.get("/demo/camera/{camera_id}", response_class=HTMLResponse)
     async def _demo_camera(camera_id: str) -> HTMLResponse:

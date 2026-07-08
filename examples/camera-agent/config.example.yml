@@ -216,3 +216,12 @@ system_prompt: |
 # alarms/watches/tasks/reports; anyone else = view + chat only (their
 # chat toolset physically excludes the arming verbs).
 # auth_mode: opennvr        # requires opennvr_api_url / opennvr_base_url
+
+# Per-camera link to the MAIN server's camera (Camera.id) — lights up the
+# per-camera screen's "Recorded" row (segments + in-player playback via
+# the server's playback API, using the SIGNED-IN USER's token; the agent
+# stores no video). Omit for cameras the server doesn't record.
+# cameras:
+#   - camera_id: front-porch
+#     frame_url: http://192.168.1.50/cgi-bin/snapshot.cgi
+#     opennvr_camera_id: 3

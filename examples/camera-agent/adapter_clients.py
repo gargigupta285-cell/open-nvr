@@ -794,3 +794,69 @@ class OpennvrAuthClient(_ReusableClientMixin):
             self._cache.clear()   # crude but bounded; refills within a TTL
         self._cache[token] = (now, user)
         return user
+
+
+class OpennvrRecordingsClient(_ReusableClientMixin):
+    """User-token pass-through to the main server's playback API — the
+    agent's Recorded row NEVER uses the service key for recorded video
+    (same governance line as app actions): every call carries the
+    CALLER's bearer token, so camera permissions and audit stay per-user.
+
+    Three thin forwards against ``{base}/api/v1/recordings``:
+    * :meth:`playback_cameras` → which server cameras have recordings
+      (used to resolve a server camera id → its MediaMTX path).
+    * :meth:`playback_list`    → the segment list for one path.
+    * :meth:`playback_url`     → a direct player URL for one segment —
+      the mobile-safe pattern (a plain URL ExoPlayer / <video> can
+      stream with no auth headers).
+    """
+
+    def __init__(self, *, base_url: str, timeout_seconds: float = 10.0) -> None:
+        self._base = f"{base_url.rstrip('/')}/api/v1/recordings"
+        self._timeout = timeout_seconds
+        # server camera id -> (resolved_at_monotonic, mediamtx path)
+        self._paths: dict[int, tuple[float, str]] = {}
+        self._path_ttl = 300.0
+
+    async def _get(self, token: str, path: str, params: dict) -> tuple[int, dict]:
+        try:
+            resp = await self._client().get(
+                f"{self._base}{path}", params=params,
+                headers={"Authorization": f"Bearer {token}"})
+            try:
+                data = resp.json()
+            except Exception:
+                data = {"error": resp.text[:200]}
+            return resp.status_code, data
+        except Exception as exc:
+            logger.warning("recordings: %s proxy failed: %s", path, exc)
+            return 502, {"error": "OpenNVR server unreachable"}
+
+    async def resolve_path(self, token: str, opennvr_camera_id: int) -> tuple[int, str | None]:
+        """Server camera id → MediaMTX path (cached ~5 min). The server
+        owns the naming convention — never guess it here."""
+        hit = self._paths.get(opennvr_camera_id)
+        if hit is not None and time.monotonic() - hit[0] < self._path_ttl:
+            return 200, hit[1]
+        status, data = await self._get(token, "/playback/cameras", {})
+        if status != 200:
+            return status, None
+        for cam in data.get("cameras") or []:
+            try:
+                cid = int(cam.get("camera_id"))
+            except (TypeError, ValueError):
+                continue
+            path = str(cam.get("path") or "")
+            if path:
+                self._paths[cid] = (time.monotonic(), path)
+        hit = self._paths.get(opennvr_camera_id)
+        return 200, (hit[1] if hit else None)
+
+    async def playback_list(self, token: str, path: str) -> tuple[int, dict]:
+        return await self._get(token, "/playback/list", {"path": path})
+
+    async def playback_url(self, token: str, path: str, start: str,
+                           duration: float) -> tuple[int, dict]:
+        return await self._get(token, "/playback/url",
+                               {"path": path, "start": start,
+                                "duration": str(duration)})
