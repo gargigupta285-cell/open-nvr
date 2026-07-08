@@ -35,6 +35,7 @@ type Camera = {
   username?: string | null
   password?: string | null
   rtsp_url?: string | null
+  substream_url?: string | null
   location?: string | null
   vlan?: string | null
   status?: string | null
@@ -58,6 +59,7 @@ type CameraForm = {
   username?: string
   password?: string
   rtsp_url?: string
+  substream_url?: string
   location?: string
   vlan?: string
   status?: string
@@ -104,6 +106,7 @@ export function Cameras() {
     username: '',
     password: '',
     rtsp_url: '',
+    substream_url: '',
     location: '',
     vlan: '',
     status: 'unknown',
@@ -117,6 +120,7 @@ export function Cameras() {
     username: '',
     password: '',
     rtsp_url: '',
+    substream_url: '',
     location: '',
     vlan: '',
     status: 'unknown',
@@ -224,6 +228,7 @@ export function Cameras() {
         username: form.username || null,
         ...(form.password ? { password: form.password } : {}),
         rtsp_url: form.rtsp_url || null,
+        substream_url: form.substream_url || null,
         location: form.location || null,
         vlan: form.vlan || null,
         status: form.status || undefined,
@@ -307,6 +312,7 @@ export function Cameras() {
       username: c.username || '',
       password: '',
       rtsp_url: c.rtsp_url || '',
+      substream_url: c.substream_url || '',
       location: c.location || '',
       vlan: c.vlan || '',
       status: c.status || 'unknown',
@@ -645,6 +651,9 @@ export function Cameras() {
               </Field>
               <Field label="RTSP URL">
                 <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.rtsp_url || ''} onChange={(e) => setForm({ ...form, rtsp_url: e.target.value })} />
+              </Field>
+              <Field label="Substream URL">
+                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.substream_url || ''} onChange={(e) => setForm({ ...form, substream_url: e.target.value })} placeholder="Optional low-res feed for the camera agent's live view" />
               </Field>
               <Field label="Username">
                 <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.username || ''} onChange={(e) => setForm({ ...form, username: e.target.value })} />
