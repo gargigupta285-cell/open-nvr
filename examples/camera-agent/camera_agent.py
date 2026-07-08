@@ -2381,6 +2381,13 @@ def load_config(path: str | Path) -> AppConfig:
     )
 
 
+# How often the background reconcile re-checks OpenNVR for cameras. Fast while
+# the agent has none yet (boot-order race: agent up before the core has cameras
+# ready), then slow steady-state to pick up cameras added later.
+_OPENNVR_CAMERA_RECONCILE_FAST = 5.0
+_OPENNVR_CAMERA_RECONCILE_SLOW = 30.0
+
+
 def _load_opennvr_cameras(*, url: str, api_key: str) -> list[CameraSpec]:
     """Load frame sources from OpenNVR's internal camera-agent endpoint."""
     import httpx
@@ -2412,11 +2419,16 @@ def _load_opennvr_cameras(*, url: str, api_key: str) -> list[CameraSpec]:
         if not cam_id or not frame_url:
             continue
         role = entry.get("role") or entry.get("name") or "(OpenNVR camera)"
+        # The internal endpoint returns the server-side Camera.id as
+        # ``open_nvr_camera_id``; carry it so recordings/live playback can
+        # resolve the OpenNVR camera (older configs used opennvr_camera_id).
+        _oid = entry.get("open_nvr_camera_id", entry.get("opennvr_camera_id"))
         cameras.append(
             CameraSpec(
                 camera_id=str(cam_id),
                 frame_url=str(frame_url),
                 role=str(role),
+                opennvr_camera_id=int(_oid) if _oid not in (None, "") else None,
             )
         )
     logger.info("config: loaded %d camera(s) from OpenNVR", len(cameras))
@@ -2596,6 +2608,7 @@ class CameraAgentRuntime:
         self._stop_event = asyncio.Event()
         self._subscriber_task: asyncio.Task | None = None
         self._app_alert_subscriber_task: asyncio.Task | None = None
+        self._camera_reconcile_task: asyncio.Task | None = None
         # Push-side throttle for the app-alert relay: last relay time per
         # (app_id, camera_id). Reuses MonitorManager's notify cooldown.
         self._app_relay_last: dict[tuple[str, str], float] = {}
@@ -3403,6 +3416,74 @@ class CameraAgentRuntime:
             )
         return added
 
+    def _register_opennvr_cameras(self, specs: list[CameraSpec]) -> list[CameraSpec]:
+        """Register OpenNVR-sourced camera specs that aren't known yet, wiring
+        each one's frame source. ADD-ONLY on purpose: a transient empty or
+        failed fetch must never tear down cameras that are already working."""
+        added: list[CameraSpec] = []
+        for spec in specs:
+            if self.context.known_camera(spec.camera_id):
+                continue
+            self.context.add_camera(spec)
+            self.context.register_frame_source(
+                spec.camera_id,
+                build_frame_source(camera_id=spec.camera_id, url=spec.frame_url),
+            )
+            self.cfg.cameras.append(spec)
+            added.append(spec)
+        return added
+
+    async def _reconcile_opennvr_cameras(self) -> None:
+        """Keep the agent's camera list in sync with OpenNVR without a restart.
+
+        The startup fetch is one-shot, so if the agent comes up before the
+        OpenNVR core has its cameras ready (the usual boot-order race when the
+        stack starts together), it would otherwise stay 'disconnected' until
+        someone restarted it. This loop retries through that race and also
+        picks up cameras registered in OpenNVR later."""
+        url = self.cfg.opennvr_cameras_url
+        if not url:
+            return
+        api_key = self.cfg.opennvr_api_key or self.cfg.kaic_api_key or ""
+        announced_waiting = False
+        while not self._stop_event.is_set():
+            try:
+                # The fetch is a blocking httpx call — off-thread it so we
+                # never stall the event loop.
+                specs = await asyncio.to_thread(
+                    _load_opennvr_cameras, url=url, api_key=api_key
+                )
+            except Exception as exc:  # a reconcile error must never kill the loop
+                logger.warning(
+                    "camera-agent: OpenNVR camera reconcile failed: %s", exc
+                )
+                specs = []
+            added = self._register_opennvr_cameras(specs)
+            have_cameras = bool(self.cfg.cameras)
+            if added:
+                logger.info(
+                    "camera-agent: picked up %d OpenNVR camera(s) without a "
+                    "restart: %s",
+                    len(added), ", ".join(c.camera_id for c in added),
+                )
+                announced_waiting = False
+            elif not have_cameras and not announced_waiting:
+                logger.info(
+                    "camera-agent: no OpenNVR cameras yet (core may still be "
+                    "starting); retrying every %.0fs",
+                    _OPENNVR_CAMERA_RECONCILE_FAST,
+                )
+                announced_waiting = True
+            delay = (
+                _OPENNVR_CAMERA_RECONCILE_SLOW
+                if have_cameras
+                else _OPENNVR_CAMERA_RECONCILE_FAST
+            )
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
+
     async def startup(self) -> None:
         if self.cfg.nats_inference_url:
             self._subscriber_task = asyncio.create_task(
@@ -3468,6 +3549,15 @@ class CameraAgentRuntime:
         # recurring report scheduler.
         self.load_state()
         self.reports.start()
+
+        # Keep cameras in sync with OpenNVR in the background so a boot-order
+        # race (agent up before the core has cameras) self-heals without a
+        # restart, and cameras added later appear on their own.
+        if self.cfg.opennvr_cameras_url:
+            self._camera_reconcile_task = asyncio.create_task(
+                self._reconcile_opennvr_cameras(),
+                name="camera-agent-opennvr-camera-reconcile",
+            )
 
     async def _prewarm_llm(self) -> None:
         try:
@@ -3536,6 +3626,7 @@ class CameraAgentRuntime:
         for task, label in (
             (self._subscriber_task, "subscriber"),
             (self._app_alert_subscriber_task, "app-alert subscriber"),
+            (self._camera_reconcile_task, "camera reconcile"),
         ):
             if task is None:
                 continue

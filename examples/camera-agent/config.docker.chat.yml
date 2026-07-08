@@ -50,6 +50,12 @@ opennvr_base_url: ${OPENNVR_UI_URL}
 # silently never works under compose (localhost:8000 = the agent itself).
 opennvr_api_url: http://opennvr-core:8000
 
+# Require an OpenNVR sign-in before anyone can talk to the agent (bearer
+# tokens validated against opennvr_api_url, mapped to viewer/operator/admin
+# by role). The /demo page shows a branded login. Set "none" for an open
+# throwaway demo only.
+auth_mode: opennvr
+
 nats_inference_url: nats://nats:4222
 nats_inference_token: ${INTERNAL_API_KEY}
 
