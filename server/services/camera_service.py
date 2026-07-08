@@ -28,6 +28,7 @@ from core.logging_config import camera_logger
 from models import Camera, CameraPermission, User
 from schemas import CameraCreate, CameraUpdate
 from services.mediamtx_admin_service import MediaMtxAdminService
+from utils.url_redaction import redact_url_credentials
 
 
 class CameraService:
@@ -94,7 +95,8 @@ class CameraService:
                         "camera_id": db_camera.id,
                         "camera_name": db_camera.name,
                         "ip_address": db_camera.ip_address,
-                        "rtsp_url": db_camera.rtsp_url,
+                        # Redact user:pass@ before it reaches the log file.
+                        "rtsp_url": redact_url_credentials(db_camera.rtsp_url),
                     },
                 )
 

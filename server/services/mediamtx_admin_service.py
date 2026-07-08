@@ -49,6 +49,7 @@ from core.logging_config import mediamtx_logger
 from services.storage_service import get_effective_recordings_base_path
 from services.stream_service import _build_stream_name
 from utils.path_mapper import get_mediamtx_recording_path
+from utils.url_redaction import redact_url_credentials
 
 # Shared timeout for all MediaMTX Admin API calls (seconds)
 _TIMEOUT = httpx.Timeout(10.0)
@@ -916,7 +917,16 @@ class MediaMtxAdminService:
                     "camera_ip": camera_ip,
                     "path": name,
                     "url": url,
-                    "payload": payload,
+                    # Redact user:pass@ in the source/sub URLs before logging;
+                    # the live payload sent to MediaMTX keeps its credentials.
+                    "payload": {
+                        **payload,
+                        **{
+                            k: redact_url_credentials(payload[k])
+                            for k in ("source_url", "substream_url")
+                            if k in payload
+                        },
+                    },
                     "error_type": type(e).__name__,
                     "action": "mediamtx.provision_path_exception",
                 },
