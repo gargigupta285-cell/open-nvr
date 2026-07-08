@@ -28,7 +28,59 @@ Mirrors the logic in ``services.kai_c_service._redact_rtsp_url_for_log`` so the
 two stay consistent; that private copy predates this shared helper.
 """
 
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
+# Query-string keys whose VALUES are secrets and must never be logged. Matched
+# case-insensitively. Covers camera creds (username/password), stream/webhook
+# tokens (t, jwt, token), MFA codes, and generic api-key/secret params.
+SENSITIVE_QUERY_KEYS = frozenset(
+    {
+        "password", "passwd", "pwd", "username", "user",
+        "token", "jwt", "t", "access_token", "refresh_token",
+        "api_key", "apikey", "secret", "code", "key",
+        "auth", "sig", "signature",
+    }
+)
+
+
+def redact_query_params(params) -> dict:
+    """Return a plain dict copy of a query-param mapping with the values of
+    sensitive keys (see ``SENSITIVE_QUERY_KEYS``) replaced by ``<redacted>``."""
+    out: dict = {}
+    for k, v in dict(params).items():
+        out[k] = "<redacted>" if str(k).lower() in SENSITIVE_QUERY_KEYS else v
+    return out
+
+
+def redact_url_query(url: str | None) -> str | None:
+    """Return ``url`` with basic-auth userinfo stripped and the VALUES of
+    sensitive query keys masked (keys preserved for debugging). Non-sensitive
+    params (``page``, ``limit``, …) are kept as-is."""
+    if not url:
+        return url
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return redact_url_credentials(url)
+    netloc = parsed.hostname or ""
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    if parsed.username or parsed.password:
+        netloc = f"<redacted>@{netloc}"
+    if parsed.query:
+        pairs = parse_qsl(parsed.query, keep_blank_values=True)
+        pairs = [
+            (k, "<redacted>" if k.lower() in SENSITIVE_QUERY_KEYS else v)
+            for k, v in pairs
+        ]
+        # safe="<>" keeps the "<redacted>" placeholder readable in logs
+        # instead of percent-encoding it to %3Credacted%3E.
+        query = urlencode(pairs, safe="<>")
+    else:
+        query = ""
+    return urlunparse(
+        (parsed.scheme, netloc, parsed.path, parsed.params, query, "")
+    )
 
 
 def redact_url_credentials(url: str | None) -> str | None:
