@@ -163,11 +163,20 @@ class KaicCapabilitiesClient(_ReusableClientMixin):
         self._timeout = timeout_seconds
         self._fetched_at: float | None = None
         self._tasks: set[str] | None = None   # None = unknown / unreachable
+        # adapter name -> declared permissions.gpu (contract §6). Advisory
+        # like the task set (None = unknown); drives the Hardware panel's
+        # "running on GPU / CPU" honesty line.
+        self._gpu: dict[str, bool] | None = None
 
     @property
     def tasks_advertised(self) -> set[str] | None:
         """Last-known union of adapter task strings (``None`` = unknown)."""
         return self._tasks
+
+    @property
+    def gpu_adapters(self) -> dict[str, bool] | None:
+        """Last-known ``adapter name -> permissions.gpu`` (``None`` = unknown)."""
+        return self._gpu
 
     async def refresh(self) -> set[str] | None:
         """Fetch (at most once per TTL) and return the advertised-task set.
@@ -189,17 +198,22 @@ class KaicCapabilitiesClient(_ReusableClientMixin):
             resp.raise_for_status()
             data = resp.json()
             tasks: set[str] = set()
+            gpu: dict[str, bool] = {}
             adapters = data.get("adapters") or {}
-            for cap in adapters.values():
+            for name, cap in adapters.items():
                 for task in (cap or {}).get("tasks_advertised") or []:
                     tasks.add(str(task))
+                perms = (cap or {}).get("permissions") or {}
+                gpu[str(name)] = bool(perms.get("gpu"))
             self._tasks = tasks
+            self._gpu = gpu
         except Exception as exc:
             logger.debug(
                 "KAI-C capabilities fetch failed (%s); skills fall back to "
                 "config-based availability", exc,
             )
             self._tasks = None
+            self._gpu = None
         return self._tasks
 
 
@@ -458,6 +472,13 @@ class OllamaClient(_ReusableClientMixin):
         # spends its token budget on the ANSWER, not a hidden <think> block
         # (which otherwise leaves message.content empty → "Sorry…").
         think: bool | None = None,
+        # How long Ollama keeps the model resident after a request. -1 =
+        # forever (default) so the model never unloads between turns and no
+        # turn pays a cold reload + full re-prefill. Sent on EVERY request so
+        # residency holds no matter how the Ollama server was launched (a
+        # host-run `ollama serve` without OLLAMA_KEEP_ALIVE in its env still
+        # stays warm). On a very RAM-tight box, set a duration like "5m".
+        keep_alive: str | float = -1,
     ) -> None:
         # Talk to Ollama's NATIVE chat API. The deployment points
         # ``ollama_url`` at the raw ollama runtime (http://ollama:11434),
@@ -472,6 +493,7 @@ class OllamaClient(_ReusableClientMixin):
         self._num_thread = num_thread
         self._num_ctx = num_ctx
         self._think = think
+        self._keep_alive = keep_alive
 
     async def chat(
         self,
@@ -498,6 +520,10 @@ class OllamaClient(_ReusableClientMixin):
             "model": self._model,
             "messages": messages,
             "stream": False,
+            # Keep the model resident (see __init__): belt-and-suspenders with
+            # the server's OLLAMA_KEEP_ALIVE, and the ONLY thing that keeps a
+            # host-run Ollama warm when that env var isn't set.
+            "keep_alive": self._keep_alive,
             "options": {
                 "temperature": temperature,
                 "num_predict": max_tokens,
@@ -695,3 +721,175 @@ class PiperClient(_ReusableClientMixin):
             "or read failures"
         )
         return b""
+
+
+class OpennvrAuthClient(_ReusableClientMixin):
+    """The agent's auth delegation to the main OpenNVR server — the agent
+    never mints or stores credentials of its own (no second user table,
+    revocation and MFA stay the server's job, and a future Android app
+    speaks the exact same bearer contract).
+
+    Three calls against ``{base}/api/v1/auth``:
+
+    * :meth:`login`   → ``POST /login-json`` (username/password [+ TOTP]) —
+      passthrough of the server's token pair, so the demo page and any
+      mobile client get access **and refresh** tokens from one origin.
+    * :meth:`refresh` → ``POST /refresh`` — new pair from a refresh token.
+    * :meth:`me`      → ``GET /me`` with the presented bearer token —
+      the validation path, cached per token for ``ttl_seconds`` so a
+      page full of polling widgets costs ~one upstream call a minute,
+      not one per request. 401 → None (cached briefly too, so a bad
+      token can't hammer the server through the agent).
+    """
+
+    def __init__(self, *, base_url: str, ttl_seconds: float = 60.0,
+                 timeout_seconds: float = 5.0) -> None:
+        self._base = f"{base_url.rstrip('/')}/api/v1/auth"
+        self._ttl = ttl_seconds
+        self._timeout = timeout_seconds
+        # token -> (checked_at_monotonic, user_payload_or_None)
+        self._cache: dict[str, tuple[float, dict | None]] = {}
+        self._cache_max = 256   # bound: distinct tokens seen per TTL window
+
+    async def login(self, username: str, password: str,
+                    totp_code: str | None = None) -> tuple[int, dict]:
+        """Proxy a login. Returns (status_code, response_json) verbatim —
+        the caller relays both, so setup-required / MFA / bad-credential
+        semantics stay exactly the server's."""
+        body: dict = {"username": username, "password": password}
+        if totp_code:
+            # OpenNVR's UserLogin schema names the MFA field ``code`` (see
+            # server/schemas.py). Sending ``totp_code`` was silently dropped by
+            # Pydantic, so the server saw no code → "Invalid or missing MFA code".
+            body["code"] = totp_code
+        try:
+            resp = await self._client().post(f"{self._base}/login-json", json=body)
+            try:
+                data = resp.json()
+            except Exception:
+                data = {"detail": resp.text[:200]}
+            return resp.status_code, data
+        except Exception as exc:
+            logger.warning("auth: login proxy failed: %s", exc)
+            return 502, {"detail": "OpenNVR server unreachable"}
+
+    async def refresh(self, refresh_token: str) -> tuple[int, dict]:
+        try:
+            resp = await self._client().post(
+                f"{self._base}/refresh", json={"refresh_token": refresh_token})
+            try:
+                data = resp.json()
+            except Exception:
+                data = {"detail": resp.text[:200]}
+            return resp.status_code, data
+        except Exception as exc:
+            logger.warning("auth: refresh proxy failed: %s", exc)
+            return 502, {"detail": "OpenNVR server unreachable"}
+
+    async def me(self, token: str) -> dict | None:
+        """Validate a bearer token → the server's user payload, or None.
+        Cached per token (positive AND negative) for the TTL."""
+        now = time.monotonic()
+        hit = self._cache.get(token)
+        if hit is not None and now - hit[0] < self._ttl:
+            return hit[1]
+        user: dict | None = None
+        try:
+            resp = await self._client().get(
+                f"{self._base}/me",
+                headers={"Authorization": f"Bearer {token}"})
+            if resp.status_code == 200:
+                user = resp.json()
+        except Exception as exc:
+            logger.warning("auth: /me validation failed: %s", exc)
+            # Unreachable server → treat as invalid but DON'T cache long:
+            # drop through with user=None; the short negative cache below
+            # limits retry pressure while letting recovery be quick.
+        if len(self._cache) >= self._cache_max:
+            self._cache.clear()   # crude but bounded; refills within a TTL
+        self._cache[token] = (now, user)
+        return user
+
+
+class OpennvrRecordingsClient(_ReusableClientMixin):
+    """User-token pass-through to the main server's playback API — the
+    agent's Recorded row NEVER uses the service key for recorded video
+    (same governance line as app actions): every call carries the
+    CALLER's bearer token, so camera permissions and audit stay per-user.
+
+    Three thin forwards against ``{base}/api/v1/recordings``:
+    * :meth:`playback_cameras` → which server cameras have recordings
+      (used to resolve a server camera id → its MediaMTX path).
+    * :meth:`playback_list`    → the segment list for one path.
+    * :meth:`playback_url`     → a direct player URL for one segment —
+      the mobile-safe pattern (a plain URL ExoPlayer / <video> can
+      stream with no auth headers).
+    """
+
+    def __init__(self, *, base_url: str, timeout_seconds: float = 10.0) -> None:
+        self._root = base_url.rstrip("/")
+        self._base = f"{self._root}/api/v1/recordings"
+        self._timeout = timeout_seconds
+        # server camera id -> (resolved_at_monotonic, mediamtx path)
+        self._paths: dict[int, tuple[float, str]] = {}
+        self._path_ttl = 300.0
+
+    async def _get(self, token: str, path: str, params: dict) -> tuple[int, dict]:
+        try:
+            resp = await self._client().get(
+                f"{self._base}{path}", params=params,
+                headers={"Authorization": f"Bearer {token}"})
+            try:
+                data = resp.json()
+            except Exception:
+                data = {"error": resp.text[:200]}
+            return resp.status_code, data
+        except Exception as exc:
+            logger.warning("recordings: %s proxy failed: %s", path, exc)
+            return 502, {"error": "OpenNVR server unreachable"}
+
+    async def resolve_path(self, token: str, opennvr_camera_id: int) -> tuple[int, str | None]:
+        """Server camera id → MediaMTX path (cached ~5 min). The server
+        owns the naming convention — never guess it here."""
+        hit = self._paths.get(opennvr_camera_id)
+        if hit is not None and time.monotonic() - hit[0] < self._path_ttl:
+            return 200, hit[1]
+        status, data = await self._get(token, "/playback/cameras", {})
+        if status != 200:
+            return status, None
+        for cam in data.get("cameras") or []:
+            try:
+                cid = int(cam.get("camera_id"))
+            except (TypeError, ValueError):
+                continue
+            path = str(cam.get("path") or "")
+            if path:
+                self._paths[cid] = (time.monotonic(), path)
+        hit = self._paths.get(opennvr_camera_id)
+        return 200, (hit[1] if hit else None)
+
+    async def playback_list(self, token: str, path: str) -> tuple[int, dict]:
+        return await self._get(token, "/playback/list", {"path": path})
+
+    async def playback_url(self, token: str, path: str, start: str,
+                           duration: float) -> tuple[int, dict]:
+        return await self._get(token, "/playback/url",
+                               {"path": path, "start": start,
+                                "duration": str(duration)})
+
+    async def stream_info(self, token: str, opennvr_camera_id: int) -> tuple[int, dict]:
+        """LIVE stream info from the main server: the WHEP URL + a
+        short-lived camera-scoped MediaMTX token (the same call the
+        OpenNVR Live view makes — that's why ITS streams are smooth)."""
+        try:
+            resp = await self._client().get(
+                f"{self._root}/api/v1/streams/{opennvr_camera_id}/info",
+                headers={"Authorization": f"Bearer {token}"})
+            try:
+                data = resp.json()
+            except Exception:
+                data = {"error": resp.text[:200]}
+            return resp.status_code, data
+        except Exception as exc:
+            logger.warning("streams: info proxy failed: %s", exc)
+            return 502, {"error": "OpenNVR server unreachable"}

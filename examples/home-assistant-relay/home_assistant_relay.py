@@ -56,6 +56,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -64,6 +66,7 @@ from opennvr_app_sdk import (
     AlertSubscriber,
     AppManifest,
     Param,
+    StateView,
     alert_app,
 )
 from opennvr_app_sdk.config import load_yaml
@@ -101,6 +104,21 @@ MANIFEST = AppManifest(
                           "mapping override doesn't set one."),
     ],
     emits=[],  # pass-through: consumes alerts, emits none
+    state_schema=[
+        StateView(name="published", label="Forwarded to HA", kind="metric",
+                  path="published",
+                  description="Alerts successfully relayed to Home Assistant."),
+        StateView(name="received", label="Alerts received", kind="metric",
+                  path="received"),
+        StateView(name="failed", label="Failed", kind="metric", path="failed",
+                  description="Relays that errored (network / auth)."),
+        StateView(name="pending", label="Auto-off pending", kind="metric",
+                  path="pending_auto_off",
+                  description="Binary sensors waiting to flip back off."),
+        StateView(name="recent", label="Recent relays", kind="log",
+                  path="recent", limit=10,
+                  description="The latest alerts bridged to Home Assistant."),
+    ],
 )
 
 
@@ -335,6 +353,9 @@ class HomeAssistantRelay(AlertSubscriber):
         self._published_count = 0
         self._failed_count = 0
         self._skipped_count = 0
+        # Rolling feed of the most recently forwarded alerts — powers
+        # the "Recent relays" log on the app's dashboard.
+        self._recent: deque[dict[str, Any]] = deque(maxlen=25)
 
     async def run(self, *, once: bool = False) -> None:
         # The historical ``--once`` contract stops after the first
@@ -376,6 +397,7 @@ class HomeAssistantRelay(AlertSubscriber):
             "failed": self._failed_count,
             "skipped": self._skipped_count,
             "pending_auto_off": len(self._auto_off_tasks),
+            "recent": list(self._recent),
         }
 
     # ── Per-message handling (async override of the SDK hook) ─────
@@ -413,6 +435,12 @@ class HomeAssistantRelay(AlertSubscriber):
             self._failed_count += 1
             return
         self._published_count += 1
+        self._recent.append({
+            "message": f"{entity.full_entity_id} ← "
+                       f"{alert.get('title') or alert.get('type') or 'alert'}",
+            "time": time.time(),
+            "level": str(alert.get("severity", "")),
+        })
         self._maybe_schedule_auto_off(entity)
         if self._once_mode:
             self.stop()

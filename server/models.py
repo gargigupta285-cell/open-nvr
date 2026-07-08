@@ -114,6 +114,14 @@ class User(Base):
 
     # Relationships
     role = relationship("Role", back_populates="users")
+
+    @property
+    def role_name(self) -> str | None:
+        """The role's name, for API responses (clients — e.g. the camera
+        agent's auth delegation — map permission tiers by NAME; the raw
+        role_id would force every client to also read the roles table,
+        which is superuser-only)."""
+        return self.role.name if self.role is not None else None
     cameras = relationship("Camera", back_populates="owner")
     recordings = relationship("Recording", back_populates="created_by")
     cloud_credentials = relationship("CloudProviderCredential", back_populates="user")
@@ -188,6 +196,11 @@ class Camera(Base):
             self.encrypted_password = None
 
     rtsp_url = Column(String(500), nullable=True)
+    # Optional low-res secondary RTSP profile. When set, the camera-agent's
+    # live view (AGENT_LIVE_USE_SUBSTREAM) uses it instead of the derived
+    # vendor default — covers cameras whose substream path isn't a known
+    # Hikvision/Dahua convention.
+    substream_url = Column(String(500), nullable=True)
     is_active = Column(Boolean, default=True)
     location = Column(String(200), nullable=True)
     vlan = Column(String(50), nullable=True)

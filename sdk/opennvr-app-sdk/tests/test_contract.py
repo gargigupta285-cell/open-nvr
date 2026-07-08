@@ -9,15 +9,19 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import os
+
 import httpx
 import pytest
 
 from opennvr_app_sdk import (
+    Action,
     Alert,
     AlertDispatcher,
     AppManifest,
     Detector,
     FrameApp,
+    Param,
 )
 from opennvr_app_sdk import contract as contract_mod
 
@@ -354,3 +358,356 @@ async def test_frame_app_run_starts_registers_and_stops_contract(monkeypatch):
     assert app_obj._contract_server is None
     with pytest.raises(httpx.TransportError):
         _get(seen_ports[0], "/health")
+
+
+# ── Live config delivery (registry poll) ───────────────────────────
+
+
+class _FakeGet:
+    """Sequenced httpx.get stub: pops canned (status, body) responses,
+    repeating the last one; records every (url, headers)."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls: list[tuple[str, dict]] = []
+
+    def __call__(self, url, headers=None, timeout=None, trust_env=None):
+        self.calls.append((url, dict(headers or {})))
+        status, body = (
+            self.responses.pop(0) if len(self.responses) > 1 else self.responses[0]
+        )
+        request = httpx.Request("GET", url)
+        return httpx.Response(status, json=body, request=request)
+
+
+class _ReloadDetector(_EchoDetector):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.applied: list[dict] = []
+
+    def on_config_update(self, config):
+        self.applied.append(config)
+
+
+def test_config_poll_off_without_url_or_interval():
+    # No opennvr_url → unwired.
+    det = _ReloadDetector(_cfg(), AlertDispatcher([_RecorderChannel()]))
+    assert det.start_config_poll() is False
+    # Wired but explicitly disabled.
+    det2 = _ReloadDetector(
+        _cfg(opennvr_url="http://reg:8000", config_poll_seconds=0),
+        AlertDispatcher([_RecorderChannel()]),
+    )
+    assert det2.start_config_poll() is False
+
+
+def test_config_poll_target_url_and_auth_headers(monkeypatch):
+    monkeypatch.setenv("OPENNVR_INTERNAL_API_KEY", "env-sekrit")
+    det = _ReloadDetector(
+        _cfg(opennvr_url="http://reg:8000/"),
+        AlertDispatcher([_RecorderChannel()]),
+    )
+    url, headers = det._config_poll_target()
+    assert url == "http://reg:8000/api/v1/apps/contract-echo/config"
+    assert headers["X-Internal-Api-Key"] == "env-sekrit"
+    assert headers["Authorization"] == "Bearer env-sekrit"
+
+
+def test_config_poll_applies_first_fetch_then_only_changes(monkeypatch):
+    """The hook fires on the FIRST successful fetch (registry is the
+    source of truth — spec §05) and again only when the config
+    actually changes."""
+    fake = _FakeGet([
+        (200, {"id": "contract-echo", "config": {"threshold": 1}}),
+        (200, {"id": "contract-echo", "config": {"threshold": 1}}),  # no change
+        (200, {"id": "contract-echo", "config": {"threshold": 2}}),
+    ])
+    monkeypatch.setattr(contract_mod.httpx, "get", fake)
+    det = _ReloadDetector(
+        _cfg(opennvr_url="http://reg:8000"),
+        AlertDispatcher([_RecorderChannel()]),
+    )
+    url, headers = det._config_poll_target()
+    det._config_poll_once(url, headers)
+    det._config_poll_once(url, headers)
+    det._config_poll_once(url, headers)
+    assert det.applied == [{"threshold": 1}, {"threshold": 2}]
+
+
+def test_config_poll_tolerates_registry_failures(monkeypatch):
+    """404 (not registered yet), 500, and connection errors are all
+    debug-logged no-ops — delivery resumes when the registry recovers."""
+    fake = _FakeGet([
+        (404, {"detail": "not registered"}),
+        (500, {"detail": "boom"}),
+        (200, {"id": "contract-echo", "config": {"a": 1}}),
+    ])
+    monkeypatch.setattr(contract_mod.httpx, "get", fake)
+    det = _ReloadDetector(
+        _cfg(opennvr_url="http://reg:8000"),
+        AlertDispatcher([_RecorderChannel()]),
+    )
+    url, headers = det._config_poll_target()
+    det._config_poll_once(url, headers)
+    det._config_poll_once(url, headers)
+    assert det.applied == []
+    det._config_poll_once(url, headers)
+    assert det.applied == [{"a": 1}]
+
+
+def test_config_poll_raising_hook_does_not_stop_delivery(monkeypatch):
+    """A buggy on_config_update must not kill the poll — the NEXT edit
+    still gets delivered."""
+
+    class _Angry(_EchoDetector):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.calls = 0
+
+        def on_config_update(self, config):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("bad hook")
+
+    fake = _FakeGet([
+        (200, {"config": {"v": 1}}),
+        (200, {"config": {"v": 2}}),
+    ])
+    monkeypatch.setattr(contract_mod.httpx, "get", fake)
+    det = _Angry(
+        _cfg(opennvr_url="http://reg:8000"),
+        AlertDispatcher([_RecorderChannel()]),
+    )
+    url, headers = det._config_poll_target()
+    det._config_poll_once(url, headers)   # raises inside, swallowed
+    det._config_poll_once(url, headers)   # next change still delivered
+    assert det.calls == 2
+
+
+def test_config_poll_thread_lifecycle(monkeypatch):
+    """start_config_poll spins the daemon thread, delivers, and
+    stop_config_poll joins it."""
+    import time as _time
+
+    fake = _FakeGet([(200, {"config": {"live": True}})])
+    monkeypatch.setattr(contract_mod.httpx, "get", fake)
+    det = _ReloadDetector(
+        _cfg(opennvr_url="http://reg:8000", config_poll_seconds=0.01),
+        AlertDispatcher([_RecorderChannel()]),
+    )
+    assert det.start_config_poll() is True
+    deadline = _time.time() + 3.0
+    while not det.applied and _time.time() < deadline:
+        _time.sleep(0.01)
+    det.stop_config_poll()
+    assert det.applied and det.applied[0] == {"live": True}
+    assert det._config_poll_thread is None
+
+
+def test_default_hook_logs_restart_needed_once(monkeypatch, caplog):
+    fake = _FakeGet([
+        (200, {"config": {"v": 1}}),
+        (200, {"config": {"v": 2}}),
+    ])
+    monkeypatch.setattr(contract_mod.httpx, "get", fake)
+    det = _detector(_cfg(opennvr_url="http://reg:8000"))  # no override
+    url, headers = det._config_poll_target()
+    import logging as _logging
+
+    with caplog.at_level(_logging.INFO, logger="opennvr_app_sdk.contract"):
+        det._config_poll_once(url, headers)
+        det._config_poll_once(url, headers)
+    restarts = [r for r in caplog.records if "restart" in r.message]
+    assert len(restarts) == 1  # warned once, not per change
+
+
+# ── POST /actions/{name} (manifest-declared operator verbs) ────────
+
+
+ACTION_MANIFEST = AppManifest(
+    id="action-echo",
+    name="Action Echo",
+    version="1.0.0",
+    category="test",
+    actions=[
+        Action("greet", "Greet", params=[Param("who", str, required=True)]),
+        Action("boom", "Boom"),
+    ],
+)
+
+
+class _ActionDetector(_EchoDetector):
+    manifest = ACTION_MANIFEST
+
+    def on_action(self, name, params):
+        if name == "greet":
+            who = str(params.get("who") or "").strip()
+            if not who:
+                raise ValueError("'who' must be non-empty")
+            return {"results": [{"greeting": f"hello {who}"}]}
+        if name == "boom":
+            raise RuntimeError("kaboom")
+        raise KeyError(name)
+
+
+def _action_detector():
+    # Key-less on purpose: these tests exercise dispatch semantics; the
+    # key gate has its own test. Shield against a leaked env var.
+    os.environ.pop("OPENNVR_INTERNAL_API_KEY", None)
+    det = _ActionDetector(_cfg(), AlertDispatcher([_RecorderChannel()]))
+    server = det.start_contract_server()
+    assert server is not None
+    return det, server.port
+
+
+def _post(port: int, path: str, body) -> httpx.Response:
+    return httpx.post(
+        f"http://127.0.0.1:{port}{path}", json=body, timeout=2.0, trust_env=False
+    )
+
+
+def test_action_dispatches_and_returns_result():
+    det, port = _action_detector()
+    try:
+        resp = _post(port, "/actions/greet", {"who": "ops"})
+        assert resp.status_code == 200
+        assert resp.json() == {"results": [{"greeting": "hello ops"}]}
+    finally:
+        det.stop_contract_server()
+
+
+def test_undeclared_action_is_404_even_with_a_handler():
+    """The manifest is the single source of truth: _dispatch_action
+    refuses names the manifest doesn't declare, even though the
+    subclass's on_action would happily raise KeyError anyway — and more
+    importantly, even if it WOULD have handled the name."""
+    det, port = _action_detector()
+    try:
+        resp = _post(port, "/actions/not-declared", {})
+        assert resp.status_code == 404
+    finally:
+        det.stop_contract_server()
+
+
+def test_action_value_error_is_400_and_crash_is_500():
+    det, port = _action_detector()
+    try:
+        bad = _post(port, "/actions/greet", {"who": "  "})
+        assert bad.status_code == 400
+        assert "non-empty" in bad.json()["error"]
+        crash = _post(port, "/actions/boom", {})
+        assert crash.status_code == 500
+        assert crash.json() == {"error": "internal error"}
+    finally:
+        det.stop_contract_server()
+
+
+def test_action_body_must_be_json_object():
+    det, port = _action_detector()
+    try:
+        resp = _post(port, "/actions/greet", ["not", "an", "object"])
+        assert resp.status_code == 400
+    finally:
+        det.stop_contract_server()
+
+
+def test_actionless_manifest_has_no_post_surface():
+    """The original echo detector declares no actions — every POST 404s
+    (the dispatcher's declared-set is empty)."""
+    det = _detector()
+    server = det.start_contract_server()
+    try:
+        resp = _post(server.port, "/actions/greet", {"who": "x"})
+        assert resp.status_code == 404
+    finally:
+        det.stop_contract_server()
+
+
+def test_action_post_requires_deployment_key_when_configured(monkeypatch):
+    """The app's own action surface is key-gated (review M1): with the
+    deployment token known, an internal-network caller WITHOUT the key
+    gets 401 and the dispatcher is never reached; presenting the key
+    (as the server proxy does) works."""
+    monkeypatch.setenv("OPENNVR_INTERNAL_API_KEY", "deploy-sekrit")
+    det = _ActionDetector(_cfg(), AlertDispatcher([_RecorderChannel()]))
+    server = det.start_contract_server()
+    try:
+        bare = _post(server.port, "/actions/greet", {"who": "x"})
+        assert bare.status_code == 401
+        ok = httpx.post(
+            f"http://127.0.0.1:{server.port}/actions/greet",
+            json={"who": "x"},
+            headers={"X-Internal-Api-Key": "deploy-sekrit"},
+            timeout=2.0, trust_env=False,
+        )
+        assert ok.status_code == 200
+        wrong = httpx.post(
+            f"http://127.0.0.1:{server.port}/actions/greet",
+            json={"who": "x"},
+            headers={"X-Internal-Api-Key": "guess"},
+            timeout=2.0, trust_env=False,
+        )
+        assert wrong.status_code == 401
+        # Reads stay open — health polls don't need the key.
+        assert _get(server.port, "/health").status_code == 200
+    finally:
+        det.stop_contract_server()
+
+
+def test_action_body_size_cap(monkeypatch):
+    """A forged/huge Content-Length is refused up front (review M2) —
+    no arbitrary-size read into memory on this surface. Raw socket:
+    the server answers 413 WITHOUT reading the body, which well-behaved
+    HTTP clients treat as a protocol violation mid-send — exactly the
+    point."""
+    import socket
+
+    monkeypatch.delenv("OPENNVR_INTERNAL_API_KEY", raising=False)
+    det, port = _action_detector()
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=2.0) as s:
+            s.sendall(
+                b"POST /actions/greet HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: 524288000\r\n"
+                b"\r\n"
+            )
+            status_line = s.recv(4096).split(b"\r\n", 1)[0]
+        assert b"413" in status_line, status_line
+    finally:
+        det.stop_contract_server()
+
+
+def test_action_body_accepts_image_sized_payload(monkeypatch):
+    """A ~1MB body (a base64 face photo) is UNDER the 8MB cap and
+    dispatches normally — the cap must not block face enrollment."""
+    monkeypatch.delenv("OPENNVR_INTERNAL_API_KEY", raising=False)
+    det, port = _action_detector()
+    try:
+        big = {"who": "x" * (1024 * 1024)}  # ~1 MB
+        resp = _post(port, "/actions/greet", big)
+        assert resp.status_code == 200
+    finally:
+        det.stop_contract_server()
+
+
+def test_action_deeply_nested_body_is_400_not_thread_death(monkeypatch):
+    """RecursionError from json.loads is the bad-body class (review L3)
+    — 400, and the server keeps serving."""
+    monkeypatch.delenv("OPENNVR_INTERNAL_API_KEY", raising=False)
+    det, port = _action_detector()
+    try:
+        nested = b"[" * 10000 + b"]" * 10000
+        resp = httpx.post(
+            f"http://127.0.0.1:{port}/actions/greet",
+            content=nested,
+            headers={"Content-Type": "application/json"},
+            timeout=5.0, trust_env=False,
+        )
+        assert resp.status_code == 400
+        # Still alive after the recursion bomb.
+        ok = _post(port, "/actions/greet", {"who": "ops"})
+        assert ok.status_code == 200
+    finally:
+        det.stop_contract_server()

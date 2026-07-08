@@ -36,7 +36,7 @@ from core.database import get_db
 from models import Camera, User
 from services.camera_service import CameraService
 from services.mediamtx_jwt_service import MediaMtxJwtService
-from services.stream_service import _build_stream_name
+from services.stream_service import _build_stream_name, substream_name
 
 router = APIRouter(prefix="/streams", tags=["streams"])
 
@@ -266,12 +266,23 @@ async def get_stream_info(
         settings.mediamtx_stream_prefix, camera_id, camera.ip_address
     )
 
+    # When the low-res agent substream is enabled, scope the token to BOTH the
+    # main path and its "-sub" sibling so the same token authorizes either WHEP
+    # (the camera-agent's live view uses the sub; the main UI uses the main).
+    # Off → an exact-match scope on the main path, unchanged.
+    if settings.agent_live_use_substream:
+        import re
+
+        token_path = f"~^{re.escape(stream_name)}(-sub)?$"
+    else:
+        token_path = stream_name
+
     # Generate JWT token with all read permissions
     token = MediaMtxJwtService.create_stream_token(
         user_id=current_user.id,
         username=current_user.username,
         camera_id=camera_id,
-        camera_path=stream_name,
+        camera_path=token_path,
         actions=["read", "playback"],
         expiry_minutes=60,
     )
@@ -327,6 +338,13 @@ async def get_stream_info(
         "expires_in_minutes": 60,
         "urls": {
             "webrtc": f"{webrtc_base.rstrip('/')}/{stream_name}/whep",
+            # Low-res agent live view: present only when substreams are enabled.
+            # The camera-agent prefers this to cut WebRTC decode CPU; the main
+            # UI ignores it and keeps using the full-res "webrtc" above.
+            **(
+                {"webrtc_sub": f"{webrtc_base.rstrip('/')}/{substream_name(stream_name)}/whep"}
+                if settings.agent_live_use_substream else {}
+            ),
             "hls": f"{hls_base.rstrip('/')}/{stream_name}/index.m3u8",
             "rtsps": f"{rtsps_base.rstrip('/')}/{stream_name}",
             "rtsp": None,

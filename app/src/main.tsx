@@ -54,6 +54,7 @@ const AIModelsBYOM = lazy(() => import('./views/AIModelsBYOM').then((m) => ({ de
 const AIDetectionResults = lazy(() => import('./views/AIDetectionResults').then((m) => ({ default: m.AIDetectionResults })))
 const AIAdapters = lazy(() => import('./views/AIAdapters').then((m) => ({ default: m.AIAdapters })))
 const AppCatalog = lazy(() => import('./views/AppCatalog').then((m) => ({ default: m.AppCatalog })))
+const AppView = lazy(() => import('./views/AppView').then((m) => ({ default: m.AppView })))
 const Cloud = lazy(() => import('./views/Cloud').then((m) => ({ default: m.Cloud })))
 const OnvifTools = lazy(() => import('./views/OnvifTools').then((m) => ({ default: m.OnvifTools })))
 const Register = lazy(() => import('./views/Register').then((m) => ({ default: m.Register })))
@@ -107,6 +108,7 @@ const router = createBrowserRouter([
           { path: 'ai-detection-results', element: <AIDetectionResults /> },
           { path: 'ai-adapters', element: <AIAdapters /> },
           { path: 'app-catalog', element: <AppCatalog /> },
+          { path: 'app-catalog/:appId', element: <AppView /> },
           { path: 'compliance', element: <Compliance /> },
           { path: 'alerts-incidents', element: <AlertsIncidents /> },
           { path: 'integrations', element: <Integrations /> },

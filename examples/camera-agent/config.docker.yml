@@ -119,6 +119,13 @@ opennvr_base_url: ${OPENNVR_UI_URL}
 # app door would silently never work under compose.
 opennvr_api_url: http://opennvr-core:8000
 
+# Require an OpenNVR sign-in before anyone can talk to the agent. Every
+# non-page endpoint then needs an OpenNVR-issued bearer token, validated
+# against opennvr_api_url and mapped to viewer/operator/admin by role — the
+# agent mints no credentials of its own. The /demo page shows a branded
+# login. Set to "none" only for a throwaway open-loopback demo.
+auth_mode: opennvr
+
 host: ${CAMERA_AGENT_LISTEN_HOST}
 port: 9100
 

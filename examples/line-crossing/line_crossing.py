@@ -63,6 +63,8 @@ Run::
 from __future__ import annotations
 
 import logging
+import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -72,10 +74,11 @@ from opennvr_app_sdk import (
     AppManifest,
     Detector,
     Param,
+    StateView,
     app,
 )
 from opennvr_app_sdk.config import load_yaml
-from opennvr_app_sdk.geometry import Point, Tripwire, bbox_center
+from opennvr_app_sdk.geometry import Point, Tripwire, bbox_center, scale_vertices
 from opennvr_app_sdk.state import keyed_state
 
 logger = logging.getLogger("line-crossing")
@@ -101,6 +104,27 @@ MANIFEST = AppManifest(
         Param("line", "geometry.tripwire", per_camera=True),  # drawn in the catalog UI
     ],
     emits=[AlertType("line-crossing", severity="high")],
+    # Live dashboard — the catalog renders these from ``GET /state``
+    # (see ``state_snapshot``) with zero app-specific UI code.
+    state_schema=[
+        StateView(
+            "total_crossings", "Crossings", kind="metric", path="total_crossings",
+            description="Total tripwire crossings counted since boot.",
+        ),
+        StateView(
+            "active_tracks", "Active tracks", kind="metric", path="active_tracks",
+            description="Tracks currently held in state (not yet TTL-expired).",
+        ),
+        StateView(
+            "per_camera", "Per camera", kind="table", path="per_camera",
+            columns=["camera", "crossings"],
+            description="Crossing tally broken down by camera.",
+        ),
+        StateView(
+            "recent", "Recent crossings", kind="log", path="recent", limit=10,
+            description="Most recent crossings, newest first.",
+        ),
+    ],
 )
 
 
@@ -129,6 +153,17 @@ class AppConfig:
     nats_alerts_url: str | None = None
     nats_alerts_token: str | None = None
     nats_alerts_subject_prefix: str = "opennvr.alerts"
+
+    # App contract (spec §03) — all optional; see the SDK's contract
+    # module. ``contract_port`` serves /health /manifest /state;
+    # ``opennvr_url`` triggers registry self-registration on boot (the
+    # agent's app door + the catalog status dot) and live config
+    # delivery via on_config_update.
+    contract_port: int | None = None
+    contract_bind_host: str | None = None
+    contract_host: str | None = None
+    opennvr_url: str | None = None
+    opennvr_token: str | None = None
 
 
 def load_config(path: str) -> AppConfig:
@@ -166,15 +201,16 @@ def load_config(path: str) -> AppConfig:
     cameras_raw = raw.get("cameras") or []
     if not cameras_raw:
         raise ValueError("config: at least one camera entry is required")
+    # The App Catalog's tripwire editor stores a top-level ``line`` dict
+    # keyed by camera_id ({a, b, count_direction}) in NORMALIZED 0-1
+    # coords. When present it OVERRIDES the nested ``line:`` for that
+    # camera, scaled to pixels. Hand-written nested config still works.
+    line_override = raw.get("line")
+    line_map = line_override if isinstance(line_override, dict) else {}
     cameras: dict[str, CameraWire] = {}
     for idx, c in enumerate(cameras_raw):
         try:
-            wire = Tripwire.from_config(
-                name=str(c.get("wire_name", f"wire-{idx}")),
-                a=c["line"]["a"],
-                b=c["line"]["b"],
-                count_direction=str(c["line"].get("count_direction", "both")),
-            )
+            camera_id = str(c["camera_id"])
             frame_width = int(c.get("frame_width", 1920))
             frame_height = int(c.get("frame_height", 1080))
             if frame_width <= 0 or frame_height <= 0:
@@ -182,8 +218,25 @@ def load_config(path: str) -> AppConfig:
                     f"frame_width and frame_height must be > 0; got "
                     f"frame_width={frame_width}, frame_height={frame_height}"
                 )
+            drawn = line_map.get(camera_id)
+            if isinstance(drawn, dict) and "a" in drawn and "b" in drawn:
+                (pa, pb) = scale_vertices(
+                    [drawn["a"], drawn["b"]], frame_width, frame_height
+                )
+                wire = Tripwire.from_config(
+                    name=str(c.get("wire_name", f"wire-{idx}")),
+                    a=pa, b=pb,
+                    count_direction=str(drawn.get("count_direction", "both")),
+                )
+            else:
+                wire = Tripwire.from_config(
+                    name=str(c.get("wire_name", f"wire-{idx}")),
+                    a=c["line"]["a"],
+                    b=c["line"]["b"],
+                    count_direction=str(c["line"].get("count_direction", "both")),
+                )
             cam = CameraWire(
-                camera_id=str(c["camera_id"]),
+                camera_id=camera_id,
                 wire=wire,
                 frame_width=frame_width,
                 frame_height=frame_height,
@@ -220,6 +273,19 @@ def load_config(path: str) -> AppConfig:
         nats_alerts_url=nats_alerts_url,
         nats_alerts_token=nats_alerts_token,
         nats_alerts_subject_prefix=nats_prefix,
+        contract_port=(
+            int(raw["contract_port"]) if raw.get("contract_port") is not None else None
+        ),
+        contract_bind_host=(
+            str(raw["contract_bind_host"]) if raw.get("contract_bind_host") else None
+        ),
+        contract_host=(
+            str(raw["contract_host"]) if raw.get("contract_host") else None
+        ),
+        opennvr_url=str(raw["opennvr_url"]) if raw.get("opennvr_url") else None,
+        opennvr_token=(
+            str(raw["opennvr_token"]) if raw.get("opennvr_token") else None
+        ),
     )
 
 
@@ -250,6 +316,10 @@ class LineCrossingDetector(Detector):
             auto_gc=False,
         )
         self._warned_missing_track = False
+        # Live-dashboard bookkeeping: a running crossing tally per
+        # camera and a bounded newest-first feed for the ``/state`` view.
+        self._crossings: dict[str, int] = {}
+        self._recent: deque[dict[str, Any]] = deque(maxlen=25)
 
     def on_detections(
         self,
@@ -300,11 +370,31 @@ class LineCrossingDetector(Detector):
                 continue  # first sighting — no segment to test yet
             direction = camera.wire.crossing(prev_point, curr)
             if direction is not None:
+                # Live-dashboard tally: count the crossing and push it
+                # onto the bounded feed before dispatching the alert.
+                self._crossings[camera_id] = self._crossings.get(camera_id, 0) + 1
+                self._recent.append({
+                    "message": f"{label} crossed {camera_id} ({direction})",
+                    "time": time.time(),
+                    "level": "high",
+                })
                 fired.append(self._build_alert(
                     camera=camera, label=label, track_id=str(track_id),
                     direction=direction, event=event,
                 ))
         return fired
+
+    def state_snapshot(self) -> dict[str, Any]:
+        """The live ``GET /state`` payload the ``state_schema`` views
+        render. Keys line up with the ``StateView`` paths above."""
+        return {
+            "total_crossings": sum(self._crossings.values()),
+            "active_tracks": len(self._tracks),
+            "per_camera": [
+                {"camera": k, "crossings": v} for k, v in self._crossings.items()
+            ],
+            "recent": list(self._recent),
+        }
 
     def _build_alert(
         self,

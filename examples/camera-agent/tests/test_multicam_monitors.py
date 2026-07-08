@@ -25,7 +25,7 @@ def _runtime(detections=None):
     )
     rt = CameraAgentRuntime(cfg)
 
-    async def fake_get_frame(cam):
+    async def fake_get_frame(cam, **_kw):
         return b"\xff\xd8\xff" + cam.encode()
 
     async def fake_infer(*, frame_jpeg, **kw):

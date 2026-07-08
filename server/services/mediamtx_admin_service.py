@@ -842,6 +842,22 @@ class MediaMtxAdminService:
                     },
                 )
 
+            # Best-effort low-res substream for the camera-agent's live view
+            # (settings.agent_live_use_substream). A sub failure must NEVER
+            # affect the main path's result — the agent falls back to the
+            # main stream / stills.
+            if settings.agent_live_use_substream and result.get("http_status") in (200, 201):
+                try:
+                    await MediaMtxAdminService._provision_substream(
+                        camera_id, camera_ip, config
+                    )
+                except Exception:  # pragma: no cover - defensive
+                    mediamtx_logger.warning(
+                        f"substream provisioning raised for {name}; main path unaffected",
+                        extra={"camera_id": camera_id, "path": name,
+                               "action": "mediamtx.substream_provision_error"},
+                    )
+
             return result
 
         except httpx.ConnectError as e:
@@ -913,6 +929,54 @@ class MediaMtxAdminService:
             }
 
     @staticmethod
+    async def _provision_substream(
+        camera_id: int, camera_ip: str, config: dict[str, Any]
+    ) -> None:
+        """Add the low-res substream path ({main}-sub) for the agent live view.
+        Source-on-demand: MediaMTX only pulls the sub from the camera while
+        someone (the agent's WHEP) is actually watching it, so an idle camera
+        adds zero extra load. No recording on the sub — it's a view-only tap."""
+        from services.camera_source_resolver import derive_substream_url
+        from services.stream_service import substream_name
+
+        main_source = (
+            (config.get("source_url") or config.get("source"))
+            if isinstance(config, dict) else None
+        )
+        # An operator-stored substream URL wins (covers cameras whose sub path
+        # isn't a known Hikvision/Dahua convention); otherwise derive it.
+        stored_sub = config.get("substream_url") if isinstance(config, dict) else None
+        sub_source = stored_sub or derive_substream_url(main_source)
+        name = _build_stream_name(settings.mediamtx_stream_prefix, camera_id, camera_ip)
+        sub = substream_name(name)
+        if not sub_source:
+            mediamtx_logger.log_action(
+                "mediamtx.substream_skip",
+                camera_id=camera_id,
+                message=(f"No substream URL derivable for {name}; "
+                         "agent live view uses the main stream"),
+                extra_data={"path": sub},
+            )
+            return
+        payload = MediaMtxAdminService._map_conf({
+            "source_url": sub_source,
+            "rtsp_transport": (config.get("rtsp_transport")
+                               if isinstance(config, dict) else None),
+        })
+        payload["sourceOnDemand"] = True   # only pull while the agent watches
+        url = MediaMtxAdminService._base() + f"/config/paths/add/{sub}"
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.post(
+                url, json=payload, headers=MediaMtxAdminService._headers()
+            )
+        mediamtx_logger.log_action(
+            "mediamtx.substream_provisioned",
+            camera_id=camera_id,
+            message=f"Provisioned agent substream path {sub}",
+            extra_data={"path": sub, "http_status": resp.status_code},
+        )
+
+    @staticmethod
     async def unprovision_path(camera_id: int, camera_ip: str) -> dict[str, Any]:
         name = _build_stream_name(settings.mediamtx_stream_prefix, camera_id, camera_ip)
         if not MediaMtxAdminService.is_configured():
@@ -924,6 +988,20 @@ class MediaMtxAdminService:
         url = MediaMtxAdminService._base() + f"/config/paths/delete/{name}"
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             resp = await client.delete(url, headers=MediaMtxAdminService._headers())
+            # Tear down the agent substream path too (best-effort; harmless if
+            # it was never provisioned). Keyed off the setting so deployments
+            # not using substreams don't pay an extra call per camera delete.
+            if settings.agent_live_use_substream:
+                from services.stream_service import substream_name
+
+                try:
+                    await client.delete(
+                        MediaMtxAdminService._base()
+                        + f"/config/paths/delete/{substream_name(name)}",
+                        headers=MediaMtxAdminService._headers(),
+                    )
+                except Exception:  # pragma: no cover - best effort
+                    pass
         return MediaMtxAdminService._to_result(name, resp)
 
     @staticmethod

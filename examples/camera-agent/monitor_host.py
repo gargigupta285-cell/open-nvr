@@ -276,6 +276,7 @@ class MonitorHost:
         notify: Callable[[int, Alert], None] | None = None,
         dedup: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None,
         stop_check: Callable[[], bool] | None = None,
+        busy_check: Callable[[], bool] | None = None,
         default_interval_s: float = 8.0,
     ) -> None:
         self._get_frame = get_frame
@@ -283,6 +284,9 @@ class MonitorHost:
         self._notify = notify
         self._dedup = dedup
         self._stop_check = stop_check or (lambda: False)
+        # True while an interactive turn is in flight — the poll loop yields
+        # its inference for that cycle so the user's turn isn't starved.
+        self._busy_check = busy_check or (lambda: False)
         self._default_interval = float(default_interval_s)
         self._monitors: dict[int, HostedMonitor] = {}
         self._next_id = 1
@@ -628,10 +632,12 @@ class MonitorHost:
     async def _loop(self, mon: HostedMonitor) -> None:
         try:
             while mon.active and not self._stop_check():
-                for cam in mon.camera_ids:
-                    if not mon.active:
-                        break
-                    await self._poll(mon, cam)
+                # Yield this cycle to an in-flight interactive turn.
+                if not self._busy_check():
+                    for cam in mon.camera_ids:
+                        if not mon.active:
+                            break
+                        await self._poll(mon, cam)
                 await asyncio.sleep(mon.interval_s)
         except asyncio.CancelledError:  # pragma: no cover
             pass

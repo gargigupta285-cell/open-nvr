@@ -16,7 +16,9 @@ The thirteen shipped examples cover two orthogonal axes of the OpenNVR pipeline:
 > App Catalog (operator form, 24/7 daemon) *and* the camera agent
 > (conversation-built session monitor). See
 > [**Two Doors**](../docs/TWO_DOORS.md) for the full story and the
-> capability-matching mechanism behind it.
+> capability-matching mechanism behind it, and
+> [**App Surfaces**](../docs/APP_SURFACES.md) for how the same app also
+> gets live config, state views, and action forms — all declared.
 
 ```
                       Drives inference?

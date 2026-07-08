@@ -36,4 +36,10 @@ export const appsService = {
   installApp: (id: string) => api.post(`/api/v1/apps/index/${id}/install`),
   uninstallApp: (id: string) => api.post(`/api/v1/apps/index/${id}/uninstall`),
   getInstallStatus: (id: string) => api.get(`/api/v1/apps/index/${id}/install-status`),
+
+  // Manifest-declared operator actions (search footage, enroll a face, …),
+  // proxied through the server's user-JWT-only endpoint to the app's
+  // contract surface. The service key can never invoke these.
+  invokeAppAction: (id: string, action: string, params: Record<string, any>) =>
+    api.post(`/api/v1/apps/${id}/actions/${action}`, params),
 }

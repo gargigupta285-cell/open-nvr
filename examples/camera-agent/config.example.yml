@@ -72,6 +72,12 @@ llm_model: qwen2.5:1.5b
 llm_temperature: 0.4
 llm_max_tokens: 256
 
+# How long Ollama keeps the model resident. Sent on every request, so a
+# host-run `ollama serve` stays warm even without OLLAMA_KEEP_ALIVE in its
+# environment — no turn pays a cold reload + full re-prefill. -1 = forever
+# (default). Set a duration like "5m" on a RAM-tight box to free it when idle.
+# llm_keep_alive: -1
+
 # How long to keep a fetched camera frame in cache. The LLM often
 # calls multiple tools on the same camera (describe + detect +
 # recognise faces) inside one turn; caching avoids fetching the
@@ -196,3 +202,42 @@ system_prompt: |
   data — don't guess. Respond in 1-2 short sentences because your
   reply is spoken aloud. If the user's question can't be answered
   from the cameras, say so briefly.
+
+# External notifications (see NOTIFICATIONS.md). Webhooks take a JSON POST
+# (Slack / Discord / Teams / Home Assistant / n8n); Apprise URLs cover
+# everything else — email, Telegram, ntfy phone push, Pushover, SMS, 100+
+# services (`pip install apprise`, or the [notify] extra).
+# notify_webhooks:
+#   - https://hooks.slack.com/services/XXX/YYY/ZZZ
+# notify_apprise:
+#   - mailto://user:app-password@gmail.com
+#   - ntfy://opennvr-alerts
+# notify_events: [alarm, notify]   # add: task, report
+
+# Authentication for the agent's own endpoints (see AGENT_DESIGN.md).
+# "none" (default): open — for loopback demos ONLY. "opennvr": every data
+# and action endpoint requires an OpenNVR-issued bearer token (the demo
+# page shows a login; a mobile app sends the same tokens). Tiers by role
+# name: admin/superuser = govern skills + notifications; operator = arm
+# alarms/watches/tasks/reports; anyone else = view + chat only (their
+# chat toolset physically excludes the arming verbs).
+# auth_mode: opennvr        # requires opennvr_api_url / opennvr_base_url
+
+# Per-camera link to the MAIN server's camera (Camera.id) — lights up the
+# per-camera screen's "Recorded" row (segments + in-player playback via
+# the server's playback API, using the SIGNED-IN USER's token; the agent
+# stores no video). Omit for cameras the server doesn't record.
+# cameras:
+#   - camera_id: front-porch
+#     frame_url: http://192.168.1.50/cgi-bin/snapshot.cgi
+#     opennvr_camera_id: 3
+
+# Per-site alert-level defaults by target (merged over the built-ins:
+# fire/smoke/flame/gas → siren). Levels: siren = CRITICAL, rings until
+# silenced · pulse = URGENT, loud ~1 min then stands down · chime =
+# NOTICE, one ding · silent = log + notifications only. An explicit
+# level chosen on the alarm always wins; this only sets the default.
+# alarm_ring_defaults:
+#   snake: siren          # farm: a snake in the feed is an emergency
+#   person: siren         # bank: any person (pair with after: "18:00")
+#   vehicle: pulse

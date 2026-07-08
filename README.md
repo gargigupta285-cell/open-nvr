@@ -291,9 +291,28 @@ Commercial deployments — deployment assistance, NDA adapter authoring, complia
 
 **Project** — [Roadmap](docs/ROADMAP.md) · [Support](docs/SUPPORT.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
 
-## License & trademark
+## License, commercial use & trademark
 
-OpenNVR is **AGPLv3**. The [adapter SDK](https://github.com/open-nvr/ai-adapter/tree/main/opennvr_adapter_sdk) is **Apache-2.0**, so adapters you write can ship under any compatible license — including proprietary or classified for the organisations where that matters.
+OpenNVR is **dual-licensed** — the Qt/Linphone model, on a stronger base:
+
+- **AGPL-3.0-or-later** for the platform core: free forever, on any
+  hardware (Jetson, Pi, your own servers), for anyone who honors the
+  AGPL — including its network clause.
+- **Apache-2.0** for the developer edges: the
+  [app SDK](sdk/opennvr-app-sdk) and the
+  [adapter SDK](https://github.com/open-nvr/ai-adapter/tree/main/opennvr_adapter_sdk),
+  so apps and adapters you write can ship under any license —
+  including proprietary or classified where that matters.
+- The **OpenNVR Commercial License** for what the AGPL doesn't allow:
+  selling hardware with OpenNVR pre-installed under your brand,
+  embedding it in proprietary software, hosted offerings without
+  source disclosure, or white-labeling. Commercial builds carry the
+  "Powered by OpenNVR" mark. Full policy, decision matrix and FAQ:
+  [`docs/LICENSING.md`](docs/LICENSING.md).
+
+Contributions to the AGPL core require a [CLA](docs/CLA.md) (you keep
+your copyright; the project keeps the right to dual-license); SDK
+contributions need only a DCO sign-off.
 
 "OpenNVR" and the OpenNVR logo are trademarks of the project. You may use them to refer to the project and to describe software as "compatible with OpenNVR," but redistribution of modified versions under the OpenNVR name requires permission. See [`TRADEMARK.md`](TRADEMARK.md).
 

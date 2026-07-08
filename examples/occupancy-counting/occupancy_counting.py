@@ -78,6 +78,7 @@ from opennvr_app_sdk import (
     AppManifest,
     Detector,
     Param,
+    StateView,
     app,
 )
 from opennvr_app_sdk.config import load_yaml
@@ -110,6 +111,34 @@ MANIFEST = AppManifest(
         AlertType("occupancy_over", severity="high"),
         AlertType("occupancy_under", severity="medium"),
         AlertType("occupancy_cleared", severity="low"),
+    ],
+    # Declarative live-state views — the catalog renders GET /state
+    # (state_snapshot below) with zero app-specific UI code. The
+    # cameras dict renders as a table with the camera id as the
+    # leading column.
+    state_schema=[
+        StateView(
+            name="people",
+            label="People counted",
+            kind="metric",
+            path="total_people",
+            description="Sum of the last head-count across all watched zones.",
+        ),
+        StateView(
+            name="over",
+            label="Zones over limit",
+            kind="metric",
+            path="zones_over",
+            description="How many zones are currently above their max_occupancy.",
+        ),
+        StateView(
+            name="cameras",
+            label="Live occupancy",
+            kind="table",
+            path="cameras",
+            columns=["id", "level", "last_count", "pending"],
+            description="Current occupancy band + last count per camera.",
+        ),
     ],
 )
 
@@ -408,8 +437,12 @@ class OccupancyCounter(Detector):
         )]
 
     def state_snapshot(self) -> dict[str, Any]:
-        """``GET /state`` — live occupancy per configured camera."""
+        """``GET /state`` — live occupancy per configured camera plus
+        two roll-ups (total people, zones over limit) for the app's
+        dashboard summary chips."""
         return {
+            "total_people": sum(s.last_count for s in self._states.values()),
+            "zones_over": sum(1 for s in self._states.values() if s.level == "over"),
             "cameras": {
                 camera_id: {
                     "level": state.level,
@@ -417,7 +450,7 @@ class OccupancyCounter(Detector):
                     "pending": state.pending,
                 }
                 for camera_id, state in self._states.items()
-            }
+            },
         }
 
     def _build_alert(

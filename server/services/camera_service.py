@@ -69,6 +69,7 @@ class CameraService:
                     username=camera_create.username,
                     password=camera_create.password,
                     rtsp_url=camera_create.rtsp_url,
+                    substream_url=camera_create.substream_url,
                     location=camera_create.location,
                     vlan=camera_create.vlan,
                     status=camera_create.status or "unknown",

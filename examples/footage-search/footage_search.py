@@ -68,14 +68,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import datetime as _dt
 import logging
 import signal
 import sys
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
-from opennvr_app_sdk import Alert, AppManifest, Detector, Param
+from opennvr_app_sdk import Action, Alert, AppManifest, Detector, Param, StateView
 from opennvr_app_sdk.config import load_yaml
 
 from query import DEFAULT_LABELS, parse_heuristic, parse_with_ollama
@@ -106,6 +108,30 @@ MANIFEST = AppManifest(
         Param("result_limit", int, default=25),
     ],
     emits=[],  # writes an index; fires no alerts
+    # Declarative live-state views — rendered generically by the catalog.
+    state_schema=[
+        StateView(name="rows_total", label="Indexed keyframes",
+                  kind="metric", path="rows_total"),
+        StateView(name="session", label="This session",
+                  kind="metric", path="indexed_this_session"),
+        StateView(name="recent", label="Recent searches",
+                  kind="log", path="recent", limit=10,
+                  description="Operator queries run from the search action."),
+    ],
+    # Operator actions (user-JWT-only through the server proxy): the UI
+    # query path that replaces `docker compose exec … search "…"`.
+    actions=[
+        Action(
+            "search", "Search footage",
+            params=[
+                Param("query", str, required=True,
+                      description="Natural-language query, e.g. 'red truck at the dock yesterday'."),
+                Param("limit", int, default=10,
+                      description="Max results (1-200)."),
+            ],
+            description="Parse the query and search the footage index.",
+        ),
+    ],
 )
 
 
@@ -129,6 +155,16 @@ class AppConfig:
     camera_aliases: dict[str, str]
     ollama: OllamaConfig
     result_limit: int
+
+    # App contract (spec §03) — all optional; see the SDK's contract
+    # module. ``contract_port`` serves /health /manifest /state AND the
+    # POST /actions surface (the catalog's search form); ``opennvr_url``
+    # triggers registry self-registration + live config delivery.
+    contract_port: int | None = None
+    contract_bind_host: str | None = None
+    contract_host: str | None = None
+    opennvr_url: str | None = None
+    opennvr_token: str | None = None
 
 
 def load_config(path: str) -> AppConfig:
@@ -164,6 +200,7 @@ def load_config(path: str) -> AppConfig:
     if result_limit <= 0:
         raise ValueError("config: 'result_limit' must be > 0")
 
+    contract_port_raw = raw.get("contract_port")
     return AppConfig(
         db_path=db_path,
         nats_url=nats_url,
@@ -173,6 +210,19 @@ def load_config(path: str) -> AppConfig:
         camera_aliases=camera_aliases,
         ollama=ollama,
         result_limit=result_limit,
+        contract_port=(
+            int(contract_port_raw) if contract_port_raw is not None else None
+        ),
+        contract_bind_host=(
+            str(raw["contract_bind_host"]) if raw.get("contract_bind_host") else None
+        ),
+        contract_host=(
+            str(raw["contract_host"]) if raw.get("contract_host") else None
+        ),
+        opennvr_url=str(raw["opennvr_url"]) if raw.get("opennvr_url") else None,
+        opennvr_token=(
+            str(raw["opennvr_token"]) if raw.get("opennvr_token") else None
+        ),
     )
 
 
@@ -202,6 +252,9 @@ class Indexer(Detector):
         self._store = store
         super().__init__(config, dispatcher)
         self._indexed = 0
+        # Rolling feed of the most recent operator searches — powers the
+        # "Recent searches" log on the app's dashboard.
+        self._recent: deque[dict[str, Any]] = deque(maxlen=25)
 
     def ingest(self, event: dict[str, Any]) -> bool:
         """Index one event. Returns True if a keyframe was stored."""
@@ -227,6 +280,58 @@ class Indexer(Detector):
         return {
             "indexed_this_session": self._indexed,
             "rows_total": self._store.count(),
+            "recent": list(self._recent),
+        }
+
+    def on_action(self, name: str, params: dict[str, Any]) -> dict[str, Any]:
+        """``search`` — the manifest-declared operator action, giving the
+        catalog a UI query path (previously CLI-only via ``docker compose
+        exec … search``). Runs on the contract server's thread, so it
+        opens a FRESH read connection: the indexer's own sqlite
+        connection belongs to the NATS loop thread and sqlite connections
+        must not be used concurrently across threads."""
+        if name != "search":
+            raise KeyError(name)
+        query = str(params.get("query") or "").strip()
+        if not query:
+            raise ValueError("'query' must be a non-empty string")
+        raw_limit = params.get("limit")
+        try:
+            # `or 10` would silently turn an explicit 0 into the default
+            # instead of rejecting it — only substitute when ABSENT.
+            limit = 10 if raw_limit is None else int(raw_limit)
+        except (TypeError, ValueError):
+            raise ValueError("'limit' must be a whole number") from None
+        if not 1 <= limit <= 200:
+            raise ValueError("'limit' must be between 1 and 200")
+
+        read_store = FootageStore(self.cfg.db_path)
+        try:
+            cfg = dataclasses.replace(self.cfg, result_limit=limit)
+            results = run_search(cfg, read_store, query)
+        finally:
+            # One fresh connection PER ACTION — it must close with the
+            # request or N searches leak N file descriptors (review H1).
+            read_store.close()
+        self._recent.append({
+            "message": f"“{query}” — {len(results)} hit"
+                       f"{'' if len(results) == 1 else 's'}",
+            "time": _dt.datetime.now(tz=_dt.timezone.utc).isoformat(
+                timespec="seconds"),
+        })
+        return {
+            "query": query,
+            "results": [
+                {
+                    "camera": r.camera_id,
+                    "when": _dt.datetime.fromtimestamp(
+                        r.ts, tz=_dt.timezone.utc
+                    ).isoformat(timespec="seconds"),
+                    "labels": " ".join(r.labels),
+                    "caption": r.caption,
+                }
+                for r in results
+            ],
         }
 
     async def run(self, *, once: bool = False) -> None:

@@ -50,6 +50,18 @@ Config keys read (all via ``getattr``, all optional):
     service credential). Falls back to the
     ``OPENNVR_INTERNAL_API_KEY`` environment variable when the config
     key is absent — the natural fit for compose deployments.
+``config_poll_seconds``
+    Interval for LIVE CONFIG DELIVERY (default ``10``; ``0`` or
+    negative disables). When ``opennvr_url`` is set, the app polls
+    ``GET {opennvr_url}/api/v1/apps/{manifest.id}/config`` — the
+    registry is the single source of truth (spec §05) — and calls
+    :meth:`ContractMixin.on_config_update` with the config dict on the
+    FIRST successful fetch and on every change after. Override the
+    hook to apply params live (it must be idempotent — the first call
+    usually re-delivers what the boot config already set); the default
+    logs that a restart is needed. Poll chosen over push: it works
+    with no new inbound surface on the app and no broker dependency,
+    and the app already holds the registry URL + key for registration.
 """
 from __future__ import annotations
 
@@ -69,6 +81,21 @@ logger = logging.getLogger(__name__)
 # Budget for the one-shot registration POST at boot. Tight on purpose:
 # a slow registry must not stall app startup for long.
 REGISTER_TIMEOUT_SECONDS = 5.0
+
+# Live config delivery defaults: how often the app polls its own config
+# from the registry, and the per-request budget. The poll thread is a
+# daemon and every failure path is swallowed-and-logged — config
+# delivery must never take the app down.
+CONFIG_POLL_DEFAULT_SECONDS = 10.0
+CONFIG_POLL_TIMEOUT_SECONDS = 5.0
+
+# Ceiling on an action POST body. Most action params are small operator
+# form fields (a search query, a plate number), but some carry an
+# uploaded image (smart-doorbell's face enrollment) — a base64 photo is
+# a few MB. 8 MB accommodates that while still bounding a forged
+# Content-Length from forcing an arbitrary-size read into memory on this
+# (internal-network) surface.
+ACTION_BODY_MAX_BYTES = 8 * 1024 * 1024
 
 # Captured at import so the contract counters keep reading the REAL
 # clock even when an app's tests monkeypatch ``time.monotonic`` to
@@ -104,6 +131,69 @@ class _ContractRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(200, body)
 
+    def do_POST(self) -> None:  # noqa: N802 — http.server API
+        """``POST /actions/{name}`` — the only POST surface, and the
+        only WRITE this server exposes (health/manifest/state are
+        reads). When the app knows the deployment token it REQUIRES it
+        (``X-Internal-Api-Key``, constant-time compared): the server's
+        JWT-gated proxy forwards it, and an arbitrary process on the
+        internal network without the key gets a 401 instead of a free
+        verb. See the module docstring for the full (layered) boundary.
+
+        Routed to the action dispatcher the mixin installs;
+        declared-but-unknown names are the dispatcher's KeyError → 404,
+        bad params its ValueError → 400, anything else a 500. The
+        server itself never interprets action semantics."""
+        path = self.path.split("?", 1)[0].rstrip("/")
+        action = getattr(self.server, "action", None)
+        if action is None or not path.startswith("/actions/"):
+            self._send_json(404, {"error": f"unknown path {path!r}"})
+            return
+        name = path[len("/actions/"):]
+        if not name or "/" in name:
+            self._send_json(404, {"error": f"unknown action path {path!r}"})
+            return
+        expected_token = getattr(self.server, "action_token", None)
+        if expected_token:
+            import hmac
+
+            presented = self.headers.get("X-Internal-Api-Key") or ""
+            if not hmac.compare_digest(str(presented), str(expected_token)):
+                self._send_json(
+                    401, {"error": "action requires X-Internal-Api-Key"}
+                )
+                return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length < 0 or length > ACTION_BODY_MAX_BYTES:
+                self._send_json(
+                    413,
+                    {"error": f"action body over {ACTION_BODY_MAX_BYTES}B cap"},
+                )
+                return
+            raw = self.rfile.read(length) if length else b"{}"
+            params = json.loads(raw.decode("utf-8") or "{}")
+            if not isinstance(params, dict):
+                raise ValueError("action body must be a JSON object")
+        except (ValueError, RecursionError) as exc:
+            # RecursionError: json.loads on absurdly nested input — the
+            # same "bad body" class, and it must not kill the handler.
+            self._send_json(400, {"error": f"bad action body: {exc}"})
+            return
+        try:
+            result = action(name, params)
+        except KeyError:
+            self._send_json(404, {"error": f"unknown action {name!r}"})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except Exception:
+            logger.exception("action %s failed", name)
+            self._send_json(500, {"error": "internal error"})
+            return
+        self._send_json(200, result if result is not None else {})
+
     def _send_json(self, status: int, body: Any) -> None:
         payload = json.dumps(body).encode("utf-8")
         self.send_response(status)
@@ -121,6 +211,10 @@ class _ContractRequestHandler(BaseHTTPRequestHandler):
 class _ContractHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     routes: dict[str, Callable[[], Any]]
+    # Optional POST /actions/{name} dispatcher: (name, params) -> result.
+    action: "Callable[[str, dict[str, Any]], Any] | None"
+    # When set, POST /actions requires this X-Internal-Api-Key value.
+    action_token: "str | None"
 
 
 class ContractServer:
@@ -138,12 +232,16 @@ class ContractServer:
         health: Callable[[], dict[str, Any]],
         manifest: Callable[[], dict[str, Any]],
         state: Callable[[], dict[str, Any]],
+        action: "Callable[[str, dict[str, Any]], Any] | None" = None,
+        action_token: "str | None" = None,
         host: str = "0.0.0.0",
         port: int = 0,
     ) -> None:
         self._host = host
         self._requested_port = int(port)
         self._routes = {"/health": health, "/manifest": manifest, "/state": state}
+        self._action = action
+        self._action_token = action_token
         self._server: _ContractHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -161,6 +259,8 @@ class ContractServer:
             (self._host, self._requested_port), _ContractRequestHandler
         )
         server.routes = self._routes
+        server.action = self._action
+        server.action_token = self._action_token
         self._server = server
         self._thread = threading.Thread(
             target=server.serve_forever,
@@ -204,6 +304,11 @@ class ContractMixin:
         self._alerts_fired = 0
         self._last_event_monotonic: float | None = None
         self._contract_server: ContractServer | None = None
+        # Live config delivery (registry poll) state.
+        self._config_poll_thread: threading.Thread | None = None
+        self._config_poll_stop = threading.Event()
+        self._applied_config: dict[str, Any] | None = None
+        self._config_update_warned = False
 
     def _contract_note_event(self) -> None:
         self._events_seen += 1
@@ -243,6 +348,32 @@ class ContractMixin:
         apps (mid-migration) rather than a 500."""
         return self.manifest.to_dict() if self.manifest is not None else {}
 
+    def on_action(self, name: str, params: dict[str, Any]) -> Any:
+        """Override to implement the verbs the manifest ``actions``
+        declare (search footage, enroll a face, …). Called from the
+        contract server's thread with the operator's params — the
+        server-side proxy has already checked the caller is a user
+        (JWT, never the service key) and validated params against the
+        declared ``Action.params``.
+
+        Raise ``KeyError(name)`` for names you don't handle (→ 404) and
+        ``ValueError`` for bad params (→ 400). Return a JSON-serializable
+        result; a list-of-dicts under ``"results"`` renders as a table
+        in the catalog."""
+        raise KeyError(name)
+
+    def _dispatch_action(self, name: str, params: dict[str, Any]) -> Any:
+        """Gate + dispatch: only manifest-DECLARED actions reach
+        on_action — an undeclared name 404s even if a handler would
+        have matched, so the manifest stays the single source of truth
+        for what operators can invoke."""
+        declared = {
+            a.name for a in getattr(self.manifest, "actions", None) or ()
+        }
+        if name not in declared:
+            raise KeyError(name)
+        return self.on_action(name, dict(params))
+
     # ── Lifecycle ──────────────────────────────────────────────────
 
     def start_contract_server(self) -> ContractServer | None:
@@ -255,10 +386,19 @@ class ContractMixin:
         if port is None:
             return None
         bind_host = getattr(self.cfg, "contract_bind_host", None) or "0.0.0.0"
+        # The action POST is key-gated with the same deployment token the
+        # app registers with. When neither the config key nor the env var
+        # is present (bare dev runs) the surface stays open — compose
+        # deployments always set OPENNVR_INTERNAL_API_KEY.
+        action_token = getattr(self.cfg, "opennvr_token", None) or os.environ.get(
+            "OPENNVR_INTERNAL_API_KEY"
+        )
         server = ContractServer(
             health=self.health_snapshot,
             manifest=self.manifest_snapshot,
             state=self.state_snapshot,
+            action=self._dispatch_action,
+            action_token=action_token,
             host=bind_host,
             port=int(port),
         )
@@ -348,5 +488,134 @@ class ContractMixin:
         )
         return True
 
+    # ── Live config delivery (registry poll, spec §05) ─────────────
 
-__all__ = ["ContractServer", "ContractMixin", "REGISTER_TIMEOUT_SECONDS"]
+    def on_config_update(self, config: dict[str, Any]) -> None:
+        """Override to apply registry config edits LIVE.
+
+        Called from the poll thread — first on the initial successful
+        fetch (which usually re-delivers what the boot config already
+        set, so implementations must be IDEMPOTENT), then on every
+        change. Applying state must be thread-safe against the app's
+        run loop; for typical param swaps, rebuilding into a fresh
+        object and rebinding one attribute is atomic enough under the
+        GIL (see the license-plate-recognition watchlists for the
+        pattern).
+
+        The default logs once that live-reload isn't handled — a
+        restart applies the change — so apps that never override still
+        behave sanely.
+        """
+        if not self._config_update_warned:
+            self._config_update_warned = True
+            logger.info(
+                "registry config changed but %s has no live-reload "
+                "handler (on_config_update not overridden) — restart "
+                "the app to apply",
+                type(self).__name__,
+            )
+
+    def _config_poll_target(self) -> tuple[str, dict[str, str]] | None:
+        """(url, headers) for the config poll, or None when unwired."""
+        opennvr_url = getattr(self.cfg, "opennvr_url", None)
+        app_id = getattr(self.manifest, "id", None) if self.manifest else None
+        if not opennvr_url or not app_id:
+            return None
+        headers: dict[str, str] = {}
+        token = getattr(self.cfg, "opennvr_token", None) or os.environ.get(
+            "OPENNVR_INTERNAL_API_KEY"
+        )
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+            headers["X-Internal-Api-Key"] = str(token)
+        url = (
+            f"{str(opennvr_url).rstrip('/')}/api/v1/apps/{app_id}/config"
+        )
+        return url, headers
+
+    def _config_poll_once(self, url: str, headers: dict[str, str]) -> None:
+        """One poll tick. Never raises — every failure is a debug log
+        (the registry being down must not spam a healthy app's logs)."""
+        try:
+            response = httpx.get(
+                url,
+                headers=headers,
+                timeout=CONFIG_POLL_TIMEOUT_SECONDS,
+                trust_env=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("config poll failed (%s): %s", url, exc)
+            return
+        if response.status_code >= 400:
+            # 404 is normal before first registration succeeds.
+            logger.debug(
+                "config poll rejected (%s): HTTP %d", url, response.status_code
+            )
+            return
+        try:
+            config = response.json().get("config")
+        except Exception:  # noqa: BLE001
+            logger.debug("config poll: non-JSON body from %s", url)
+            return
+        if not isinstance(config, dict):
+            return
+        if config == self._applied_config:
+            return
+        self._applied_config = config
+        try:
+            self.on_config_update(dict(config))
+        except Exception:
+            # A raising hook must not kill the poll thread — next edit
+            # still gets delivered.
+            logger.exception("on_config_update raised; config NOT applied")
+
+    def start_config_poll(self) -> bool:
+        """Start the live-config poll thread iff wired + enabled.
+
+        Requires ``cfg.opennvr_url`` + a manifest id (same conditions
+        as self-registration) and a positive ``config_poll_seconds``
+        (default 10s; set ``0`` to disable). Idempotent. Returns True
+        when the thread is running.
+        """
+        if self._config_poll_thread is not None:
+            return True
+        target = self._config_poll_target()
+        if target is None:
+            return False
+        raw = getattr(self.cfg, "config_poll_seconds", None)
+        interval = (
+            CONFIG_POLL_DEFAULT_SECONDS if raw is None else float(raw)
+        )
+        if interval <= 0:
+            return False
+        url, headers = target
+
+        def _loop() -> None:
+            while not self._config_poll_stop.wait(timeout=interval):
+                self._config_poll_once(url, headers)
+
+        self._config_poll_stop.clear()
+        thread = threading.Thread(
+            target=_loop, name="opennvr-app-config-poll", daemon=True
+        )
+        self._config_poll_thread = thread
+        thread.start()
+        logger.info(
+            "live config delivery: polling %s every %.0fs", url, interval
+        )
+        return True
+
+    def stop_config_poll(self) -> None:
+        thread = self._config_poll_thread
+        self._config_poll_thread = None
+        self._config_poll_stop.set()
+        if thread is not None:
+            thread.join(timeout=3.0)
+
+
+__all__ = [
+    "ContractServer",
+    "ContractMixin",
+    "REGISTER_TIMEOUT_SECONDS",
+    "CONFIG_POLL_DEFAULT_SECONDS",
+]

@@ -49,6 +49,23 @@ def test_defaults_omit_num_thread():
     assert opts["num_ctx"] == 4096
 
 
+def test_keep_alive_defaults_to_resident_and_is_sent():
+    # Default: model stays resident (-1), sent on every request so a host-run
+    # Ollama stays warm without OLLAMA_KEEP_ALIVE in its env.
+    c = OllamaClient(url="http://x:11434", token="", model="qwen3:1.7b")
+    cap = _capture_body(c)
+    asyncio.run(c.chat(messages=[{"role": "user", "content": "hi"}]))
+    assert cap["body"]["keep_alive"] == -1
+
+
+def test_keep_alive_override():
+    c = OllamaClient(url="http://x:11434", token="", model="qwen3:1.7b",
+                     keep_alive="5m")
+    cap = _capture_body(c)
+    asyncio.run(c.chat(messages=[{"role": "user", "content": "hi"}]))
+    assert cap["body"]["keep_alive"] == "5m"
+
+
 def test_runtime_threads_config_reaches_client():
     cfg = AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t",
                     llm_num_threads=2, llm_num_ctx=2048,
@@ -56,3 +73,11 @@ def test_runtime_threads_config_reaches_client():
     rt = CameraAgentRuntime(cfg)
     assert rt.ollama._num_thread == 2
     assert rt.ollama._num_ctx == 2048
+
+
+def test_runtime_keep_alive_config_reaches_client():
+    cfg = AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+                    llm_keep_alive="10m",
+                    cameras=[CameraSpec(camera_id="c", frame_url="http://x/1.jpg", role="r")])
+    rt = CameraAgentRuntime(cfg)
+    assert rt.ollama._keep_alive == "10m"

@@ -1016,6 +1016,28 @@ async def v1_aggregated_capabilities():
     return get_registry().aggregated_capabilities()
 
 
+@app.get("/api/v1/adapters-metrics", dependencies=[Depends(require_internal_api_key)])
+async def v1_fleet_metrics():
+    """The FLEET rollup — every adapter's §05 snapshot in one call, so
+    the UI's fleet strip (N ok / worst p95 / total rpm) doesn't fan out
+    across N requests. Same payload per adapter as the single-adapter
+    endpoint, keyed by name."""
+    registry = get_registry()
+    out: dict[str, Any] = {}
+    for summary in registry.list_summaries():
+        name = summary.get("name")
+        if not name:
+            continue
+        adapter = registry.get(name)
+        if adapter is None:
+            continue
+        snap = registry.metrics.snapshot(name)
+        snap["max_inflight"] = adapter.capabilities.scheduling.max_inflight
+        snap["status"] = summary.get("status")
+        out[name] = snap
+    return {"adapters": out}
+
+
 @app.get("/api/v1/adapters/{name}/metrics", dependencies=[Depends(require_internal_api_key)])
 async def v1_adapter_metrics(name: str):
     """Observability spec §05 — the windowed rollup for one adapter,

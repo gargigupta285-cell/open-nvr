@@ -46,6 +46,12 @@
 #                use_case_map.yml. The OpenNVR Agent uses these to tell an
 #                operator which adapter to enable when a skill is greyed
 #                out (guidance only; the agent never enables one itself).
+#   hardware:    editorial hardware guidance for the adapters that
+#                typically back this task. ``min`` = what it runs on
+#                (fallback always works); ``recommended`` = what makes it
+#                fast (omit when a CPU is simply fine); ``note`` = one
+#                honest measured/practical line. Drives the agent UI's
+#                "Hardware" panel — advisory only, never a gate.
 #   suggested_apps: catalog app id(s) from examples/ that deliver this
 #                task's capability as a packaged use case — the app-install
 #                on-ramp alongside suggested_adapters. Same editorial
@@ -62,6 +68,10 @@
   aliases: [detect_objects, object-detection]
   suggested_adapters: [yolov8]
   suggested_apps: [intrusion-detection, loitering-detection, occupancy-counting]
+  hardware:
+    min: 2-core x86_64/ARM64 CPU, ~1 GB RAM
+    recommended: NVIDIA GPU (CUDA) — any 4 GB+ card
+    note: CPU fallback works at reduced fps; a GPU lifts detection ~10-20x.
 
 - task: face_recognition
   label: Face Recognition
@@ -72,6 +82,10 @@
   aliases: []
   suggested_adapters: [insightface]
   suggested_apps: [smart-doorbell]
+  hardware:
+    min: 2-core CPU, ~2 GB RAM
+    recommended: NVIDIA GPU (CUDA) for busy doors / many enrollments
+    note: CPU handles doorbell-rate traffic; GPU speeds embedding on crowds.
 
 - task: image_captioning
   label: Image Captioning
@@ -84,6 +98,10 @@
   # duplication so both count as backing the agent's "see" skill.
   aliases: [scene_caption, image-captioning]
   suggested_adapters: [blip, moondream]
+  hardware:
+    min: 4-core CPU, ~4 GB RAM
+    recommended: NVIDIA GPU (CUDA), 4 GB+ VRAM
+    note: Vision-language models are the heaviest task here — GPU strongly advised for frequent captions.
 
 - task: vqa
   label: Visual Question Answering
@@ -93,6 +111,10 @@
   agent_skill: see
   aliases: [visual_question_answering]
   suggested_adapters: [moondream]
+  hardware:
+    min: 4-core CPU, ~4 GB RAM
+    recommended: NVIDIA GPU (CUDA), 4 GB+ VRAM
+    note: Same engine class as captioning — GPU advised for frequent questions.
 
 - task: face_detection
   label: Face Detection
@@ -119,6 +141,9 @@
   aliases: [lpr, anpr]
   suggested_adapters: [fast-plate-ocr]
   suggested_apps: [license-plate-recognition]
+  hardware:
+    min: 2-core CPU, ~1 GB RAM
+    note: Plate OCR is CPU-friendly; the object detector feeding it sets the real bar.
 
 - task: multi_object_tracking
   label: Multi-Object Tracking
@@ -128,6 +153,9 @@
   agent_skill: null
   aliases: [tracking, mot]
   suggested_adapters: [bytetrack]
+  hardware:
+    min: 2-core CPU, <1 GB RAM
+    note: Box association is lightweight — the detector feeding it is the real cost.
 
 - task: speech_to_text
   label: Speech to Text
@@ -137,6 +165,10 @@
   agent_skill: null
   aliases: [asr, stt, transcription]
   suggested_adapters: [whisper]
+  hardware:
+    min: 4-core CPU (small/base models)
+    recommended: NVIDIA GPU (CUDA) for medium+ models or many concurrent speakers
+    note: Voice mode only — chat mode skips ASR entirely.
 
 - task: text_to_speech
   label: Text to Speech
@@ -146,3 +178,6 @@
   agent_skill: null
   aliases: [tts, speech_synthesis]
   suggested_adapters: [piper]
+  hardware:
+    min: 4-core CPU
+    note: The measured CPU hog (~4 cores while speaking) — text mode avoids it entirely.

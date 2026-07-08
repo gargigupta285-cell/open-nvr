@@ -45,6 +45,7 @@ import signal
 import sys
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -60,7 +61,7 @@ from alerts import (
     build_dispatcher,
 )
 from frame_sources import FrameSource, FrameSourceError, build_frame_source
-from opennvr_app_sdk import AlertType, AppManifest, FrameApp, Param
+from opennvr_app_sdk import AlertType, AppManifest, FrameApp, Param, StateView
 from opennvr_app_sdk.frame_sources import DictFrameSource
 from plate_pipeline import (
     PlatePipeline,
@@ -110,6 +111,21 @@ MANIFEST = AppManifest(
                   description="Info-severity read for unlisted plates."),
         AlertType("plate_expected", severity="low"),
         AlertType("plate_watchlist", severity="high"),
+    ],
+    # Declarative live-state views over state_snapshot (GET /state) —
+    # rendered generically by the catalog. Sizes update live as the
+    # registry watchlists apply through on_config_update.
+    state_schema=[
+        StateView(name="allowlist_size", label="Allowlist",
+                  kind="metric", path="allowlist_size"),
+        StateView(name="denylist_size", label="Denylist",
+                  kind="metric", path="denylist_size"),
+        StateView(name="deduped", label="Plates deduped",
+                  kind="metric", path="deduped_plates_tracked",
+                  description="Distinct (camera, plate) pairs in the dedup window."),
+        StateView(name="recent", label="Recent plate reads",
+                  kind="log", path="recent", limit=12,
+                  description="Latest reads; denylist hits show red."),
     ],
 )
 
@@ -381,8 +397,17 @@ class LicensePlateRecognizer(FrameApp):
         # actually-fired", never refreshes on suppression, and its
         # shape is pinned by this app's test suite.
         self._last_fired: dict[tuple[str, str], float] = {}
-        self._allowlist = {p for p in config.allowlist if p}
-        self._denylist = {p for p in config.denylist if p}
+        # Rolling feed of the most recent plate reads — powers the
+        # "Recent plate reads" log on the app's dashboard.
+        self._recent: deque[dict[str, Any]] = deque(maxlen=25)
+        # BOTH watchlists live in ONE tuple attribute so a live config
+        # swap is a single rebind: a reader can never observe new-allow
+        # with old-deny mid-update (the alert-severity routing reads
+        # both sets per plate).
+        self._watchlists: tuple[set[str], set[str]] = (
+            {p for p in config.allowlist if p},
+            {p for p in config.denylist if p},
+        )
 
     def request_stop(self) -> None:
         """Historical name — the SDK base spells it ``stop()``."""
@@ -418,6 +443,11 @@ class LicensePlateRecognizer(FrameApp):
 
             alert = self._build_alert(cam, read)
             self.dispatcher.dispatch(alert)
+            self._recent.append({
+                "message": f"{read.plate_text.upper()} on {cam.camera_id}",
+                "time": time.time(),
+                "level": alert.severity,
+            })
             fired += 1
         # Wire the app-dispatched alerts into the SDK contract counters
         # (/health's alerts_fired) — the base loop can't see them
@@ -430,16 +460,58 @@ class LicensePlateRecognizer(FrameApp):
         return {
             "cameras": [cam.camera_id for cam in self.config.cameras],
             "deduped_plates_tracked": len(self._last_fired),
-            "allowlist_size": len(self._allowlist),
-            "denylist_size": len(self._denylist),
+            "allowlist_size": len(self._watchlists[0]),
+            "denylist_size": len(self._watchlists[1]),
+            "recent": list(self._recent),
         }
+
+    def on_config_update(self, config: dict[str, Any]) -> None:
+        """Live config delivery (SDK registry poll): apply watchlist
+        edits from the catalog's config form WITHOUT a restart.
+
+        Called from the SDK's poll thread; idempotent by construction
+        (tuple equality short-circuits the no-change case, including the
+        first fetch that re-delivers the boot config). The swap is ONE
+        rebind of a single ``(allow, deny)`` tuple — a reader in the
+        frame loop sees either wholly-old or wholly-new lists, never a
+        mixed pair (a plate moving allow→deny can't transiently match
+        neither). Plates normalize exactly like ``load_config``
+        (upper + strip).
+
+        Only the watchlists apply live: they are pure per-read lookups.
+        Camera topology / adapter / interval edits still need a restart
+        (they are baked into the running pipeline), which the SDK's
+        default log line already tells the operator.
+        """
+        allow = {
+            str(p).upper().strip()
+            for p in (config.get("allowlist") or [])
+            if str(p).strip()
+        }
+        deny = {
+            str(p).upper().strip()
+            for p in (config.get("denylist") or [])
+            if str(p).strip()
+        }
+        if (allow, deny) == self._watchlists:
+            return
+        self._watchlists = (allow, deny)
+        logger.info(
+            "watchlists updated live from the registry: "
+            "allowlist=%d denylist=%d",
+            len(allow),
+            len(deny),
+        )
 
     def _build_alert(self, cam: CameraConfig, read: PlateRead) -> Alert:
         plate_upper = read.plate_text.upper()
-        if plate_upper in self._denylist:
+        # ONE read of the tuple → both membership tests see the same
+        # generation of the watchlists even mid-config-swap.
+        allowlist, denylist = self._watchlists
+        if plate_upper in denylist:
             severity = "high"
             title = f"Watchlist plate {plate_upper} seen"
-        elif plate_upper in self._allowlist:
+        elif plate_upper in allowlist:
             severity = "low"
             title = f"Expected plate {plate_upper} seen"
         else:
@@ -464,8 +536,8 @@ class LicensePlateRecognizer(FrameApp):
                 "vehicle_confidence": round(read.vehicle_confidence, 4),
                 "vehicle_bbox": list(read.vehicle_bbox),
                 "model_id": read.model_id,
-                "in_allowlist": plate_upper in self._allowlist,
-                "in_denylist": plate_upper in self._denylist,
+                "in_allowlist": plate_upper in allowlist,
+                "in_denylist": plate_upper in denylist,
             },
         )
 

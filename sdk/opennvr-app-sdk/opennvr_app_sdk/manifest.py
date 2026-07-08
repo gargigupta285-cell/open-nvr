@@ -74,6 +74,99 @@ class AlertType:
 
 
 @dataclass
+class StateView:
+    """One declarative view over the app's ``GET /state`` payload.
+
+    The catalog renders these with ZERO app-specific UI code — the same
+    bet as ``params`` → config form. An app that exposes richer live
+    state (occupancy per zone, plates deduped, tracks active) declares
+    how to show it instead of shipping a frontend:
+
+    ``kind="metric"``
+        A single scalar at ``path`` rendered as a stat chip
+        (e.g. ``path="denylist_size"`` → "Denylist · 4").
+    ``kind="table"``
+        A list at ``path``; ``columns`` names the keys to show when the
+        rows are dicts. A list of scalars renders as one column.
+    ``kind="gauge"``
+        A numeric ``path`` rendered as a horizontal bar between ``min``
+        and ``max``, coloured amber past ``warn`` and red past
+        ``danger`` (e.g. zone occupancy). A dict-of-numbers renders one
+        gauge per key (per camera / per zone).
+    ``kind="log"``
+        A recent-events feed: ``path`` is a list of strings or dicts
+        ``{message, time, level}``; newest ``limit`` shown first.
+    ``kind="gallery"``
+        A thumbnail wall: ``path`` is a list of dicts
+        ``{image|url, label, time}`` — for plate crops, package or
+        doorbell snapshots. ``image`` may be a ``data:`` URI.
+
+    ``path`` is a dot-path into the ``/state`` dict (``"zones"``,
+    ``"counters.in"``). A missing path renders as an em-dash, never an
+    error — ``/state`` is live data and may not have filled in yet.
+    """
+
+    name: str
+    label: str
+    kind: str = "metric"  # metric | table | gauge | log | gallery
+    path: str = ""
+    columns: list[str] = field(default_factory=list)
+    description: str = ""
+    # gauge bounds/thresholds (ignored by other kinds)
+    min: float | None = None
+    max: float | None = None
+    unit: str = ""
+    warn: float | None = None
+    danger: float | None = None
+    # log / gallery: how many recent entries to show
+    limit: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        # Drop unset optionals so manifests stay lean and the frontend's
+        # `?? default` fallbacks apply cleanly.
+        d = asdict(self)
+        for k in ("min", "max", "warn", "danger", "limit"):
+            if d.get(k) is None:
+                d.pop(k, None)
+        if not d.get("unit"):
+            d.pop("unit", None)
+        return d
+
+
+@dataclass
+class Action:
+    """One operator-invokable action on the app's contract surface.
+
+    Declared like params, rendered like params: the catalog builds a
+    generic form from ``params`` and POSTs it to
+    ``/actions/{name}`` on the app — proxied through the server's
+    ``POST /api/v1/apps/{id}/actions/{name}``, which is **user-JWT
+    only**. The governance boundary is deliberate: actions are operator
+    verbs (search footage, enroll a face); the OpenNVR Agent's service
+    key can read state but can NEVER invoke an action.
+
+    ``confirm=True`` makes the catalog ask before invoking (for actions
+    with side effects). The app implements the verb by overriding
+    :meth:`ContractMixin.on_action`.
+    """
+
+    name: str
+    label: str
+    params: list[Param] = field(default_factory=list)
+    description: str = ""
+    confirm: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "label": self.label,
+            "params": [p.to_dict() for p in self.params],
+            "description": self.description,
+            "confirm": self.confirm,
+        }
+
+
+@dataclass
 class AppManifest:
     """The static identity + schema of one app.
 
@@ -92,6 +185,14 @@ class AppManifest:
     subscribes: str | None = None
     params: list[Param] = field(default_factory=list)
     emits: list[AlertType] = field(default_factory=list)
+    # Declarative live-state views (optional) — how the catalog renders
+    # this app's GET /state payload. Empty ⇒ the catalog shows raw
+    # state JSON as before.
+    state_schema: list[StateView] = field(default_factory=list)
+    # Declarative operator actions (optional) — verbs the catalog can
+    # invoke on the app's contract surface via the server's JWT-only
+    # proxy. Empty ⇒ no Actions section renders.
+    actions: list[Action] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """The ``GET /manifest`` payload (and the ``manifest_json``
@@ -106,4 +207,6 @@ class AppManifest:
             "subscribes": self.subscribes,
             "params": [p.to_dict() for p in self.params],
             "emits": [a.to_dict() for a in self.emits],
+            "state_schema": [v.to_dict() for v in self.state_schema],
+            "actions": [a.to_dict() for a in self.actions],
         }

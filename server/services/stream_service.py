@@ -44,6 +44,16 @@ def _build_stream_name(prefix: str, camera_id: int, camera_ip: str) -> str:
     return f"{prefix}{sanitized}"
 
 
+# The low-res substream lives at the main path name + this suffix (e.g.
+# "cam-1" -> "cam-1-sub"). Shared so the provisioner and the camera-agent
+# endpoint always agree on the name.
+SUBSTREAM_SUFFIX = "-sub"
+
+
+def substream_name(main_name: str) -> str:
+    return f"{main_name}{SUBSTREAM_SUFFIX}"
+
+
 def build_whep_url(
     camera_id: int, camera_ip: str, token: str | None = None, extra: dict | None = None
 ) -> str:

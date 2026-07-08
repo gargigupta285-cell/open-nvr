@@ -109,6 +109,18 @@ function summarizeAdapter(name: string, caps: AdapterInfo | undefined, health: A
 // Each panel is captioned with the operator decision it drives, per the
 // "metrics grouped by the decision they drive" table.
 
+type SeriesPoint = {
+  ts: number
+  inflight: number | null
+  queue_depth: number | null
+  rpm: number | null
+  p95_ms: number | null
+  cpu_percent: number | null
+  memory_bytes: number | null
+  gpu_utilization: number | null
+  gpu_memory_bytes: number | null
+}
+
 type AdapterMetricsResp = {
   adapter: string
   window_s: number
@@ -117,8 +129,67 @@ type AdapterMetricsResp = {
   inflight: number | null
   max_inflight: number | null
   queue_depth: number | null
+  hardware?: {
+    cpu_percent: number | null
+    memory_bytes: number | null
+    gpu_utilization: number | null
+    gpu_memory_bytes: number | null
+  }
+  series?: SeriesPoint[]
   fingerprint_changes: string[]
   samples: number
+}
+
+type FleetMetricsResp = {
+  adapters: Record<string, AdapterMetricsResp & { status?: string }>
+}
+
+function formatBytes(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return '—'
+  if (v >= 1 << 30) return `${(v / (1 << 30)).toFixed(1)} GiB`
+  if (v >= 1 << 20) return `${Math.round(v / (1 << 20))} MiB`
+  return `${Math.round(v / 1024)} KiB`
+}
+
+// Inline SVG sparkline — no charting dependency for a 60-point trend.
+function Sparkline({ points, height = 28, className }: {
+  points: Array<number | null>
+  height?: number
+  className?: string
+}) {
+  const vals = points.filter((v): v is number => v != null && Number.isFinite(v))
+  if (vals.length < 2) {
+    return <div className="text-[11px] text-[var(--text-dim)]">not enough samples for a trend yet</div>
+  }
+  const min = Math.min(...vals)
+  const max = Math.max(...vals)
+  const span = max - min || 1
+  const w = 100
+  const step = w / (points.length - 1)
+  let d = ''
+  points.forEach((v, i) => {
+    if (v == null || !Number.isFinite(v)) return
+    const x = i * step
+    const y = height - 3 - ((v - min) / span) * (height - 6)
+    d += (d ? ' L' : 'M') + `${x.toFixed(1)} ${y.toFixed(1)}`
+  })
+  return (
+    <svg viewBox={`0 0 ${w} ${height}`} preserveAspectRatio="none"
+      className={`w-full ${className ?? ''}`} style={{ height }} aria-hidden="true">
+      <path d={d} fill="none" stroke="currentColor" strokeWidth="1.5"
+        vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function SparkRow({ label, points, latest }: { label: string; points: Array<number | null>; latest: string }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="font-mono text-[11px] text-[var(--text-dim)] w-14 shrink-0">{label}</span>
+      <div className="flex-1 text-[var(--accent,#5eb3f6)] opacity-90"><Sparkline points={points} /></div>
+      <span className="font-mono text-[11px] tabular-nums w-16 text-right shrink-0">{latest}</span>
+    </div>
+  )
 }
 
 function formatMs(v: number | null | undefined): string {
@@ -523,6 +594,46 @@ function AdapterMetricsSection({ name }: { name: string }) {
                 <MetricPanel title="Fingerprint / drift" decision="re-validate accuracy; freeze for compliance">
                   <FingerprintChanges changes={m.fingerprint_changes ?? []} />
                 </MetricPanel>
+                {(m.series?.length ?? 0) > 1 && (
+                  <MetricPanel title="Trends — last hour" decision="is it degrading or recovering; when did it change">
+                    <div className="space-y-1.5">
+                      <SparkRow label="p95" points={(m.series ?? []).map(pt => pt.p95_ms)}
+                        latest={formatMs(m.latency_ms?.p95)} />
+                      <SparkRow label="req/min" points={(m.series ?? []).map(pt => pt.rpm)}
+                        latest={String((m.series ?? []).filter(pt => pt.rpm != null).slice(-1)[0]?.rpm ?? '—')} />
+                      <SparkRow label="inflight" points={(m.series ?? []).map(pt => pt.inflight)}
+                        latest={`${m.inflight ?? '—'}${m.max_inflight ? `/${m.max_inflight}` : ''}`} />
+                    </div>
+                  </MetricPanel>
+                )}
+                {m.hardware && (m.hardware.cpu_percent != null || m.hardware.memory_bytes != null
+                  || m.hardware.gpu_utilization != null || m.hardware.gpu_memory_bytes != null) ? (
+                  <MetricPanel title="Hardware" decision="smaller model / bigger card / move the adapter">
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 font-mono text-xs">
+                      <span className="text-[var(--text-dim)]">CPU</span>
+                      <span className="tabular-nums">{m.hardware.cpu_percent != null ? `${Math.round(m.hardware.cpu_percent)}%` : '—'}</span>
+                      <span className="text-[var(--text-dim)]">Memory</span>
+                      <span className="tabular-nums">{formatBytes(m.hardware.memory_bytes)}</span>
+                      <span className="text-[var(--text-dim)]">GPU util</span>
+                      <span className="tabular-nums">{m.hardware.gpu_utilization != null ? `${Math.round(m.hardware.gpu_utilization)}%` : '—'}</span>
+                      <span className="text-[var(--text-dim)]">GPU mem</span>
+                      <span className="tabular-nums">{formatBytes(m.hardware.gpu_memory_bytes)}</span>
+                    </div>
+                    {(m.series?.length ?? 0) > 1 && (m.series ?? []).some(pt => pt.cpu_percent != null) && (
+                      <div className="mt-1.5">
+                        <SparkRow label="cpu %" points={(m.series ?? []).map(pt => pt.cpu_percent)}
+                          latest={m.hardware.cpu_percent != null ? `${Math.round(m.hardware.cpu_percent)}%` : '—'} />
+                      </div>
+                    )}
+                  </MetricPanel>
+                ) : (
+                  <MetricPanel title="Hardware" decision="smaller model / bigger card / move the adapter">
+                    <div className="text-[11px] text-[var(--text-dim)]">
+                      Not exported by this adapter — it MAY export adapter_process_cpu_percent /
+                      adapter_process_memory_bytes / adapter_gpu_* gauges (optional, spec §05).
+                    </div>
+                  </MetricPanel>
+                )}
               </div>
             </div>
           ) : null}
@@ -532,9 +643,63 @@ function AdapterMetricsSection({ name }: { name: string }) {
   )
 }
 
+function useFleetMetrics() {
+  return useQuery({
+    queryKey: ['adapter-fleet-metrics'],
+    queryFn: async () => {
+      const { data } = await apiService.getFleetMetrics()
+      return data as FleetMetricsResp
+    },
+    retry: 0,
+    refetchInterval: 60_000, // rides KAI-C's own 60s scrape cadence
+  })
+}
+
+// The 5-second fleet answer before any scrolling: how many healthy, the
+// worst p95, total request rate, and whether any model drifted.
+function FleetStrip({ fleet }: { fleet: FleetMetricsResp | undefined }) {
+  if (!fleet) return null
+  const entries = Object.values(fleet.adapters ?? {})
+  const withSamples = entries.filter((m) => (m.samples ?? 0) > 0)
+  if (!entries.length) return null
+  const ok = entries.filter((m) => (m.status ?? 'ok') === 'ok').length
+  const worst = withSamples.reduce<{ name: string; p95: number } | null>((acc, m) => {
+    const p95 = m.latency_ms?.p95
+    if (p95 == null) return acc
+    return !acc || p95 > acc.p95 ? { name: m.adapter, p95 } : acc
+  }, null)
+  const rpm = withSamples.reduce((sum, m) => {
+    const last = (m.series ?? []).filter((pt) => pt.rpm != null).slice(-1)[0]
+    return sum + (last?.rpm ?? 0)
+  }, 0)
+  const drifted = entries.filter((m) => (m.fingerprint_changes?.length ?? 0) > 0).length
+  const nearCeiling = entries.filter((m) =>
+    m.inflight != null && m.max_inflight ? m.inflight / m.max_inflight >= 0.8 : false).length
+  return (
+    <Card>
+      <CardContent className="flex flex-wrap items-center gap-x-6 gap-y-2 py-3 font-mono text-xs">
+        <span><span className="text-emerald-400 font-bold tabular-nums">{ok}</span>
+          <span className="text-[var(--text-dim)]">/{entries.length} adapters ok</span></span>
+        <span><span className="text-[var(--text-dim)]">worst p95 </span>
+          <span className="font-bold tabular-nums">{worst ? `${formatMs(worst.p95)}` : '—'}</span>
+          {worst && <span className="text-[var(--text-dim)]"> ({worst.name})</span>}</span>
+        <span><span className="font-bold tabular-nums">{Math.round(rpm)}</span>
+          <span className="text-[var(--text-dim)]"> req/min fleet-wide</span></span>
+        <span className={nearCeiling ? 'text-amber-400' : ''}>
+          <span className="font-bold tabular-nums">{nearCeiling}</span>
+          <span className={nearCeiling ? '' : 'text-[var(--text-dim)]'}> near capacity</span></span>
+        <span className={drifted ? 'text-amber-400' : ''}>
+          <span className="font-bold tabular-nums">{drifted}</span>
+          <span className={drifted ? '' : 'text-[var(--text-dim)]'}> with model drift (1h)</span></span>
+      </CardContent>
+    </Card>
+  )
+}
+
 export function AIAdapters() {
   const healthQuery = useKaiHealth()
   const capsQuery = useKaiCapabilities()
+  const fleetQuery = useFleetMetrics()
   const [expanded, setExpanded] = useState<string | null>(null)
 
   const loading = healthQuery.isPending || capsQuery.isPending
@@ -557,13 +722,15 @@ export function AIAdapters() {
     <section className="space-y-4">
       <PageHeader
         title="AI Adapters"
-        description="Models registered with KAI-C, the sovereignty and audit gateway. Every inference the platform runs goes through one of these adapters."
+        description="Models registered with KAI-C, the sovereignty and audit gateway. Every inference the platform runs goes through one of these adapters. Health & metrics update on KAI-C's 60s scrape."
         actions={
           <Button onClick={refresh} disabled={loading}>
             <RefreshCw size={14} className={healthQuery.isFetching || capsQuery.isFetching ? 'animate-spin' : ''} /> Refresh
           </Button>
         }
       />
+
+      <FleetStrip fleet={fleetQuery.data} />
 
       {/* KAI-C gateway status */}
       <Card>

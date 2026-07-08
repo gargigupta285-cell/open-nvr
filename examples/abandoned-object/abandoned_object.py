@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -75,6 +76,7 @@ from opennvr_app_sdk import (
     AppManifest,
     Detector,
     Param,
+    StateView,
     app,
 )
 from opennvr_app_sdk.config import load_yaml
@@ -112,6 +114,32 @@ MANIFEST = AppManifest(
         Param("zones", "geometry.polygon", per_camera=True),  # drawn in the catalog UI
     ],
     emits=[AlertType("abandoned-object", severity="high")],
+    # Declarative live view — the catalog renders the stationary-object
+    # bookkeeping with no app-specific UI code.
+    state_schema=[
+        StateView(
+            name="watched_objects",
+            label="Watched objects",
+            kind="metric",
+            path="watched_objects",
+            description="Stationary-candidate object tracks currently held in state.",
+        ),
+        StateView(
+            name="abandoned",
+            label="Abandoned",
+            kind="metric",
+            path="abandoned",
+            description="Watched objects that have crossed the dwell threshold and alerted.",
+        ),
+        StateView(
+            name="objects",
+            label="Settling now",
+            kind="table",
+            path="objects",
+            columns=["camera", "label", "dwell_s", "abandoned"],
+            description="Each tracked object, its current dwell time, and whether it has fired.",
+        ),
+    ],
 )
 
 
@@ -143,6 +171,17 @@ class AppConfig:
     nats_alerts_url: str | None = None
     nats_alerts_token: str | None = None
     nats_alerts_subject_prefix: str = "opennvr.alerts"
+
+    # App contract (spec §03) — all optional; see the SDK's contract
+    # module. ``contract_port`` serves /health /manifest /state;
+    # ``opennvr_url`` triggers registry self-registration on boot (the
+    # agent's app door + the catalog status dot) and live config
+    # delivery via on_config_update.
+    contract_port: int | None = None
+    contract_bind_host: str | None = None
+    contract_host: str | None = None
+    opennvr_url: str | None = None
+    opennvr_token: str | None = None
 
 
 def load_config(path: str) -> AppConfig:
@@ -226,6 +265,19 @@ def load_config(path: str) -> AppConfig:
         nats_alerts_url=nats_alerts_url,
         nats_alerts_token=nats_alerts_token,
         nats_alerts_subject_prefix=nats_prefix,
+        contract_port=(
+            int(raw["contract_port"]) if raw.get("contract_port") is not None else None
+        ),
+        contract_bind_host=(
+            str(raw["contract_bind_host"]) if raw.get("contract_bind_host") else None
+        ),
+        contract_host=(
+            str(raw["contract_host"]) if raw.get("contract_host") else None
+        ),
+        opennvr_url=str(raw["opennvr_url"]) if raw.get("opennvr_url") else None,
+        opennvr_token=(
+            str(raw["opennvr_token"]) if raw.get("opennvr_token") else None
+        ),
     )
 
 
@@ -366,6 +418,31 @@ class AbandonedObjectDetector(Detector):
             ))
             track.alerted = True
         return fired
+
+    def state_snapshot(self) -> dict[str, Any]:
+        """``GET /state`` — the live stationary-object bookkeeping. Dwell
+        is measured against wall time (POSIX seconds), the same timeline
+        the records' ``settled_since`` rides on (event ``completed_at``
+        with a clock fallback)."""
+        now = time.time()
+        objects: list[dict[str, Any]] = []
+        abandoned = 0
+        for (camera_id, _track_id), track in self._objects.items():
+            if track.alerted:
+                abandoned += 1
+            objects.append({
+                "camera": camera_id,
+                "label": track.label,
+                # Clamp: out-of-order / future event timestamps must not
+                # surface a negative dwell.
+                "dwell_s": round(max(0.0, now - track.settled_since), 1),
+                "abandoned": track.alerted,
+            })
+        return {
+            "watched_objects": len(self._objects),
+            "abandoned": abandoned,
+            "objects": objects,
+        }
 
     def _person_near(self, camera_id: str, point: Point, now_ts: float) -> bool:
         cutoff = now_ts - self.cfg.owner_grace_seconds

@@ -22,7 +22,7 @@ def _runtime(faces_url=None):
     )
     rt = CameraAgentRuntime(cfg)
 
-    async def fake_get_frame(cam):
+    async def fake_get_frame(cam, **_kw):
         return b"\xff\xd8\xffFRAME"
 
     rt.context.get_frame = fake_get_frame

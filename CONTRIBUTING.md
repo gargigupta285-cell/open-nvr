@@ -329,3 +329,18 @@ We want this to stay a project people enjoy contributing to. The expectation is 
 ## Getting help while you contribute
 
 For deeper reference reading, [`docs/AI_ADAPTER_CONTRACT.md`](docs/AI_ADAPTER_CONTRACT.md) covers the wire spec and [`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md) covers the threat model. Open a [Discussion](https://github.com/open-nvr/open-nvr/discussions) for "is this the right approach?" questions before you start writing code, and an [Issue](https://github.com/open-nvr/open-nvr/issues) for "I think I found a bug" reports.
+
+
+## Licensing of contributions (CLA / DCO)
+
+OpenNVR is dual-licensed (AGPL-3.0-or-later + a commercial license —
+see [docs/LICENSING.md](docs/LICENSING.md)), which requires the project
+to hold dual-licensing rights over every contributed line of the AGPL
+core:
+
+- **AGPL components** (server, app, kai-c, camera-agent, examples):
+  PRs require the one-time [CLA](docs/CLA.md). You keep your
+  copyright; you grant the project the right to also offer your
+  contribution under the commercial license.
+- **Apache-2.0 SDKs** (`sdk/`, the adapter contract): no CLA — add a
+  DCO `Signed-off-by:` line to your commits.

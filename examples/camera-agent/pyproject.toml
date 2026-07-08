@@ -46,6 +46,11 @@ opennvr-app-sdk = { path = "../../sdk/opennvr-app-sdk", editable = true }
 device = [
     "opencv-python-headless>=4.8",
 ]
+# notify_apprise channels (email/Telegram/ntfy/Pushover/… — see
+# NOTIFICATIONS.md). Imported lazily; configured URLs no-op without it.
+notify = [
+    "apprise>=1.7",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23",

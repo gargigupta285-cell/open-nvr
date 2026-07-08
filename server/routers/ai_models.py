@@ -354,6 +354,18 @@ async def get_capabilities(
         )
 
 
+@router.get("/adapters-metrics")
+async def get_fleet_metrics(
+    current_user: User = Depends(get_current_active_user),
+):
+    """Every adapter's windowed rollup in one call — the AI Adapters
+    page's fleet strip (N ok / worst p95 / total rpm) reads this."""
+    try:
+        return await kai_c_service.get_fleet_metrics()
+    except httpx.HTTPError:
+        raise HTTPException(status_code=502, detail="KAI-C unreachable")
+
+
 @router.get("/adapters/{adapter_name}/metrics")
 async def get_adapter_metrics(
     adapter_name: str,

@@ -23,15 +23,19 @@
 // manifest param schema — no app-specific UI code.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, Boxes, Check, Copy, Download, ExternalLink, RefreshCw, Settings2, Trash2 } from 'lucide-react'
+import { Activity, ArrowRight, Boxes, Check, Copy, Download, ExternalLink, RefreshCw, Settings2, Trash2 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
 import { Modal } from '../components/Modal'
 import { useSnackbar } from '../components/Snackbar'
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, EmptyState, ErrorCard, PageHeader, Skeleton, type BadgeVariant } from '../components/ui'
+import { GeometryEditor } from './apps/GeometryEditor'
+import { ChipListEditor } from './apps/ChipListEditor'
+import { TimeWindowEditor } from './apps/TimeWindowEditor'
 
-type ManifestParam = {
+export type ManifestParam = {
   name: string
   type: string
   default?: any
@@ -40,7 +44,7 @@ type ManifestParam = {
   description?: string
 }
 
-type AppManifest = {
+export type AppManifest = {
   id: string
   name: string
   version: string
@@ -50,9 +54,30 @@ type AppManifest = {
   subscribes?: string[]
   params?: ManifestParam[]
   emits?: { name: string; severity?: string; description?: string }[]
+  // Declarative live-state views (SDK StateView.to_dict()) — rendered
+  // generically by LiveStateViews below; absent for older manifests.
+  state_schema?: {
+    name: string
+    label: string
+    kind: 'metric' | 'table'
+    path?: string
+    columns?: string[]
+    description?: string
+  }[]
+  // Declarative operator actions (SDK Action.to_dict()) — generic forms
+  // POSTed through the server's user-JWT-only proxy.
+  actions?: ManifestAction[]
 }
 
-type RegisteredApp = {
+export type ManifestAction = {
+  name: string
+  label: string
+  params?: ManifestParam[]
+  description?: string
+  confirm?: boolean
+}
+
+export type RegisteredApp = {
   id: string
   name: string
   category: string
@@ -65,7 +90,7 @@ type RegisteredApp = {
   config?: Record<string, any> | null
 }
 
-type AppStatusResp = {
+export type AppStatusResp = {
   health?: { status?: string; [k: string]: any } | null
   state?: any
 }
@@ -211,7 +236,7 @@ function InstallStatusNote({ status }: { status: InstallStatusResp }) {
   )
 }
 
-function asStringList(v: unknown): string[] {
+export function asStringList(v: unknown): string[] {
   if (Array.isArray(v)) return v.map(String)
   return []
 }
@@ -225,7 +250,7 @@ function availableTasks(caps: CapabilitiesResp | undefined): Set<string> {
   return tasks
 }
 
-function statusVariant(status?: string): BadgeVariant {
+export function statusVariant(status?: string): BadgeVariant {
   switch ((status || '').toLowerCase()) {
     case 'ok':
     case 'ready':
@@ -250,7 +275,7 @@ function statusVariant(status?: string): BadgeVariant {
 /** Params whose values aren't scalar edit as JSON in the generated form. */
 function isJsonParam(p: ManifestParam): boolean {
   const t = (p.type || '').toLowerCase()
-  return p.per_camera === true || t === 'list' || t.startsWith('geometry.') || t === 'dict' || t === 'json'
+  return p.per_camera === true || t === 'list' || t.startsWith('geometry.') || t === 'dict' || t === 'json' || t === 'time_range'
 }
 
 function initialFormValue(p: ManifestParam, config: Record<string, any> | null | undefined): string | boolean {
@@ -262,7 +287,7 @@ function initialFormValue(p: ManifestParam, config: Record<string, any> | null |
 
 /* ------------------------- Config modal ------------------------- */
 
-function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: () => void }) {
+export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: () => void }) {
   const queryClient = useQueryClient()
   const { showSuccess } = useSnackbar()
   const params = app.manifest?.params ?? []
@@ -332,7 +357,16 @@ function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: () => v
   }
 
   return (
-    <Modal open title={`Configure ${app.name}`} onClose={onClose} widthClassName="w-[560px]">
+    <Modal
+      open
+      title={`Configure ${app.name}`}
+      onClose={onClose}
+      widthClassName={
+        params.some((p) => (p.type || '').toLowerCase().startsWith('geometry.'))
+          ? 'w-[720px]'
+          : 'w-[560px]'
+      }
+    >
       {params.length === 0 ? (
         <div className="text-sm text-[var(--text-dim)]">This app declares no configurable parameters.</div>
       ) : (
@@ -351,7 +385,24 @@ function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: () => v
                   </span>
                 </label>
                 {p.description && <div className="text-xs text-[var(--text-dim)] mb-1">{p.description}</div>}
-                {isJsonParam(p) ? (
+                {t === 'geometry.polygon' || t === 'geometry.tripwire' ? (
+                  <GeometryEditor
+                    kind={t === 'geometry.tripwire' ? 'tripwire' : 'polygon'}
+                    value={String(value ?? '')}
+                    onChange={(json) => setValues((v) => ({ ...v, [p.name]: json }))}
+                  />
+                ) : t === 'list' && !p.per_camera ? (
+                  <ChipListEditor
+                    value={String(value ?? '')}
+                    placeholder={`add ${p.name} value, Enter`}
+                    onChange={(json) => setValues((v) => ({ ...v, [p.name]: json }))}
+                  />
+                ) : t === 'time_range' ? (
+                  <TimeWindowEditor
+                    value={String(value ?? '')}
+                    onChange={(range) => setValues((v) => ({ ...v, [p.name]: range }))}
+                  />
+                ) : isJsonParam(p) ? (
                   <textarea
                     className="w-full h-28 px-2 py-1.5 text-sm font-mono rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
                     value={String(value ?? '')}
@@ -396,6 +447,215 @@ function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: () => v
   )
 }
 
+/* ------------------- Image param (action forms) ------------------ */
+
+// A file picker for `image`/`file` action params. Reads the chosen
+// image as RAW base64 (data: prefix stripped) into the param value and
+// shows a thumbnail. Used by smart-doorbell's face enrollment.
+function ImageParamInput({ hasValue, onPick }: { hasValue: boolean; onPick: (b64: string) => void }) {
+  const [preview, setPreview] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const MAX_BYTES = 6 * 1024 * 1024 // under the SDK's 8MB action-body cap after base64
+
+  const onFile = (file: File | undefined) => {
+    setErr(null)
+    if (!file) return
+    if (!file.type.startsWith('image/')) return setErr('Please choose an image file.')
+    if (file.size > MAX_BYTES) return setErr('Image is too large (max ~6 MB).')
+    const reader = new FileReader()
+    reader.onload = () => {
+      const dataUrl = String(reader.result || '')
+      setPreview(dataUrl)
+      onPick(dataUrl.includes(',') ? dataUrl.split(',', 2)[1] : dataUrl) // raw base64
+    }
+    reader.onerror = () => setErr('Could not read the file.')
+    reader.readAsDataURL(file)
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <input
+        type="file"
+        accept="image/*"
+        className="block w-full text-sm text-[var(--text-dim)] file:mr-2 file:px-2 file:py-1 file:rounded file:border file:border-[var(--border)] file:bg-[var(--bg-2)] file:text-[var(--text)]"
+        onChange={(e) => onFile(e.target.files?.[0])}
+      />
+      {preview && (
+        <img src={preview} alt="selected" className="h-24 rounded border border-[var(--border)] object-cover" />
+      )}
+      {!preview && hasValue && <div className="text-xs text-[var(--text-dim)]">image selected</div>}
+      {err && <div className="text-xs text-red-400">{err}</div>}
+    </div>
+  )
+}
+
+/* --------------------------- Action modal ------------------------ */
+
+// Generic form for one manifest-declared action — the same
+// params-to-form mechanics as the config modal, POSTed through the
+// server's user-JWT-only proxy to the app's /actions/{name}. Results
+// with a list under "results" reuse the TableView renderer; anything
+// else pretty-prints.
+export function AppActionModal({
+  app,
+  action,
+  onClose,
+}: {
+  app: RegisteredApp
+  action: ManifestAction
+  onClose: () => void
+}) {
+  const params = action.params ?? []
+  const [values, setValues] = useState<Record<string, string | boolean>>(() =>
+    Object.fromEntries(
+      params.map((p) => [
+        p.name,
+        (p.type || '').toLowerCase() === 'bool'
+          ? Boolean(p.default)
+          : p.default == null
+            ? ''
+            : typeof p.default === 'object'
+              ? JSON.stringify(p.default)
+              : String(p.default),
+      ])
+    )
+  )
+  const [error, setError] = useState<string | null>(null)
+  const [result, setResult] = useState<any>(null)
+
+  const runMutation = useMutation({
+    mutationFn: (payload: Record<string, any>) =>
+      apiService.invokeAppAction(app.id, action.name, payload),
+    onSuccess: ({ data }) => {
+      setError(null)
+      setResult(data)
+    },
+    onError: (e) => setError(extractApiError(e, `${action.label} failed.`)),
+  })
+
+  const submit = () => {
+    setError(null)
+    const payload: Record<string, any> = {}
+    for (const p of params) {
+      const raw = values[p.name]
+      const t = (p.type || '').toLowerCase()
+      const text = String(raw ?? '').trim()
+      if (t === 'bool') {
+        payload[p.name] = Boolean(raw)
+      } else if (t === 'int' || t === 'float') {
+        if (!text) {
+          if (p.required) return setError(`"${p.name}" is required.`)
+          continue
+        }
+        const num = Number(text)
+        if (!Number.isFinite(num) || (t === 'int' && !Number.isInteger(num))) {
+          return setError(`"${p.name}" must be a valid ${t === 'int' ? 'integer' : 'number'}.`)
+        }
+        payload[p.name] = num
+      } else if (t === 'list' || t === 'dict') {
+        if (!text) {
+          if (p.required) return setError(`"${p.name}" is required.`)
+          continue
+        }
+        try {
+          payload[p.name] = JSON.parse(text)
+        } catch {
+          return setError(`"${p.name}" is not valid JSON.`)
+        }
+      } else {
+        if (!text && p.required) return setError(`"${p.name}" is required.`)
+        if (text || !p.required) payload[p.name] = text
+      }
+    }
+    if (action.confirm && !window.confirm(`Run "${action.label}" on ${app.name}?`)) return
+    runMutation.mutate(payload)
+  }
+
+  const resultsList = Array.isArray(result?.results) ? result.results : null
+
+  return (
+    <Modal open title={`${action.label} — ${app.name}`} onClose={onClose} widthClassName="w-[640px]">
+      <div className="space-y-3">
+        {action.description && (
+          <div className="text-sm text-[var(--text-dim)]">{action.description}</div>
+        )}
+        {params.map((p) => {
+          const t = (p.type || '').toLowerCase()
+          const value = values[p.name]
+          return (
+            <div key={p.name}>
+              <label className="block text-sm mb-1">
+                <span className="font-medium">{p.name}</span>
+                <span className="ml-2 text-xs text-[var(--text-dim)]">
+                  {p.type}
+                  {p.required ? ' · required' : ''}
+                </span>
+              </label>
+              {p.description && (
+                <div className="text-xs text-[var(--text-dim)] mb-1">{p.description}</div>
+              )}
+              {t === 'bool' ? (
+                <label className="inline-flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(value)}
+                    onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.checked }))}
+                  />
+                  Enabled
+                </label>
+              ) : t === 'image' || t === 'file' ? (
+                <ImageParamInput
+                  hasValue={Boolean(String(value ?? ''))}
+                  onPick={(b64) => setValues((v) => ({ ...v, [p.name]: b64 }))}
+                />
+              ) : (
+                <input
+                  type={t === 'int' || t === 'float' ? 'number' : 'text'}
+                  step={t === 'float' ? 'any' : undefined}
+                  className="w-full px-2 py-1.5 text-sm rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+                  value={String(value ?? '')}
+                  onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.value }))}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') submit()
+                  }}
+                />
+              )}
+            </div>
+          )
+        })}
+
+        {error && <div className="text-sm text-red-400">{error}</div>}
+
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose}>Close</Button>
+          <Button variant="primary" onClick={submit} disabled={runMutation.isPending}>
+            {runMutation.isPending ? 'Running…' : action.label}
+          </Button>
+        </div>
+
+        {result != null && (
+          <div className="pt-2 border-t border-[var(--border)] space-y-2">
+            {resultsList ? (
+              resultsList.length === 0 ? (
+                <div className="text-sm text-[var(--text-dim)]">No results.</div>
+              ) : (
+                <TableView
+                  view={{ name: 'results', label: `Results (${resultsList.length})`, kind: 'table' }}
+                  value={resultsList}
+                />
+              )
+            ) : (
+              <pre className="text-xs bg-[var(--bg-2)] border border-[var(--border)] rounded p-2 overflow-x-auto">
+                {JSON.stringify(result, null, 2)}
+              </pre>
+            )}
+          </div>
+        )}
+      </div>
+    </Modal>
+  )
+}
+
 /* -------------------------- Status chip -------------------------- */
 
 // Lazy: only fetched after the operator clicks "Check" — the registry list is
@@ -434,22 +694,305 @@ function AppStatusChip({ appId }: { appId: string }) {
   )
 }
 
+/* ----------------------- Declarative state views ------------------ */
+
+// Manifest-declared views over GET /state (SDK StateView) — the same
+// zero-app-specific-UI bet as params → config form. Rendered from the
+// SAME react-query cache entry the status chip fills, so the live state
+// appears when the operator clicks "Check" and refreshes with it.
+export type StateViewSpec = {
+  name: string
+  label: string
+  kind: 'metric' | 'table' | 'gauge' | 'log' | 'gallery'
+  path?: string
+  columns?: string[]
+  description?: string
+  // gauge
+  min?: number
+  max?: number
+  unit?: string
+  warn?: number
+  danger?: number
+  // log / gallery
+  limit?: number
+}
+
+function getStatePath(obj: any, path?: string): any {
+  if (!path) return obj
+  return path.split('.').reduce((acc: any, key: string) => (acc == null ? undefined : acc[key]), obj)
+}
+
+function MetricView({ view, value }: { view: StateViewSpec; value: any }) {
+  let display: string
+  if (value == null) display = '—'
+  else if (Array.isArray(value)) display = String(value.length)
+  else if (typeof value === 'object') display = String(Object.keys(value).length)
+  else display = String(value)
+  return (
+    <div
+      className="rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-xs"
+      title={view.description || view.name}
+    >
+      <span className="text-[var(--text-dim)]">{view.label}</span>{' '}
+      <span className="font-semibold">{display}</span>
+    </div>
+  )
+}
+
+function TableView({ view, value }: { view: StateViewSpec; value: any }) {
+  // Accept a list of dicts, a list of scalars, or a dict-of-dicts
+  // (rendered with the key as a leading "id" column) — /state shapes
+  // vary and the renderer must never crash on live data.
+  let rows: Record<string, any>[] = []
+  if (Array.isArray(value)) {
+    rows = value.map((v) => (v != null && typeof v === 'object' ? v : { value: v }))
+  } else if (value != null && typeof value === 'object') {
+    rows = Object.entries(value).map(([k, v]) => ({
+      id: k,
+      ...(v != null && typeof v === 'object' ? (v as Record<string, any>) : { value: v }),
+    }))
+  }
+  if (rows.length === 0) return null
+  const columns =
+    view.columns && view.columns.length > 0
+      ? view.columns.filter((c) => rows.some((r) => c in r))
+      : Array.from(new Set(rows.flatMap((r) => Object.keys(r)))).slice(0, 6)
+  if (columns.length === 0) return null
+  return (
+    <div className="overflow-x-auto" title={view.description || view.name}>
+      <div className="text-xs text-[var(--text-dim)] mb-1">{view.label}</div>
+      <table className="w-full text-xs border-collapse">
+        <thead>
+          <tr>
+            {columns.map((c) => (
+              <th key={c} className="text-left px-2 py-1 border-b border-[var(--border)] text-[var(--text-dim)] font-normal">
+                {c}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.slice(0, 25).map((row, i) => (
+            <tr key={i}>
+              {columns.map((c) => (
+                <td key={c} className="px-2 py-1 border-b border-[var(--border)]">
+                  {row[c] == null ? '—' : typeof row[c] === 'object' ? JSON.stringify(row[c]) : String(row[c])}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {rows.length > 25 && (
+        <div className="text-xs text-[var(--text-dim)] mt-1">…and {rows.length - 25} more</div>
+      )}
+    </div>
+  )
+}
+
+// A single horizontal gauge: value against min..max with warn/danger
+// thresholds coloring the fill. Used for occupancy, queue depth, etc.
+function GaugeBar({ label, value, view }: { label: string; value: number; view: StateViewSpec }) {
+  const min = view.min ?? 0
+  const max = view.max ?? 100
+  const span = max - min || 1
+  const pct = Math.max(0, Math.min(100, ((value - min) / span) * 100))
+  const danger = view.danger != null && value >= view.danger
+  const warn = !danger && view.warn != null && value >= view.warn
+  const color = danger ? 'var(--danger,#ef4444)' : warn ? 'var(--warning,#f59e0b)' : 'var(--success,#22c55e)'
+  return (
+    <div title={view.description || view.name}>
+      <div className="flex items-baseline justify-between text-xs mb-1">
+        <span className="text-[var(--text-dim)]">{label}</span>
+        <span className="font-semibold tabular-nums">
+          {value}
+          {view.unit ? <span className="text-[var(--text-dim)] font-normal"> {view.unit}</span> : null}
+        </span>
+      </div>
+      <div className="h-2 w-full rounded-full bg-[var(--bg-2)] overflow-hidden">
+        <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
+      </div>
+    </div>
+  )
+}
+
+function GaugeView({ view, value }: { view: StateViewSpec; value: any }) {
+  // Scalar → one gauge; dict-of-numbers → one gauge per key (per camera/zone).
+  const entries: [string, number][] =
+    value != null && typeof value === 'object' && !Array.isArray(value)
+      ? Object.entries(value)
+          .filter(([, v]) => typeof v === 'number')
+          .map(([k, v]) => [k, v as number])
+      : typeof value === 'number'
+        ? [[view.label, value]]
+        : []
+  if (entries.length === 0) return null
+  const single = entries.length === 1 && entries[0][0] === view.label
+  return (
+    <div title={view.description || view.name}>
+      {!single && <div className="text-xs text-[var(--text-dim)] mb-1">{view.label}</div>}
+      <div className="space-y-2">
+        {entries.map(([k, v]) => (
+          <GaugeBar key={k} label={k} value={v} view={view} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function fmtWhen(v: unknown): string {
+  if (v == null) return ''
+  if (typeof v === 'number') {
+    // epoch seconds or ms → relative age
+    const now = Date.now() / 1000
+    const t = v > 1e12 ? v / 1000 : v
+    const age = Math.max(0, now - t)
+    if (age < 60) return `${Math.floor(age)}s ago`
+    if (age < 3600) return `${Math.floor(age / 60)}m ago`
+    if (age < 86400) return `${Math.floor(age / 3600)}h ago`
+    return `${Math.floor(age / 86400)}d ago`
+  }
+  return String(v)
+}
+
+function LogView({ view, value }: { view: StateViewSpec; value: any }) {
+  // A recent-events feed: array of strings or {message/text, time/ts, level}.
+  if (!Array.isArray(value) || value.length === 0) return null
+  const limit = view.limit ?? 12
+  const rows = value.slice(-limit).reverse()
+  return (
+    <div title={view.description || view.name}>
+      <div className="text-xs text-[var(--text-dim)] mb-1">{view.label}</div>
+      <div className="rounded border border-[var(--border)] bg-[var(--bg-2)] divide-y divide-[var(--border)] max-h-64 overflow-y-auto">
+        {rows.map((row, i) => {
+          const isObj = row != null && typeof row === 'object'
+          const msg = isObj ? row.message ?? row.text ?? row.msg ?? JSON.stringify(row) : String(row)
+          const when = isObj ? fmtWhen(row.time ?? row.ts ?? row.timestamp ?? row.at) : ''
+          const level = isObj ? String(row.level ?? row.severity ?? '') : ''
+          const dot = level === 'high' || level === 'error' ? 'var(--danger,#ef4444)'
+            : level === 'warn' || level === 'warning' ? 'var(--warning,#f59e0b)'
+            : 'var(--text-dim)'
+          return (
+            <div key={i} className="flex items-start gap-2 px-2 py-1.5 text-xs">
+              <span className="mt-1 h-1.5 w-1.5 rounded-full shrink-0" style={{ background: dot }} />
+              <span className="flex-1 break-words">{msg}</span>
+              {when && <span className="text-[var(--text-dim)] shrink-0 tabular-nums">{when}</span>}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function GalleryView({ view, value }: { view: StateViewSpec; value: any }) {
+  // A thumbnail wall: array of {image|url|src (data-uri or path), label, time}.
+  // For LPR plate crops, package-on-porch snapshots, doorbell faces.
+  if (!Array.isArray(value) || value.length === 0) return null
+  const limit = view.limit ?? 12
+  const items = value.slice(-limit).reverse()
+  return (
+    <div title={view.description || view.name}>
+      <div className="text-xs text-[var(--text-dim)] mb-1">{view.label}</div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+        {items.map((it, i) => {
+          const isObj = it != null && typeof it === 'object'
+          const src = isObj ? it.image ?? it.url ?? it.src ?? it.thumbnail : typeof it === 'string' ? it : undefined
+          const caption = isObj ? it.label ?? it.plate ?? it.name ?? it.caption : undefined
+          const when = isObj ? fmtWhen(it.time ?? it.ts ?? it.timestamp ?? it.at) : ''
+          return (
+            <div key={i} className="rounded border border-[var(--border)] bg-[var(--bg-2)] overflow-hidden">
+              {src ? (
+                <img src={src} alt={caption || 'snapshot'} className="w-full h-24 object-cover" loading="lazy" />
+              ) : (
+                <div className="w-full h-24 grid place-items-center text-[var(--text-dim)] text-xs">no image</div>
+              )}
+              {(caption || when) && (
+                <div className="px-2 py-1 text-xs flex items-center justify-between gap-1">
+                  <span className="truncate font-medium">{caption}</span>
+                  {when && <span className="text-[var(--text-dim)] shrink-0">{when}</span>}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+export function LiveStateViews({ appId, views }: { appId: string; views: StateViewSpec[] }) {
+  // Same key as AppStatusChip; enabled:false — this component only
+  // OBSERVES the cache the chip's "Check" fills (no extra fan-out).
+  const statusQuery = useQuery({
+    queryKey: ['app-status', appId],
+    queryFn: async () => {
+      const { data } = await apiService.getAppStatus(appId)
+      return data as AppStatusResp
+    },
+    enabled: false,
+    retry: 0,
+  })
+  const state = statusQuery.data?.state
+  if (state == null) return null
+  const metrics = views.filter((v) => v.kind === 'metric')
+  const gauges = views.filter((v) => v.kind === 'gauge')
+  // Tables, logs and galleries are full-width blocks rendered in the
+  // author's declared order (so a manifest can interleave them).
+  const blocks = views.filter((v) => v.kind === 'table' || v.kind === 'log' || v.kind === 'gallery')
+  return (
+    <div className="space-y-3 pt-1">
+      {metrics.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {metrics.map((v) => (
+            <MetricView key={v.name} view={v} value={getStatePath(state, v.path)} />
+          ))}
+        </div>
+      )}
+      {gauges.length > 0 && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-3">
+          {gauges.map((v) => (
+            <GaugeView key={v.name} view={v} value={getStatePath(state, v.path)} />
+          ))}
+        </div>
+      )}
+      {blocks.map((v) =>
+        v.kind === 'table' ? (
+          <TableView key={v.name} view={v} value={getStatePath(state, v.path)} />
+        ) : v.kind === 'log' ? (
+          <LogView key={v.name} view={v} value={getStatePath(state, v.path)} />
+        ) : (
+          <GalleryView key={v.name} view={v} value={getStatePath(state, v.path)} />
+        )
+      )}
+    </div>
+  )
+}
+
 /* ---------------------------- App card --------------------------- */
 
 function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<string>; onConfigure: () => void }) {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const { showSuccess, showError } = useSnackbar()
   const [uninstallPollActive, setUninstallPollActive] = useState(false)
   const [uninstallNote, setUninstallNote] = useState<string | null>(null)
+  // Manifest-declared operator action currently open in its form modal.
+  const [activeAction, setActiveAction] = useState<ManifestAction | null>(null)
 
   const requires = asStringList(app.manifest?.requires_tasks)
   const missing = requires.filter((t) => !tasks.has(t))
+  const manifestActions = (app.manifest?.actions ?? []).filter((a) => a && a.name && a.label)
 
   const toggleMutation = useMutation({
     mutationFn: () => (app.enabled ? apiService.disableApp(app.id) : apiService.enableApp(app.id)),
     onSuccess: () => {
+      const wasEnabling = !app.enabled
       queryClient.invalidateQueries({ queryKey: ['apps'] })
       showSuccess(`${app.name} ${app.enabled ? 'disabled' : 'enabled'}`)
+      // First enable takes the operator straight to the app's own page so
+      // they land on its live dashboard and actions, not back on the grid.
+      if (wasEnabling) navigate(`/app-catalog/${app.id}`)
     },
     onError: (e) => showError(extractApiError(e, `Failed to ${app.enabled ? 'disable' : 'enable'} ${app.name}.`)),
   })
@@ -496,7 +1039,9 @@ function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<s
     <Card>
       <CardHeader>
         <Boxes size={16} className="text-[var(--text-dim)]" />
-        <CardTitle>{app.name}</CardTitle>
+        <Link to={`/app-catalog/${app.id}`} className="hover:underline">
+          <CardTitle>{app.name}</CardTitle>
+        </Link>
         <Badge variant="info">{app.category}</Badge>
         <span className="text-xs text-[var(--text-dim)]">v{app.version}</span>
         <div className="ml-auto">
@@ -516,6 +1061,10 @@ function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<s
           </div>
         )}
 
+        {Array.isArray(app.manifest?.state_schema) && app.manifest.state_schema.length > 0 && (
+          <LiveStateViews appId={app.id} views={app.manifest.state_schema as StateViewSpec[]} />
+        )}
+
         <div className="flex items-center gap-2 pt-1">
           <Button
             variant={app.enabled ? 'default' : 'primary'}
@@ -528,6 +1077,17 @@ function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<s
           <Button variant="outline" onClick={onConfigure}>
             <Settings2 size={14} /> Configure
           </Button>
+          {manifestActions.map((a) => (
+            <Button
+              key={a.name}
+              variant="outline"
+              onClick={() => setActiveAction(a)}
+              disabled={!app.enabled}
+              title={a.description || a.name}
+            >
+              {a.label}
+            </Button>
+          ))}
           <Button variant="danger" onClick={confirmUninstall} disabled={uninstallInFlight}>
             <Trash2 size={14} /> {uninstallInFlight ? 'Uninstalling…' : 'Uninstall'}
           </Button>
@@ -545,6 +1105,9 @@ function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<s
           </div>
         )}
       </CardContent>
+      {activeAction && (
+        <AppActionModal app={app} action={activeAction} onClose={() => setActiveAction(null)} />
+      )}
     </Card>
   )
 }

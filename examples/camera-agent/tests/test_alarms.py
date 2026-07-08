@@ -15,15 +15,16 @@ from camera_agent import (
 from context import CameraSpec
 
 
-def _runtime(detections=None, emergency_contacts=None):
+def _runtime(detections=None, emergency_contacts=None, alarm_ring_defaults=None):
     cfg = AppConfig(
         kaic_url="http://k", kaic_api_key="x", system_prompt="t",
         emergency_contacts=emergency_contacts,
+        alarm_ring_defaults=alarm_ring_defaults,
         cameras=[CameraSpec(camera_id="cam1", frame_url="http://x/1.jpg", role="front")],
     )
     rt = CameraAgentRuntime(cfg)
 
-    async def fake_get_frame(cam):
+    async def fake_get_frame(cam, **_kw):
         return b"\xff\xd8\xff"
 
     async def fake_infer(*, frame_jpeg, **kw):
@@ -160,3 +161,147 @@ def test_alarm_endpoints():
     assert client.delete(f"/alarms/{aid}").status_code == 200
     assert client.delete("/alarms/9999").status_code == 404
     assert client.post("/alarms", json={"name": "x", "camera_id": "cam1"}).status_code == 400
+
+
+def test_chime_alarm_fires_event_without_latching():
+    """A chime alarm dings (event + notification) but never latches the
+    siren — no acknowledge needed, re-arm anchors on the last firing."""
+    rt = _runtime(detections=[{"label": "person"}])
+
+    async def go():
+        alarm = rt.alarms.create(name="Gate visitor", target="person",
+                                 camera_ids=["cam1"], ring="chime")
+        await rt.alarms._poll(alarm, "cam1")
+        assert alarm.triggered is False          # no latch
+        assert alarm.trigger_count == 1
+        ev = rt.alarms.events()[-1]
+        assert ev["ring"] == "chime" and ev["camera"] == "cam1"
+        # within the re-arm window: quiet
+        await rt.alarms._poll(alarm, "cam1")
+        assert alarm.trigger_count == 1
+
+    asyncio.run(go())
+
+
+def test_silent_alarm_records_without_latching():
+    rt = _runtime(detections=[{"label": "person"}])
+
+    async def go():
+        alarm = rt.alarms.create(name="Quiet", target="person",
+                                 camera_ids=["cam1"], ring="silent")
+        await rt.alarms._poll(alarm, "cam1")
+        assert alarm.triggered is False
+        assert rt.alarms.events()[-1]["ring"] == "silent"
+
+    asyncio.run(go())
+
+
+def test_handler_defaults_ring_by_target():
+    """Voice/REST default: fire-grade targets latch the siren; a person
+    at the gate is a doorbell-grade chime (the operator can override)."""
+    rt = _runtime()
+
+    async def go():
+        await rt._handle_create_alarm({"name": "F", "target": "fire",
+                                       "camera_id": "cam1"})
+        await rt._handle_create_alarm({"name": "P", "target": "person",
+                                       "camera_id": "cam1"})
+        await rt._handle_create_alarm({"name": "O", "target": "person",
+                                       "camera_id": "cam1", "ring": "siren"})
+        rings = {a["name"]: a["ring"] for a in rt.alarms.list()}
+        assert rings == {"F": "siren", "P": "chime", "O": "siren"}
+
+    asyncio.run(go())
+
+
+def test_pulse_alarm_latches_then_stands_down_on_its_own():
+    """URGENT: latches and rings like a siren, but auto-acknowledges
+    after pulse_seconds — no human click required. CRITICAL never does."""
+    rt = _runtime(detections=[{"label": "person"}])
+
+    async def go():
+        pulse = rt.alarms.create(name="Urgent", target="person",
+                                 camera_ids=["cam1"], ring="pulse")
+        siren = rt.alarms.create(name="Critical", target="person",
+                                 camera_ids=["cam1"], ring="siren")
+        await rt.alarms._poll(pulse, "cam1")
+        await rt.alarms._poll(siren, "cam1")
+        assert pulse.triggered and siren.triggered
+        later = pulse.last_triggered + rt.alarms._pulse + 1
+        rt.alarms._maybe_stand_down(pulse, now=later)
+        rt.alarms._maybe_stand_down(siren, now=later)
+        assert pulse.triggered is False          # stood down
+        assert siren.triggered is True           # critical stays latched
+
+    asyncio.run(go())
+
+
+def test_ring_defaults_are_site_configurable():
+    """A farm maps snake→siren; a bank maps person→siren. The config map
+    overlays the fire-grade built-ins and drives the handler default."""
+    rt = _runtime(alarm_ring_defaults={"snake": "siren", "person": "siren",
+                                       "bogus": "not-a-level"})
+    merged = rt.ring_defaults()
+    assert merged["snake"] == "siren" and merged["person"] == "siren"
+    assert merged["fire"] == "siren"             # built-in survives
+    assert "bogus" not in merged                 # junk levels dropped
+
+    async def go():
+        await rt._handle_create_alarm({"name": "S", "target": "snake",
+                                       "camera_id": "cam1"})
+        await rt._handle_create_alarm({"name": "C", "target": "car",
+                                       "camera_id": "cam1"})
+        rings = {a["name"]: a["ring"] for a in rt.alarms.list()}
+        assert rings == {"S": "siren", "C": "chime"}
+
+    asyncio.run(go())
+
+
+def test_ui_ring_overrides_layer_and_persist(tmp_path):
+    """The UI-edited overrides beat config, which beats built-ins; junk
+    is dropped; the layer survives a restart via the state file."""
+    from camera_agent import AppConfig, CameraAgentRuntime
+    from context import CameraSpec
+
+    state = tmp_path / "s.json"
+    cfg = AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+                    state_path=str(state),
+                    alarm_ring_defaults={"person": "chime"},
+                    cameras=[CameraSpec(camera_id="cam1", frame_url="http://x/1.jpg", role="r")])
+    rt = CameraAgentRuntime(cfg)
+    merged = rt.set_ring_overrides({"person": "siren", "snake": "siren",
+                                    "junk": "loudest", "": "siren"})
+    assert merged["person"] == "siren"           # override beats config
+    assert merged["snake"] == "siren"
+    assert merged["fire"] == "siren"             # built-in survives
+    assert "junk" not in merged and "" not in merged
+
+    rt2 = CameraAgentRuntime(cfg)
+    rt2.load_state()
+    assert rt2.ring_defaults()["person"] == "siren"
+    assert rt2.ring_defaults()["snake"] == "siren"
+
+
+def test_alarm_defaults_endpoints_and_admin_gate():
+    from fastapi.testclient import TestClient
+
+    from camera_agent import build_app
+    from tests.test_auth_gate import USERS, _FakeAuth  # reuse the tier fakes
+    from camera_agent import AppConfig, CameraAgentRuntime
+    from context import CameraSpec
+
+    cfg = AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+                    auth_mode="opennvr", opennvr_api_url="http://srv",
+                    cameras=[CameraSpec(camera_id="cam1", frame_url="http://x/1.jpg", role="r")])
+    rt = CameraAgentRuntime(cfg)
+    rt.auth = _FakeAuth()
+    c = TestClient(build_app(rt))
+    h = lambda t: {"Authorization": f"Bearer {t}"}
+
+    assert c.get("/alarm-defaults", headers=h("tok-viewer")).status_code == 200
+    put = {"overrides": {"snake": "siren"}}
+    assert c.put("/alarm-defaults", json=put, headers=h("tok-op")).status_code == 403
+    ok = c.put("/alarm-defaults", json=put, headers=h("tok-admin"))
+    assert ok.status_code == 200 and ok.json()["defaults"]["snake"] == "siren"
+    assert c.put("/alarm-defaults", json={"overrides": "nope"},
+                 headers=h("tok-admin")).status_code == 400

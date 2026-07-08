@@ -13,9 +13,14 @@ $ python footage_search.py search --config config.yml "red truck at the dock yes
       correlation_id=corr-A (use it to pull the recorded segment)
 ```
 
+Two query paths: the CLI above, and the **App Catalog's "Search
+footage" form** — the manifest declares a `search` action, so the
+catalog renders the form and proxies it to this app's contract surface
+(user-JWT only) with zero frontend code in this repo folder.
+
 | | |
 |---|---|
-| Pattern | Indexer subscribes to NATS inference events → SQLite; CLI search |
+| Pattern | Indexer subscribes to NATS inference events → SQLite; catalog-action + CLI search |
 | Adapters | (rides upstream's detector + a BLIP-style captioner — no direct call) |
 | Difficulty | ⭐⭐⭐ advanced |
 | Best for learning | Building a searchable index off the event bus, NL→filter parsing |

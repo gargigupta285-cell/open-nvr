@@ -52,6 +52,13 @@ _HISTOGRAM = "adapter_infer_latency_seconds"
 _OUTCOMES = "adapter_infer_total"
 _INFLIGHT = "adapter_inflight_requests"
 _QUEUE_DEPTH = "adapter_queue_depth"
+# OPTIONAL hardware gauges (observability spec §05 addendum): adapters
+# MAY export these; absent families simply stay null in the rollup —
+# no adapter is required to ship psutil/NVML to stay conformant.
+_CPU_PERCENT = "adapter_process_cpu_percent"
+_MEM_BYTES = "adapter_process_memory_bytes"
+_GPU_UTIL = "adapter_gpu_utilization"
+_GPU_MEM_BYTES = "adapter_gpu_memory_bytes"
 
 
 # ── Prometheus text parsing ────────────────────────────────────────
@@ -155,6 +162,11 @@ class MetricsSample:
     # Point-in-time gauges.
     inflight: int | None = None
     queue_depth: int | None = None
+    # Optional hardware gauges (None when the adapter doesn't export them).
+    cpu_percent: float | None = None
+    memory_bytes: float | None = None
+    gpu_utilization: float | None = None
+    gpu_memory_bytes: float | None = None
 
 
 def parse_adapter_metrics(text: str, *, scraped_at: float | None = None) -> MetricsSample:
@@ -190,6 +202,14 @@ def parse_adapter_metrics(text: str, *, scraped_at: float | None = None) -> Metr
             sample.inflight = int(value)
         elif name == _QUEUE_DEPTH:
             sample.queue_depth = int(value)
+        elif name == _CPU_PERCENT:
+            sample.cpu_percent = value
+        elif name == _MEM_BYTES:
+            sample.memory_bytes = value
+        elif name == _GPU_UTIL:
+            sample.gpu_utilization = value
+        elif name == _GPU_MEM_BYTES:
+            sample.gpu_memory_bytes = value
     return sample
 
 
@@ -333,6 +353,38 @@ class MetricsRollup:
             inflight = newest.inflight
             queue_depth = newest.queue_depth
 
+        # Per-sample series for the UI's sparklines ("over the period of
+        # time"): point-in-time gauges verbatim; rate + interval p95
+        # derived from CONSECUTIVE sample pairs (counter resets → null
+        # for that interval rather than a bogus negative spike).
+        series: list[dict[str, Any]] = []
+        prev = None
+        for smp in samples:
+            entry: dict[str, Any] = {
+                "ts": smp.scraped_at,
+                "inflight": smp.inflight,
+                "queue_depth": smp.queue_depth,
+                "cpu_percent": smp.cpu_percent,
+                "memory_bytes": smp.memory_bytes,
+                "gpu_utilization": smp.gpu_utilization,
+                "gpu_memory_bytes": smp.gpu_memory_bytes,
+                "rpm": None,
+                "p95_ms": None,
+            }
+            if prev is not None and smp.scraped_at > prev.scraped_at:
+                d_out = _outcome_delta(smp.outcomes, prev.outcomes)
+                total = sum(d_out.values())
+                span_min = (smp.scraped_at - prev.scraped_at) / 60.0
+                if span_min > 0 and total >= 0:
+                    entry["rpm"] = round(total / span_min, 2)
+                d_buckets = _bucket_delta(smp.latency_buckets, prev.latency_buckets)
+                q = histogram_quantile(d_buckets, 0.95)
+                if q is not None:
+                    entry["p95_ms"] = round(q * 1000.0, 3)
+            series.append(entry)
+            prev = smp
+
+        newest_hw = samples[-1] if samples else None
         return {
             "adapter": adapter,
             "window_s": WINDOW_SECONDS,
@@ -340,6 +392,13 @@ class MetricsRollup:
             "outcomes": outcomes,
             "inflight": inflight,
             "queue_depth": queue_depth,
+            "hardware": {
+                "cpu_percent": newest_hw.cpu_percent if newest_hw else None,
+                "memory_bytes": newest_hw.memory_bytes if newest_hw else None,
+                "gpu_utilization": newest_hw.gpu_utilization if newest_hw else None,
+                "gpu_memory_bytes": newest_hw.gpu_memory_bytes if newest_hw else None,
+            },
+            "series": series,
             "fingerprint_changes": fingerprint_changes,
             "samples": len(samples),
         }

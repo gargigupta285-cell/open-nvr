@@ -21,7 +21,7 @@ def _runtime(state_path, emergency_contacts=None):
     )
     rt = CameraAgentRuntime(cfg)
 
-    async def fake_get_frame(cam):
+    async def fake_get_frame(cam, **_kw):
         return b"\xff\xd8\xff"
 
     async def fake_infer(*, frame_jpeg, **kw):
@@ -112,3 +112,29 @@ def test_stop_updates_persisted_state(tmp_path):
 
     data = json.loads(state.read_text())
     assert data["monitors"] == []  # stopped monitor not persisted
+
+
+def test_restore_default_skills_clears_toggles_and_persists(tmp_path):
+    """Restore-defaults = fresh-boot state: every runtime toggle cleared,
+    tools re-advertised, and the empty toggle set written to disk."""
+    state = tmp_path / "skills.json"
+
+    def _advertised(rt):
+        return {t["function"]["name"] for t in rt.tool_definitions}
+
+    rt = _runtime(state)
+    assert rt.set_skill_enabled("alarm", False) is True
+    assert rt.set_skill_enabled("watch", False) is True
+    assert "create_alarm" not in _advertised(rt)
+    assert "create_monitor" not in _advertised(rt)
+
+    assert rt.restore_default_skills() == 2
+    assert rt.disabled_skills == set()
+    assert "create_alarm" in _advertised(rt)
+    assert "create_monitor" in _advertised(rt)
+    # durable: the cleared toggle set reached the state file
+    data = json.loads(state.read_text())
+    assert data["disabled_skills"] == []
+
+    # idempotent: nothing left to restore, and no state churn
+    assert rt.restore_default_skills() == 0

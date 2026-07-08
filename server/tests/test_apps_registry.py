@@ -217,6 +217,7 @@ def auth_client(monkeypatch):
     session.close()
 
     with TestClient(app) as test_client:
+        test_client.session_factory = session_factory
         yield test_client
     engine.dispose()
 
@@ -468,21 +469,29 @@ def test_write_routes_do_not_accept_internal_api_key(auth_client):
     dependency only for register)."""
     from routers.apps import router as apps_router_obj
 
-    # register accepts the key via get_register_principal; the two read
-    # routes accept it via get_read_principal — both are intended.
+    # register accepts the key via get_register_principal; the read
+    # routes accept it via get_read_principal — both are intended. The
+    # check is per (path, METHOD): /apps/{app_id}/config carries a GET
+    # (read — the app's live-config poll, service key OK) AND a PUT
+    # (write — operator only), so path-only matching would be wrong in
+    # both directions.
     service_principals = {"get_register_principal", "get_read_principal"}
-    write_paths = {"/apps/{app_id}/enable", "/apps/{app_id}/disable",
-                   "/apps/{app_id}/config"}
+    write_routes = {("/apps/{app_id}/enable", "POST"),
+                    ("/apps/{app_id}/disable", "POST"),
+                    ("/apps/{app_id}/config", "PUT")}
     checked = set()
     for route in apps_router_obj.routes:
-        if route.path not in write_paths:
-            continue
-        checked.add(route.path)
-        dependency_names = {
-            dep.call.__name__ for dep in route.dependant.dependencies
-        }
-        assert not (service_principals & dependency_names), route.path
-    assert checked == write_paths          # all three write routes exist
+        for method in route.methods or ():
+            if (route.path, method) not in write_routes:
+                continue
+            checked.add((route.path, method))
+            dependency_names = {
+                dep.call.__name__ for dep in route.dependant.dependencies
+            }
+            assert not (service_principals & dependency_names), (
+                route.path, method,
+            )
+    assert checked == write_routes         # all three write routes exist
 
 
 def test_read_routes_are_read_only(auth_client):
@@ -491,7 +500,13 @@ def test_read_routes_are_read_only(auth_client):
     through the read principal."""
     from routers.apps import router as apps_router_obj
 
-    read_routes = {("/apps", "GET"), ("/apps/{app_id}/status", "GET")}
+    read_routes = {
+        ("/apps", "GET"),
+        ("/apps/{app_id}/status", "GET"),
+        # Live config delivery: the running app polls its own config
+        # with the internal key it already holds for registration.
+        ("/apps/{app_id}/config", "GET"),
+    }
     checked: set[tuple[str, str]] = set()
     for route in apps_router_obj.routes:
         if (route.path, "GET") not in read_routes or "GET" not in route.methods:
@@ -884,3 +899,205 @@ def test_validate_unknown_type_name_is_not_blocking():
     """A manifest with a type name we don't know shouldn't brick config."""
     manifest = {"params": [_param("x", "quaternion")]}
     assert validate_app_config(manifest, {"x": object()}) == []
+
+
+def test_get_config_with_internal_api_key_succeeds(auth_client):
+    """Live config delivery: the RUNNING APP polls its own config with
+    the deployment's internal key (the same credential it registers
+    with) — no user JWT in a headless container."""
+    reg = auth_client.post(
+        "/apps/register",
+        json={"url": "http://loitering:9200", "manifest": _manifest()},
+        headers={"X-Internal-Api-Key": _effective_internal_key()},
+    )
+    assert reg.status_code == 200
+
+    resp = auth_client.get(
+        "/apps/loitering-detection/config",
+        headers={"X-Internal-Api-Key": _effective_internal_key()},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == "loitering-detection"
+    assert isinstance(body["config"], dict)
+
+    # And it reflects a PUT (user-JWT path) — the registry is the
+    # single source of truth the app converges to.
+    put = auth_client.put(
+        "/apps/loitering-detection/config",
+        json={"watch_labels": ["person", "car"]},
+    )
+    assert put.status_code == 200
+    resp2 = auth_client.get(
+        "/apps/loitering-detection/config",
+        headers={"X-Internal-Api-Key": _effective_internal_key()},
+    )
+    assert resp2.json()["config"]["watch_labels"] == ["person", "car"]
+
+
+def test_get_config_requires_a_credential(auth_client):
+    """No JWT, no internal key → 401; wrong key → 401."""
+    import httpx as _httpx  # noqa: F401 — parity with sibling tests
+
+    reg = auth_client.post(
+        "/apps/register",
+        json={"url": "http://loitering:9200", "manifest": _manifest()},
+        headers={"X-Internal-Api-Key": _effective_internal_key()},
+    )
+    assert reg.status_code == 200
+    bare = auth_client.get(
+        "/apps/loitering-detection/config", headers={"Authorization": ""}
+    )
+    assert bare.status_code in (401, 403)
+    wrong = auth_client.get(
+        "/apps/loitering-detection/config",
+        headers={"X-Internal-Api-Key": "not-the-key"},
+    )
+    assert wrong.status_code in (401, 403)
+
+
+# ── Manifest-declared actions (user-JWT-only proxy) ─────────────────
+
+
+def _manifest_with_action(**overrides) -> dict:
+    m = _manifest(**overrides)
+    m["actions"] = [
+        {
+            "name": "search",
+            "label": "Search footage",
+            "params": [
+                {"name": "query", "type": "str", "required": True,
+                 "default": None, "per_camera": False, "description": ""},
+                {"name": "limit", "type": "int", "required": False,
+                 "default": 10, "per_camera": False, "description": ""},
+            ],
+            "description": "", "confirm": False,
+        }
+    ]
+    return m
+
+
+def _register_action_app(auth_client, enabled=True):
+    reg = auth_client.post(
+        "/apps/register",
+        json={"url": "http://loitering:9200", "manifest": _manifest_with_action()},
+        headers={"X-Internal-Api-Key": _effective_internal_key()},
+    )
+    assert reg.status_code == 200
+    if enabled:
+        en = auth_client.post("/apps/loitering-detection/enable")
+        assert en.status_code == 200
+    return reg
+
+
+class _ActionClient:
+    """Fake httpx.AsyncClient recording the proxied POST."""
+
+    calls: list = []
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, json=None, headers=None):
+        type(self).calls.append((url, json, dict(headers or {})))
+
+        class _R:
+            status_code = 200
+
+            def json(self):
+                return {"results": [{"camera": "cam-1", "caption": "red truck"}]}
+
+        return _R()
+
+
+def test_action_invoke_happy_path(auth_client, monkeypatch):
+    _register_action_app(auth_client)
+    _ActionClient.calls = []
+    monkeypatch.setattr(apps_router.httpx, "AsyncClient", _ActionClient)
+
+    resp = auth_client.post(
+        "/apps/loitering-detection/actions/search",
+        json={"query": "red truck", "limit": 5},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["results"][0]["caption"] == "red truck"
+    # Proxied to the app's contract surface with the validated params
+    # AND the deployment key (the app's action POST is key-gated).
+    assert len(_ActionClient.calls) == 1
+    url, payload, headers = _ActionClient.calls[0]
+    assert url == "http://loitering:9200/actions/search"
+    assert payload == {"query": "red truck", "limit": 5}
+    assert headers.get("X-Internal-Api-Key") == _effective_internal_key()
+    # Audited with param KEYS only — never operator search terms.
+    s = auth_client.session_factory()
+    try:
+        audits = [
+            a for a in s.query(AuditLog).all()
+            if a.action == "app.action.invoke"
+        ]
+    finally:
+        s.close()
+    assert len(audits) == 1
+    details = audits[0].details
+    if isinstance(details, str):
+        import json as _json
+        details = _json.loads(details)
+    assert details["param_keys"] == ["limit", "query"]
+    assert "red truck" not in str(audits[0].details)
+
+
+def test_action_internal_key_cannot_invoke(monkeypatch):
+    """GOVERNANCE: actions are operator verbs — the service key (which
+    the OpenNVR Agent holds) must NEVER invoke one. A prompt-injected
+    agent must not be able to act on an app. Uses a client with REAL
+    auth (no get_current_active_user override): the key alone bounces
+    at the door, before any registry lookup or proxying."""
+    _ActionClient.calls = []
+    monkeypatch.setattr(apps_router.httpx, "AsyncClient", _ActionClient)
+    app, _sf, engine = _make_app()
+    with TestClient(app) as tc:
+        resp = tc.post(
+            "/apps/loitering-detection/actions/search",
+            json={"query": "x"},
+            headers={"X-Internal-Api-Key": _effective_internal_key()},
+        )
+    engine.dispose()
+    assert resp.status_code in (401, 403)
+    assert _ActionClient.calls == []  # never reached the app
+
+
+def test_action_undeclared_is_404(auth_client, monkeypatch):
+    _register_action_app(auth_client)
+    monkeypatch.setattr(apps_router.httpx, "AsyncClient", _ActionClient)
+    resp = auth_client.post(
+        "/apps/loitering-detection/actions/enroll-face", json={}
+    )
+    assert resp.status_code == 404
+    assert "declares no action" in resp.json()["detail"]
+
+
+def test_action_bad_params_is_400(auth_client, monkeypatch):
+    _register_action_app(auth_client)
+    _ActionClient.calls = []
+    monkeypatch.setattr(apps_router.httpx, "AsyncClient", _ActionClient)
+    resp = auth_client.post(
+        "/apps/loitering-detection/actions/search",
+        json={"query": "x", "limit": "ten"},
+    )
+    assert resp.status_code == 400
+    assert _ActionClient.calls == []
+
+
+def test_action_disabled_app_is_409(auth_client, monkeypatch):
+    _register_action_app(auth_client, enabled=False)
+    monkeypatch.setattr(apps_router.httpx, "AsyncClient", _ActionClient)
+    resp = auth_client.post(
+        "/apps/loitering-detection/actions/search", json={"query": "x"}
+    )
+    assert resp.status_code == 409

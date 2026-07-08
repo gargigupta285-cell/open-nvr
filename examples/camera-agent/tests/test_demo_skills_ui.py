@@ -84,3 +84,245 @@ def test_enable_links_are_guide_only(script: str) -> None:
     assert not re.search(
         r"fetch\([^)]*apps/[^)]*/(enable|disable|config)", script
     ), "skills UI must not POST to an app enable/disable/config route"
+
+
+def test_core_skill_disable_asks_first(script: str) -> None:
+    # Removing a core task-shaped skill (alarm/watch/report/task) takes a
+    # whole rail panel's capability away, so the ✕ must confirm before
+    # calling the disable endpoint. If the confirm gate or the core map
+    # goes missing, a stray click silently de-tools the agent.
+    assert "CORE_SKILLS" in script, "core-skill map missing"
+    for sid in ("alarm", "watch", "report", "task"):
+        assert re.search(rf'CORE_SKILLS\s*=\s*{{[^}}]*\b{sid}\b', script), (
+            f"core-skill map lost entry {sid!r}"
+        )
+    assert re.search(r"CORE_SKILLS\[s\.id\][^\n]*confirm", script), (
+        "disable path no longer confirms before removing a core skill"
+    )
+
+
+def test_restore_defaults_wired(script: str, html: str) -> None:
+    # The Skills header's "Restore defaults" is the one-click undo for an
+    # over-pruned agent: the button must exist, call the restore endpoint,
+    # and only show when something is actually restorable.
+    assert 'id="skillRestore"' in html, "restore-defaults button missing"
+    assert "function restoreSkills" in script, "restoreSkills handler missing"
+    assert '"/skills/restore"' in script, "restore endpoint call missing"
+    assert re.search(r'skillRestore[\s\S]{0,200}hidden\s*=\s*!_skills\.some', script), (
+        "restore button visibility no longer keyed to restorable skills"
+    )
+
+
+def test_watch_add_form_wired(script: str, html: str) -> None:
+    # The Watching panel's + form (notify/count watches via POST /monitors).
+    # Crossing is deliberately absent — placing the line is a conversation,
+    # not a text field — so the form must offer exactly the two typed kinds.
+    for eid in ("watchAdd", "watchForm", "watchKind", "watchTarget", "watchStart"):
+        assert f'id="{eid}"' in html, f"watch form element missing: {eid!r}"
+    for kind in ('value="notify"', 'value="count"'):
+        assert kind in html, f"watch kind option missing: {kind}"
+    assert 'value="crossing"' not in html, (
+        "crossing must stay chat-only (needs the agent to place the line)"
+    )
+    assert '"/monitors"' in script and "cameraParam()" in script, (
+        "watch form no longer POSTs /monitors with the camera selection"
+    )
+
+
+def test_report_add_form_wired(script: str, html: str) -> None:
+    # The Scheduled-reports panel's + form (POST /reports). One schedule per
+    # report: every-N-minutes wins over the daily time; neither → the
+    # server's 08:00-daily default.
+    for eid in ("reportAdd", "reportForm", "reportName", "reportQuery",
+                "reportAt", "reportEvery", "reportCreate"):
+        assert f'id="{eid}"' in html, f"report form element missing: {eid!r}"
+    assert '"/reports"' in script, "report form no longer POSTs /reports"
+    assert re.search(r"every_minutes\s*=\s*every[\s\S]{0,80}reportAt", script), (
+        "interval-beats-daily precedence lost in the report form"
+    )
+
+
+def test_hardware_panel_wired(script: str, html: str) -> None:
+    # The Hardware card: collapsed summary + expandable per-skill breakdown,
+    # fed by GET /hardware, recomputed whenever the toolset changes (both
+    # the single-skill toggle and restore-defaults paths).
+    for eid in ("hwCard", "hwToggle", "hwSummary", "hwDetail"):
+        assert f'id="{eid}"' in html, f"hardware panel element missing: {eid!r}"
+    assert "function loadHardware" in script, "loadHardware handler missing"
+    assert '"/hardware"' in script, "hardware endpoint call missing"
+    assert script.count("loadHardware();") >= 3, (
+        "hardware panel no longer recomputes on initial load + skill changes"
+    )
+
+
+def test_camera_strip_peek_and_camera_screen_wired(script: str, html: str) -> None:
+    # tap = peek (agent bubble with the live frame + Open/Pin actions),
+    # ⤤/name = the camera's own screen at /demo/camera/{id} with the
+    # review player. The pin stays one-shot on the next /ask.
+    for eid in ("camstrip", "pinChip", "pinClear", "mainScreen", "camScreen",
+                "camPlayer", "camImg", "camScrub", "camMarks", "camLive",
+                "camPlay", "camTalk", "camAsk", "camWatch", "camAlarm",
+                "popWatch", "popAlarm", "camRecordings", "camBack"):
+        assert f'id="{eid}"' in html, f"camera UI element missing: {eid!r}"
+    for fn in ("function buildCamStrip", "async function peekCam",
+               "function openCamScreen", "function closeCamScreen",
+               "async function loadTimeline", "async function reviewAt",
+               "function goLive"):
+        assert fn in script, f"camera screen handler missing: {fn!r}"
+    assert '"/timeline/"' in script, "player no longer loads /timeline"
+    assert "?at=" in script, "review scrub no longer fetches /frame?at="
+    assert "history.pushState" in script and "/demo/camera/" in script, (
+        "camera screen lost its URL (pushState /demo/camera/{id})"
+    )
+    assert "pinned_jpeg_b64" in script, "ask() no longer sends the pinned frame"
+    assert re.search(r"if\(_pinnedFrame\)[\s\S]{0,120}clearPin\(\)", script), (
+        "pin is no longer one-shot (must clear after the send)"
+    )
+    # scoping: on a camera screen every ask/talk goes to that camera
+    assert "_camScreenCam" in script and "function cameraParam" in script
+
+
+def test_all_css_variables_are_defined(html: str) -> None:
+    # The camera-screen popover shipped transparent because its CSS used
+    # the MAIN app's token names (--bg-1/--text-dim), which this page
+    # never defines — var() then resolves to nothing. Guard: every
+    # var(--x) used without a fallback must be defined in :root.
+    defined = set(re.findall(r"(--[a-z0-9-]+)\s*:", html))
+    used_no_fallback = set(re.findall(r"var\((--[a-z0-9-]+)\)", html))
+    missing = sorted(used_no_fallback - defined)
+    assert not missing, f"CSS variables used but never defined: {missing}"
+
+
+def test_auth_login_overlay_wired(script: str, html: str) -> None:
+    # auth_mode="opennvr": one fetch wrapper attaches the bearer token to
+    # every same-origin call, tries ONE silent refresh on a 401, then
+    # raises the login overlay (which proxies OpenNVR's login).
+    for eid in ("loginOverlay", "loginUser", "loginPass", "loginTotp",
+                "loginErr", "loginGo"):
+        assert f'id="{eid}"' in html, f"login element missing: {eid!r}"
+    assert "window.fetch=" in script.replace(" ", ""), "fetch wrapper missing"
+    assert '"/auth/login"' in script and '"/auth/refresh"' in script
+    assert "function showLogin" in script
+    assert "sessionStorage" in script, "tokens must survive reload (mobile-parity contract)"
+
+
+def test_recorded_row_wired(script: str, html: str) -> None:
+    # The camera screen's Recorded row: server-side segments, direct-URL
+    # playback in the player's <video>, ● LIVE returns. The old ctop
+    # Recordings link is DEMOTED into this row.
+    for eid in ("recRow", "recDay", "recSegs", "camVideo", "camRecordings"):
+        assert f'id="{eid}"' in html, f"recorded-row element missing: {eid!r}"
+    for fn in ("async function loadRecordings", "function renderSegs",
+               "async function playRecording", "function stopPlayback"):
+        assert fn in script, f"recorded-row handler missing: {fn!r}"
+    assert '"/recordings/"' in script, "row no longer calls the agent proxy"
+    assert '"PLAYBACK"' in script, "player lost its PLAYBACK mode label"
+    # goLive must tear playback down — a lingering <video> under a LIVE
+    # pill is the same class of bug as the frozen-pause finding.
+    assert re.search(r"function goLive\(\)\{[^\n]*stopPlayback\(\)", script)
+
+
+def test_events_feed_wired(script: str, html: str) -> None:
+    # The Events card leads the rail (operational truth before Skills),
+    # a per-camera filter rides the camera screen, and clicking an event
+    # jumps to THE MOMENT: review ring first, covering recorded segment
+    # second, live as the fallback.
+    assert 'id="eventsCard"' in html and 'id="eventsList"' in html
+    assert html.index('id="eventsCard"') < html.index('id="skillsCard"'), (
+        "Events must lead the rail — what happened beats configuration"
+    )
+    assert 'id="evToggle"' in html and "evCollapsed" in script, (
+        "Events card must be collapsible (it was eating the rail)"
+    )
+    # one home for events: the rail card scopes to the focused camera
+    # (no left-column list — that was reported as noise)
+    assert 'id="camEvents"' not in html
+    assert 'id="evScope"' in html
+    for fn in ("async function loadEvents", "function renderEvents",
+               "function renderEventsCard", "async function openCamAtMoment"):
+        assert fn in script, f"events handler missing: {fn!r}"
+    assert '"/events"' in script
+    assert re.search(r"openCamAtMoment[\s\S]{0,400}loadTimeline", script), (
+        "click-to-moment no longer tries the review ring first"
+    )
+
+
+def test_alarm_ring_levels_wired(script: str, html: str) -> None:
+    # Annunciation levels: chime dings once (amber flash, no latch),
+    # siren latches until silenced, silent pushes only. Both alarm forms
+    # offer the choice; fire-grade targets preselect the siren.
+    assert 'id="alarmRing"' in html and 'id="paRing"' in html
+    for v in ('value="chime"', 'value="pulse"', 'value="siren"', 'value="silent"'):
+        assert html.count(v) >= 2, f"ring option missing from a form: {v}"
+    assert "function startPulse" in script, "urgent level lost its own sound"
+    assert "ringing_kind" in script, "page no longer picks the sound by kind"
+    assert "_ringDefaults" in script, "preselect no longer follows the site map"
+    assert "function wireRingPreselect" in script
+    assert "flashChime" in script and 'playChime("bell")' in script
+    assert ".alarmbar.chime" in html, "chime banner style missing"
+    assert 'data-ring="siren"' in html, "presets lost their siren grade"
+
+
+def test_ring_defaults_editor_wired(script: str, html: str) -> None:
+    # ⚙ in the Alarms header opens the site alert-defaults editor:
+    # override rows (target + level), inherited entries shown read-only,
+    # save PUTs /alarm-defaults and refreshes the live preselect map.
+    for eid in ("ringCfg", "ringCfgForm", "ringRows", "ringAddRow",
+                "ringSave", "ringInherited"):
+        assert f'id="{eid}"' in html, f"ring editor element missing: {eid!r}"
+    assert '"/alarm-defaults"' in script
+    assert re.search(r'method:"PUT"[\s\S]{0,120}overrides', script)
+    assert "window._ringDefaults=d.defaults" in script.replace(" ", ""), (
+        "saving must refresh the live preselect map"
+    )
+
+
+def test_webrtc_live_player_wired(script: str, html: str) -> None:
+    # The laggy-stream fix: the camera screen plays the SAME WebRTC
+    # (WHEP) stream the OpenNVR Live view does; snapshot polling is the
+    # labelled fallback, and every exit path tears the session down.
+    for fn in ("async function tryWebrtcLive", "function stopWebrtc"):
+        assert fn in script, f"webrtc handler missing: {fn!r}"
+    assert "RTCPeerConnection" in script and '"application/sdp"' in script
+    assert '"/streams/"' in script, "player no longer asks the agent proxy"
+    assert "Live preview — stills every 2" in script, (
+        "the stills fallback lost its honest label"
+    )
+    # review, recorded playback, and leaving the screen all stop the stream
+    assert script.count("stopWebrtc()") >= 4
+
+
+def test_rail_pollers_gate_on_auth(script: str) -> None:
+    # With auth on, the rail must not spam 401s behind the login overlay:
+    # every gated poller short-circuits until a token is held.
+    assert "function authReady()" in script, "authReady gate missing"
+    assert '_authMode!=="opennvr"||!!_token' in script.replace(" ", ""), (
+        "authReady must pass when auth is off OR a token is held"
+    )
+    for fn in ("pollAlarms", "pollTasks", "pollMonitors", "pollReports",
+               "loadEvents", "refreshCamStrip"):
+        body = script.split(f"function {fn}(", 1)[1][:120]
+        assert "authReady()" in body, f"{fn} is not gated on authReady"
+
+
+def test_login_error_shows_message_not_object(script: str) -> None:
+    # OpenNVR nests the error as {detail:{error,message,...}}; rendering
+    # d.detail directly printed "[object Object]". errText pulls the message.
+    assert "function errText" in script, "login error helper missing"
+    assert "errText(d,r.status)" in script, "login no longer uses errText"
+    assert 'typeof dt==="object"' in script, "errText must handle a nested detail object"
+
+
+def test_live_video_pauses_when_tab_hidden(script: str) -> None:
+    # A live WebRTC decode competes with the on-box STT/LLM/TTS. When the tab
+    # is backgrounded the stream is torn down, and re-established on return to
+    # a live camera screen — so no decode burns CPU while nobody's watching.
+    assert 'addEventListener("visibilitychange"' in script, (
+        "no visibilitychange handler — live decode keeps running in a hidden tab"
+    )
+    assert re.search(r"document\.hidden[\s\S]{0,120}stopWebrtc\(\)", script), (
+        "hidden tab should stop the WebRTC stream"
+    )
+    assert re.search(r"document\.hidden[\s\S]{0,200}goLive\(\)", script), (
+        "returning to a live camera screen should re-establish the stream"
+    )

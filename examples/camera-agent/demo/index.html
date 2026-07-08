@@ -33,6 +33,9 @@
     body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
       background:var(--bg); color:var(--text); padding:1.5rem 1rem; }
     .wrap { max-width:60rem; margin:0 auto; }
+    .alarmbar.chime{background:#b7791f;}
+    .alarmbar.chime .ab-btn{display:none;}
+    .alarmbar.pulse{background:#c05621;}
     .alarmbar { display:flex; align-items:center; gap:0.6rem; background:var(--danger); color:#fff;
       padding:0.7rem 0.9rem; border-radius:0.6rem; margin-bottom:1rem; font-weight:700;
       animation:alarmflash 0.9s ease-in-out infinite; }
@@ -127,6 +130,146 @@
       background:transparent;color:var(--muted);font-size:1.05rem;cursor:pointer;display:flex;align-items:center;justify-content:center;}
     .addbtn:hover{color:var(--accent);border-color:var(--accent);}
     .addbtn.open{background:var(--accent);color:#fff;border-color:var(--accent);}
+    /* camera strip: live thumbnails; click = pin frame to chat, ⤢ = detail */
+    .camstrip{display:flex;gap:.5rem;flex-wrap:wrap;margin:.4rem 0 .2rem;}
+    .camtile{position:relative;width:132px;border:1px solid var(--border);border-radius:8px;
+      overflow:hidden;background:var(--panel2);cursor:pointer;}
+    .camtile img{display:block;width:100%;height:74px;object-fit:cover;}
+    .camtile .ct-off{height:74px;display:flex;align-items:center;justify-content:center;
+      color:var(--muted);font-size:.66rem;}
+    .camtile .ct-nm{display:flex;align-items:center;justify-content:space-between;gap:.3rem;
+      padding:.2rem .35rem;font-size:.68rem;color:var(--muted);}
+    .camtile .ct-nm span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .camtile .ct-x{background:transparent;border:none;color:var(--muted);cursor:pointer;
+      font-size:.8rem;padding:0;}
+    .camtile .ct-x:hover,.camtile:hover .ct-nm{color:var(--text);}
+    .camtile:hover{border-color:var(--accent);}
+    /* NOTE: a display: rule beats the hidden attribute, so [hidden] must
+       win explicitly or flex containers leak open on load. */
+    [hidden]{display:none !important;}
+    #loginOverlay{position:fixed;inset:0;z-index:100;display:flex;align-items:center;
+      justify-content:center;padding:1rem;background:
+      radial-gradient(60% 50% at 50% 32%, rgba(94,179,246,.10), transparent 70%),
+      rgba(5,8,14,.82);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);}
+    .login-card{background:linear-gradient(180deg,var(--panel),var(--bg2));
+      border:1px solid var(--border);border-radius:16px;width:min(360px,94vw);
+      padding:1.6rem 1.5rem 1.2rem;display:flex;flex-direction:column;gap:.4rem;
+      box-shadow:0 24px 60px rgba(0,0,0,.55),0 0 0 1px rgba(94,179,246,.06);
+      animation:login-in .28s ease;}
+    @keyframes login-in{from{opacity:0;transform:translateY(10px) scale(.985);}to{opacity:1;transform:none;}}
+    .login-brand{display:flex;flex-direction:column;align-items:center;gap:.35rem;
+      margin-bottom:.9rem;text-align:center;}
+    .login-avatar{width:64px;height:64px;border-radius:50%;display:grid;place-items:center;
+      color:var(--accent);background:rgba(94,179,246,.08);
+      box-shadow:0 0 0 1px rgba(94,179,246,.35),0 0 24px rgba(94,179,246,.18);}
+    .login-avatar svg{width:44px;height:44px;}
+    .login-wordmark{font-size:1.25rem;font-weight:700;color:var(--wordmark);letter-spacing:.01em;}
+    .login-wordmark .wm-nvr{color:var(--accent);}
+    .login-agent{font-size:.76rem;color:var(--muted);}
+    .login-agent b{color:var(--text);font-weight:600;}
+    .login-lbl{font-size:.68rem;color:var(--muted);text-transform:uppercase;
+      letter-spacing:.06em;margin:.35rem 0 .15rem;}
+    .login-opt{text-transform:none;letter-spacing:0;opacity:.7;}
+    .login-card input{background:var(--panel2);color:var(--text);border:1px solid var(--border);
+      border-radius:9px;padding:.6rem .7rem;font-size:.88rem;
+      transition:border-color .15s ease,box-shadow .15s ease;}
+    .login-card input:focus{outline:none;border-color:var(--accent);
+      box-shadow:0 0 0 3px rgba(94,179,246,.18);}
+    .login-err{color:#f87171;font-size:.75rem;margin-top:.35rem;
+      background:rgba(229,62,62,.08);border:1px solid rgba(229,62,62,.35);
+      border-radius:8px;padding:.45rem .6rem;}
+    #loginGo{margin-top:.8rem;background:linear-gradient(180deg,var(--accent),var(--accent-strong));
+      color:#04121f;border:none;border-radius:10px;padding:.65rem;font-size:.9rem;
+      font-weight:700;cursor:pointer;transition:filter .15s ease,transform .1s ease;}
+    #loginGo:hover{filter:brightness(1.08);}
+    #loginGo:active{transform:translateY(1px);}
+    #loginGo:disabled{opacity:.6;cursor:default;}
+    .login-foot{margin-top:.7rem;font-size:.66rem;color:var(--muted);text-align:center;}
+    .camlbl{font-size:.7rem;color:var(--muted);margin:.2rem 0 .1rem;}
+    /* per-camera screen (in-page navigation; URL = /demo/camera/{id}) */
+    .ctop{display:flex;align-items:center;gap:.6rem;margin-bottom:.5rem;}
+    .ctitle{font-size:1rem;font-weight:600;}
+    .csub{font-size:.72rem;color:var(--muted);}
+    .ctop .recl{margin-left:auto;text-decoration:none;display:inline-flex;align-items:center;font-size:.75rem;}
+    .player{position:relative;border-radius:10px;overflow:hidden;border:1px solid var(--border);
+      background:var(--panel2);cursor:pointer;min-height:120px;}
+    .player img{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;}
+    .player .ovl{position:absolute;top:7px;left:8px;font-size:.72rem;color:#fff;
+      background:rgba(0,0,0,.55);padding:2px 7px;border-radius:6px;font-variant-numeric:tabular-nums;}
+    .modepill{position:absolute;top:7px;right:8px;font-size:.65rem;color:#fff;
+      background:rgba(0,0,0,.55);padding:2px 8px;border-radius:999px;display:flex;align-items:center;gap:5px;}
+    .modepill .mdot{width:7px;height:7px;border-radius:50%;background:#4fd18a;}
+    .modepill.review .mdot{background:#f6c453;}
+    .player.review::after{content:"";position:absolute;inset:0;background:rgba(246,196,83,.06);pointer-events:none;}
+    .transport{display:flex;align-items:center;gap:.5rem;margin-top:.45rem;}
+    .pbtn{background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:7px;
+      width:30px;height:28px;cursor:pointer;font-size:.75rem;}
+    .pbtn:hover{border-color:var(--accent,var(--muted));}
+    .track{position:relative;flex:1;height:28px;display:flex;align-items:center;}
+    .track input{width:100%;accent-color:var(--accent,#4fd1c5);}
+    .track .mk{position:absolute;top:4px;width:8px;height:8px;border-radius:50%;background:#f6c453;
+      transform:translateX(-50%);cursor:pointer;border:1px solid var(--panel);}
+    .livebtn{background:var(--danger,#e53e3e);color:#fff;border:none;border-radius:7px;
+      padding:0 10px;height:28px;font-size:.7rem;cursor:pointer;font-weight:700;}
+    .livebtn.on{background:var(--panel2);color:var(--muted);border:1px solid var(--border);font-weight:400;}
+    .tnote{font-size:.66rem;color:var(--muted);margin-top:.2rem;}
+    .askrow input{transition:box-shadow .18s ease,border-color .18s ease;}
+    .askrow.pulse input{border-color:var(--accent);box-shadow:0 0 0 3px rgba(94,179,246,.28);}
+    .acts{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.55rem;position:relative;}
+    .apill{background:transparent;border:1px solid var(--border);color:var(--text);border-radius:999px;
+      padding:.35rem .75rem;font-size:.75rem;cursor:pointer;}
+    .apill:hover{border-color:var(--accent,var(--muted));color:var(--accent,var(--text));}
+    .apill.talk2{background:var(--accent,#4fd1c5);color:#062321;border-color:var(--accent,#4fd1c5);font-weight:700;}
+    .pop{position:absolute;top:38px;left:0;z-index:20;background:var(--panel2);border:1px solid var(--border);
+      border-radius:9px;padding:.6rem;width:250px;box-shadow:0 8px 22px rgba(0,0,0,.5);display:none;}
+    .pop.show{display:block;}
+    .pop h4{margin:0 0 .4rem;font-size:.78rem;font-weight:600;}
+    .pop input,.pop select{width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--border);
+      border-radius:6px;padding:.35rem .5rem;font-size:.75rem;margin-bottom:.35rem;}
+    .pop .go{background:var(--accent,#4fd1c5);color:#062321;border:none;font-weight:700;border-radius:6px;
+      padding:.4rem .6rem;font-size:.75rem;cursor:pointer;width:100%;}
+    #camScoped{margin-top:.5rem;}
+    .player video{display:block;width:100%;aspect-ratio:16/9;object-fit:contain;background:#000;}
+    #recRow{margin-top:.55rem;}
+    .rec-head{display:flex;align-items:center;gap:.5rem;}
+    .rec-lbl{font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;}
+    #recDay{background:var(--panel2);color:var(--text);border:1px solid var(--border);
+      border-radius:6px;font-size:.72rem;padding:.15rem .3rem;}
+    .rec-head .recl{margin-left:auto;font-size:.7rem;color:var(--muted);text-decoration:none;}
+    .rec-head .recl:hover{color:var(--accent);}
+    .rec-segs{display:flex;gap:.35rem;overflow-x:auto;padding:.35rem 0 .2rem;}
+    .rec-segs::-webkit-scrollbar{height:5px;}
+    .rec-segs::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px;}
+    .rec-seg{flex:0 0 auto;background:var(--panel2);border:1px solid var(--border);
+      border-radius:7px;padding:.3rem .55rem;font-size:.72rem;cursor:pointer;color:var(--text);}
+    .rec-seg small{display:block;color:var(--muted);font-size:.62rem;}
+    .rec-seg:hover,.rec-seg.on{border-color:var(--accent);color:var(--accent);}
+    .rec-note{font-size:.7rem;color:var(--muted);padding:.3rem 0;}
+    .evt{display:flex;align-items:flex-start;gap:.45rem;padding:.4rem .5rem;background:var(--panel2);
+      border:1px solid var(--border);border-radius:8px;margin-top:.32rem;cursor:pointer;
+      font-size:.75rem;text-align:left;width:100%;}
+    .evt:hover{border-color:var(--accent);}
+    .evt .ev-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;margin-top:.28rem;}
+    .evt .ev-body{flex:1;min-width:0;}
+    .evt .ev-title{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .evt .ev-sub{display:block;color:var(--muted);font-size:.66rem;}
+    .ringrow{display:flex;gap:.35rem;align-items:center;margin-bottom:.35rem;}
+    .ringrow input{flex:1;margin-bottom:0;}
+    .ringrow select{flex:1;margin-bottom:0;}
+    .ev-scope{font-size:.66rem;color:var(--muted);}
+    .ev-scope a{color:var(--accent);text-decoration:none;}
+    .hwrow{padding:.42rem .5rem;background:var(--panel2);border:1px solid var(--border);
+      border-radius:8px;margin:.3rem 0;font-size:.74rem;}
+    .hwrow .hw-nm{font-weight:600;font-size:.78rem;}
+    .hwrow .hw-min,.hwtips .hw-min{color:var(--muted);}
+    .hwrow .hw-rec{color:var(--accent);}
+    .hwrow .hw-rec.ok{color:var(--muted);}
+    .hwrow .hw-note,.hwtips .hw-note{color:var(--muted);font-size:.68rem;}
+    .hwtips{margin-top:.4rem;font-size:.74rem;}
+    .headbtns{display:flex;align-items:center;gap:.4rem;flex:0 0 auto;}
+    .restorebtn{background:transparent;border:1px solid var(--border);border-radius:6px;
+      color:var(--muted);font-size:.68rem;padding:.18rem .45rem;cursor:pointer;white-space:nowrap;}
+    .restorebtn:hover{color:var(--accent);border-color:var(--accent);}
     .skillhint{color:var(--muted);font-size:0.72rem;margin:-.15rem 0 .5rem;}
     .skill{display:flex;align-items:center;gap:.5rem;padding:.42rem .5rem;background:var(--panel2);
       border:1px solid var(--border);border-radius:8px;margin:.3rem 0;font-size:0.82rem;}
@@ -137,9 +280,9 @@
     .skill .sk-x{background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:.95rem;flex:0 0 auto;padding:0 .1rem;}
     .skill .sk-x:hover{color:var(--danger);}
     #skillBrowse{margin-top:.5rem;border-top:1px solid var(--border);padding-top:.5rem;}
-    #skillSearch,.addform input{width:100%;background:var(--bg2);color:var(--text);border:1px solid var(--border);
+    #skillSearch,.addform input,.addform select{width:100%;background:var(--bg2);color:var(--text);border:1px solid var(--border);
       border-radius:6px;padding:.4rem .5rem;font-size:.8rem;margin-bottom:.4rem;}
-    #skillSearch:focus,.addform input:focus{outline:none;border-color:var(--accent);}
+    #skillSearch:focus,.addform input:focus,.addform select:focus{outline:none;border-color:var(--accent);}
     .brow{display:flex;align-items:center;gap:.5rem;padding:.4rem .5rem;border-radius:8px;margin:.25rem 0;font-size:0.8rem;background:var(--panel2);}
     .brow .b-ic{width:18px;text-align:center;flex:0 0 auto;}
     .brow .b-nm{flex:1;min-width:0;}.brow .b-nm small{display:block;color:var(--muted);font-size:.66rem;}
@@ -192,15 +335,83 @@
             </div>
           </div>
 
+          <div id="mainScreen">
           <label class="field">Cameras</label>
           <div class="cambox" id="cambox">
             <label><input type="checkbox" id="cam-all" checked> All cameras</label>
           </div>
+          <div class="camlbl">tap a camera to peek · ⤢ to open it</div>
+          <div id="camstrip" class="camstrip"></div>
           <div class="row">
             <button id="useLocalCam" class="ghost" type="button" title="Use a camera attached to this machine — webcam, USB, Pi or drone"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h3l2-2h8l2 2h3v12H3z"/><circle cx="12" cy="13" r="3.5"/></svg> Use this machine's camera</button>
           </div>
+          </div>
+
+          <!-- Per-camera screen: NVR-style player over the review ring
+               (the honest last-few-minutes; full playback lives in the
+               main OpenNVR UI), camera-scoped talk/ask, quick watch/alarm
+               popovers. The rail and the chat below are SHARED with the
+               main screen — nothing lost. -->
+          <div id="camScreen" hidden>
+            <div class="ctop">
+              <button class="ghost" id="camBack" type="button">‹ Back to agent</button>
+              <div><div class="ctitle" id="camTitle">camera</div><div class="csub" id="camSub"></div></div>
+            </div>
+            <div class="player" id="camPlayer" title="Click the picture to pin this exact frame into the chat">
+              <img id="camImg" alt="camera view" hidden>
+              <video id="camVideo" controls playsinline hidden></video>
+              <div id="camNoFrame" class="empty-note" hidden>No frame — camera off or unreachable.</div>
+              <span class="ovl" id="camTs"></span>
+              <span class="modepill" id="camMode"><span class="mdot"></span><span id="camModeText">LIVE</span></span>
+            </div>
+            <div class="transport">
+              <button class="pbtn" id="camPlay" title="Play / pause">⏸</button>
+              <div class="track"><input type="range" id="camScrub" min="0" max="0" value="0" disabled><div id="camMarks"></div></div>
+              <button class="livebtn on" id="camLive" type="button">● LIVE</button>
+            </div>
+            <div class="tnote" id="camTnote">Live · marks = detections · drag to review the last few minutes</div>
+            <!-- Recorded segments from the MAIN server (the agent stores no
+                 video): user-token pass-through list + a direct player URL. -->
+            <div id="recRow" hidden>
+              <div class="rec-head">
+                <span class="rec-lbl">Recorded</span>
+                <select id="recDay" aria-label="Recording day" hidden></select>
+                <a class="recl" id="camRecordings" target="_blank" rel="noopener" hidden>All recordings ↗</a>
+              </div>
+              <div id="recSegs" class="rec-segs"></div>
+            </div>
+            <div class="acts">
+              <button class="apill talk2" id="camTalk" type="button">🎙 Talk</button>
+              <button class="apill" id="camAsk" type="button">💬 Ask</button>
+              <button class="apill" id="camWatch" type="button">👁 Watch</button>
+              <button class="apill" id="camAlarm" type="button">🔔 Alarm</button>
+              <div class="pop" id="popWatch">
+                <h4>Watch this camera</h4>
+                <select id="pwKind" aria-label="Watch kind"><option value="notify">Notify when seen</option><option value="count">Keep a live count</option></select>
+                <input id="pwTarget" type="text" placeholder="Watch for, e.g. car / person" autocomplete="off">
+                <button class="go" id="pwGo" type="button">Start watch</button>
+              </div>
+              <div class="pop" id="popAlarm">
+                <h4>Alarm on this camera</h4>
+                <input id="paTarget" type="text" placeholder="Alert on, e.g. person / fire" autocomplete="off">
+                <select id="paRing" aria-label="Alert level">
+                  <option value="chime">🔔 Notice — single chime</option>
+                  <option value="pulse">⚠️ Urgent — loud 1 min, stands down</option>
+                  <option value="siren">🚨 Critical — siren until silenced</option>
+                  <option value="silent">🤫 Silent — notifications only</option>
+                </select>
+                <label class="addform-lbl">Only after <input id="paAfter" type="time"></label>
+                <button class="go" id="paGo" type="button">Arm alarm</button>
+              </div>
+            </div>
+            <div class="empty-note" id="camScoped"></div>
+          </div>
 
           <button id="talk" class="talk" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg> Talk</button>
+          <div class="row" id="pinChip" hidden>
+            <span class="chip">📌 Asking about a <span id="pinCam"></span> frame</span>
+            <button id="pinClear" class="ghost" type="button" title="Unpin — ask about live frames again">✕</button>
+          </div>
           <div class="row askrow">
             <input id="askInput" type="text" placeholder="Type a question, e.g. how many people on cam1?" autocomplete="off">
             <button id="askBtn" class="ghost" type="button">Send</button>
@@ -217,8 +428,12 @@
       </div>
 
       <div class="side">
+        <div class="card" id="eventsCard">
+          <div class="cardhead"><h2>Events</h2><span class="ev-scope" id="evScope" hidden></span><button class="addbtn" id="evToggle" type="button" title="Collapse / expand" aria-label="Toggle events">▾</button></div>
+          <div id="eventsList"><div class="empty-note">Nothing yet — alarm rings, watch hits, and app alerts land here.</div></div>
+        </div>
         <div class="card" id="skillsCard">
-          <div class="cardhead"><h2>Skills</h2><button class="addbtn" id="skillAdd" type="button" title="Add a skill" aria-label="Add a skill">+</button></div>
+          <div class="cardhead"><h2>Skills</h2><span class="headbtns"><button class="restorebtn" id="skillRestore" type="button" hidden title="Re-enable every default skill you've removed">Restore defaults</button><button class="addbtn" id="skillAdd" type="button" title="Add a skill" aria-label="Add a skill">+</button></span></div>
           <div class="skillhint">Capabilities the agent carries. × to remove.</div>
           <div id="skillsList"></div>
           <div id="skillBrowse" hidden>
@@ -228,14 +443,27 @@
           </div>
         </div>
         <div class="card" id="alarmCard">
-          <div class="cardhead"><h2>Alarms</h2><button class="addbtn" id="alarmAdd" type="button" title="Add an alarm" aria-label="Add an alarm">+</button></div>
+          <div class="cardhead"><h2>Alarms</h2><span class="headbtns"><button class="addbtn" id="ringCfg" type="button" title="Alert-level defaults for this site" aria-label="Alert-level defaults">⚙</button><button class="addbtn" id="alarmAdd" type="button" title="Add an alarm" aria-label="Add an alarm">+</button></span></div>
+          <div class="addform" id="ringCfgForm" hidden>
+            <div class="rec-lbl">Default alert level by target</div>
+            <div class="empty-note" id="ringInherited"></div>
+            <div id="ringRows"></div>
+            <button class="ghost" id="ringAddRow" type="button">+ add target</button>
+            <button class="ghost primary" id="ringSave" type="button">Save defaults</button>
+          </div>
           <div class="presets">
-            <button class="ghost preset" data-name="Fire" data-target="fire" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 2c1 3 4 4 4 8a4 4 0 0 1-8 0c0-2 1-3 2-4 0 2 2 2 2 0 0-2-2-2-2-4z"/></svg> Fire</button>
-            <button class="ghost preset" data-name="After-hours person" data-target="person" data-after="18:00" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A8 8 0 1 1 11.2 3 6 6 0 0 0 21 12.8z"/></svg> After-hours</button>
+            <button class="ghost preset" data-name="Fire" data-target="fire" data-ring="siren" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 2c1 3 4 4 4 8a4 4 0 0 1-8 0c0-2 1-3 2-4 0 2 2 2 2 0 0-2-2-2-2-4z"/></svg> Fire</button>
+            <button class="ghost preset" data-name="After-hours person" data-target="person" data-after="18:00" data-ring="siren" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A8 8 0 1 1 11.2 3 6 6 0 0 0 21 12.8z"/></svg> After-hours</button>
           </div>
           <div class="addform" id="alarmForm" hidden>
             <input id="alarmName" type="text" placeholder="Name, e.g. Porch person" autocomplete="off">
             <input id="alarmTarget" type="text" placeholder="Watch for, e.g. person / car / package" autocomplete="off">
+            <select id="alarmRing" aria-label="Alert level">
+              <option value="chime">🔔 Notice — a single chime (visitors, deliveries)</option>
+              <option value="pulse">⚠️ Urgent — loud for a minute, then stands down</option>
+              <option value="siren">🚨 Critical — siren until silenced (fire, break-in)</option>
+              <option value="silent">🤫 Silent — notifications only</option>
+            </select>
             <label class="addform-lbl">Only after <input id="alarmAfter" type="time"></label>
             <button class="ghost primary" id="alarmArm" type="button">Arm alarm</button>
           </div>
@@ -246,7 +474,16 @@
           <div id="alarmList"></div>
         </div>
         <div class="card" id="watchCard">
-          <h2>Watching</h2>
+          <div class="cardhead"><h2>Watching</h2><button class="addbtn" id="watchAdd" type="button" title="Add a watch" aria-label="Add a watch">+</button></div>
+          <div class="addform" id="watchForm" hidden>
+            <select id="watchKind" aria-label="Watch kind">
+              <option value="notify">Notify when seen</option>
+              <option value="count">Keep a live count</option>
+            </select>
+            <input id="watchTarget" type="text" placeholder="Watch for, e.g. person / car / package" autocomplete="off">
+            <button class="ghost primary" id="watchStart" type="button">Start watching</button>
+            <div class="empty-note">For line-crossing counts, ask in chat — the agent will ask you where to place the line.</div>
+          </div>
           <div id="monitorList"></div>
         </div>
         <div class="card" id="taskCard">
@@ -258,15 +495,129 @@
           <div id="taskList"></div>
         </div>
         <div class="card" id="reportCard">
-          <h2>Scheduled reports</h2>
+          <div class="cardhead"><h2>Scheduled reports</h2><button class="addbtn" id="reportAdd" type="button" title="Schedule a report" aria-label="Schedule a report">+</button></div>
+          <div class="addform" id="reportForm" hidden>
+            <input id="reportName" type="text" placeholder="Name, e.g. Morning summary" autocomplete="off">
+            <input id="reportQuery" type="text" placeholder="e.g. summarise overnight activity on all cameras" autocomplete="off">
+            <label class="addform-lbl">Daily at <input id="reportAt" type="time"></label>
+            <label class="addform-lbl">or every <input id="reportEvery" type="number" min="5" step="5" placeholder="—"> minutes</label>
+            <button class="ghost primary" id="reportCreate" type="button">Schedule report</button>
+          </div>
           <div id="reportList"></div>
+        </div>
+        <div class="card" id="hwCard">
+          <div class="cardhead"><h2>Hardware</h2><button class="addbtn" id="hwToggle" type="button" title="Show the per-skill breakdown" aria-label="Toggle hardware detail">▸</button></div>
+          <div id="hwSummary" class="empty-note">Checking…</div>
+          <div id="hwDetail" hidden></div>
         </div>
       </div>
     </div>
   </div>
 
+  <!-- Login overlay (auth_mode="opennvr"): the agent proxies OpenNVR's
+       login, so tokens are the server's own — one origin, mobile-same
+       bearer contract, revocation/MFA stay the server's job. -->
+  <div id="loginOverlay" hidden>
+    <div class="login-card">
+      <div class="login-brand">
+        <div class="login-avatar" aria-hidden="true">
+          <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="50" cy="50" r="40" fill="none" stroke="currentColor" stroke-width="5" opacity=".9"/>
+            <circle cx="50" cy="47" r="13" fill="currentColor"/>
+            <ellipse cx="50" cy="70" rx="11" ry="2.4" fill="currentColor" opacity=".7"/>
+          </svg>
+        </div>
+        <div class="login-wordmark"><span class="wm-open">Open</span><span class="wm-nvr">NVR</span> Agent</div>
+        <div class="login-agent" id="loginAgentLine">Sign in with your OpenNVR account</div>
+      </div>
+      <label class="login-lbl" for="loginUser">Username</label>
+      <input id="loginUser" type="text" placeholder="e.g. admin" autocomplete="username">
+      <label class="login-lbl" for="loginPass">Password</label>
+      <input id="loginPass" type="password" placeholder="••••••••" autocomplete="current-password">
+      <label class="login-lbl" for="loginTotp">MFA code <span class="login-opt">if enabled</span></label>
+      <input id="loginTotp" type="text" inputmode="numeric" placeholder="123 456" autocomplete="one-time-code">
+      <div id="loginErr" class="login-err" hidden></div>
+      <button id="loginGo" type="button">Sign in</button>
+      <div class="login-foot">Access follows your OpenNVR role — viewer · operator · admin</div>
+    </div>
+  </div>
+
   <script>
     const $ = (id) => document.getElementById(id);
+
+    // ── auth: bearer-token plumbing (auth_mode="opennvr") ───────────
+    // One fetch wrapper instead of touching ~40 call sites: attaches the
+    // token to every same-origin request, and on a 401 tries ONE silent
+    // refresh before raising the login overlay. Tokens live in
+    // sessionStorage — survives reload, dies with the tab.
+    let _authMode="none";
+    let _token=sessionStorage.getItem("agent_token")||"";
+    let _refreshTok=sessionStorage.getItem("agent_refresh")||"";
+    const _rawFetch=window.fetch.bind(window);
+    let _refreshing=null;
+    async function _tryRefresh(){
+      if(!_refreshTok) return false;
+      if(_refreshing) return _refreshing;   // collapse concurrent 401s
+      _refreshing=(async()=>{
+        try{ const r=await _rawFetch("/auth/refresh",{method:"POST",
+            headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({refresh_token:_refreshTok})});
+          if(!r.ok) return false;
+          const d=await r.json();
+          if(!d.access_token) return false;
+          _token=d.access_token; sessionStorage.setItem("agent_token",_token);
+          if(d.refresh_token){ _refreshTok=d.refresh_token; sessionStorage.setItem("agent_refresh",_refreshTok); }
+          return true;
+        }catch{ return false; } finally{ setTimeout(()=>{_refreshing=null;},0); }
+      })();
+      return _refreshing;
+    }
+    window.fetch=async function(url,opts={}){
+      const local=typeof url==="string"&&url.startsWith("/")&&!url.startsWith("/auth/");
+      const send=()=>{ const o={...opts};
+        if(local&&_token) o.headers={...(o.headers||{}),"Authorization":"Bearer "+_token};
+        return _rawFetch(url,o); };
+      let r=await send();
+      if(r.status===401&&local&&_authMode==="opennvr"){
+        if(await _tryRefresh()) r=await send();
+        if(r.status===401) showLogin();
+      }
+      return r;
+    };
+    function showLogin(){ const ov=$("loginOverlay"); if(ov&&ov.hidden){ ov.hidden=false; const u=$("loginUser"); if(u) u.focus(); } }
+    // True when gated endpoints can be called: auth off, or we hold a token.
+    // The rail pollers check this so they don't spam 401s behind the login.
+    function authReady(){ return _authMode!=="opennvr" || !!_token; }
+    // Pull a readable message out of an error body. OpenNVR nests it as
+    // {detail:{error,message,remaining_attempts}}, so rendering d.detail
+    // directly printed "[object Object]".
+    function errText(d,status){
+      const dt=d&&d.detail;
+      if(dt&&typeof dt==="object") return dt.message||dt.error||JSON.stringify(dt);
+      return dt||d.error||d.message||("Sign-in failed (HTTP "+status+")");
+    }
+    (function(){ const go=$("loginGo");
+      async function doLogin(){
+        const err=$("loginErr"), btn=$("loginGo"); err.hidden=true;
+        btn.disabled=true; btn.textContent="Signing in…";
+        try{ await _doLoginInner(err); } finally{ btn.disabled=false; btn.textContent="Sign in"; } }
+      async function _doLoginInner(err){
+        const body={username:$("loginUser").value.trim(),password:$("loginPass").value};
+        const totp=$("loginTotp").value.trim(); if(totp) body.totp_code=totp;
+        if(!body.username||!body.password){ err.textContent="Username and password are required."; err.hidden=false; return; }
+        try{ const r=await _rawFetch("/auth/login",{method:"POST",
+            headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+          const d=await r.json().catch(()=>({}));
+          if(!r.ok||!d.access_token){ err.textContent=errText(d,r.status); err.hidden=false; return; }
+          sessionStorage.setItem("agent_token",d.access_token);
+          if(d.refresh_token) sessionStorage.setItem("agent_refresh",d.refresh_token);
+          location.reload();   // clean re-boot with the token attached
+        }catch(e2){ err.textContent="Sign-in failed: "+e2.message; err.hidden=false; }
+      }
+
+      if(go) go.addEventListener("click",doLogin);
+      for(const id of ["loginUser","loginPass","loginTotp"]){ const el=$(id);
+        if(el) el.addEventListener("keydown",e=>{ if(e.key==="Enter") doLogin(); }); } })();
     const talkBtn=$("talk"), resetBtn=$("reset"), statusEl=$("status"), logEl=$("log");
     const camboxEl=$("cambox"), ramEl=$("ram"), workingEl=$("working");
     const alarmbarEl=$("alarmbar"), alarmTextEl=$("alarmText"), silenceBtn=$("silence");
@@ -296,7 +647,7 @@
     let loudFrames=0, captureStart=0, lastVoice=0, lastActivity=0;
     let vadTimer=null, pollTimer=null, alarmTimer=null, workingTimer=null, introPlayed=false;
     const knownTasks={}, seenNotes={}, seenAlarmEvents={}, seenReports={};
-    let sirenOsc=null, sirenGain=null, sirenInt=null;
+    let sirenOsc=null, sirenGain=null, sirenInt=null, alarmRingKind=null;
     let playbackAnalyser=null, currentSource=null, mouthRAF=null;
 
     // ── audio: output ctx (for siren/chimes) + mic ctx share one AudioContext ──
@@ -316,7 +667,8 @@
     function rms(){ analyser.getFloatTimeDomainData(floatBuf); let s=0; for(let i=0;i<floatBuf.length;i++)s+=floatBuf[i]*floatBuf[i]; return Math.sqrt(s/floatBuf.length); }
     function playChime(kind="done") {
       if (!audioCtx) return;
-      const now=audioCtx.currentTime, notes = kind==="done" ? [660,880] : [520];
+      const now=audioCtx.currentTime,
+        notes = kind==="done" ? [660,880] : (kind==="bell" ? [880,660] : [520]);
       notes.forEach((f,i)=>{ const o=audioCtx.createOscillator(), g=audioCtx.createGain();
         o.type="sine"; o.frequency.value=f; o.connect(g); g.connect(audioCtx.destination);
         const t=now+i*0.16; g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.25,t+0.02);
@@ -335,6 +687,17 @@
       if(sirenInt){clearInterval(sirenInt);sirenInt=null;}
       if(sirenOsc){try{sirenOsc.stop();}catch{}sirenOsc.disconnect();sirenOsc=null;}
       if(sirenGain){sirenGain.disconnect();sirenGain=null;}
+    }
+    // URGENT sounds different from CRITICAL: short beep bursts instead of
+    // the continuous two-tone sweep — attention without evacuation.
+    function startPulse() {
+      ensureOutputAudio();
+      if (sirenOsc || !audioCtx) return;
+      sirenOsc=audioCtx.createOscillator(); sirenGain=audioCtx.createGain(); sirenGain.gain.value=0.0001;
+      sirenOsc.type="sine"; sirenOsc.frequency.value=760;
+      sirenOsc.connect(sirenGain); sirenGain.connect(audioCtx.destination); sirenOsc.start();
+      let on=false; sirenInt=setInterval(()=>{ on=!on;
+        sirenGain.gain.setValueAtTime(on?0.14:0.0001,audioCtx.currentTime); },600);
     }
     function playWav(b64){ return new Promise(r=>{const a=new Audio("data:audio/wav;base64,"+b64); a.onended=r; a.onerror=r; a.play().catch(r);}); }
 
@@ -426,7 +789,12 @@
     function openLightbox(src,label){ let ov=document.getElementById("lightbox");
       if(!ov){ ov=document.createElement("div"); ov.id="lightbox"; ov.className="lightbox";
         ov.addEventListener("click",()=>ov.classList.remove("show")); document.body.appendChild(ov); }
-      ov.innerHTML=`<figure style="margin:0"><img src="${src}" alt="${label||""}"><figcaption>${label||""}</figcaption></figure>`;
+      // DOM + textContent — label is server-configured (camera role) and
+      // must never reach innerHTML (a hostile role would execute on click).
+      ov.innerHTML=""; const fig=document.createElement("figure"); fig.style.margin="0";
+      const im=document.createElement("img"); im.src=src; im.alt=label||"";
+      const cap=document.createElement("figcaption"); cap.textContent=label||"";
+      fig.appendChild(im); fig.appendChild(cap); ov.appendChild(fig);
       ov.classList.add("show"); }
     function showLatency(t){ const el=$("lat"); if(!el||!t)return;
       const ms=(t.total!=null?t.total:0); if(!ms){el.hidden=true;return;}
@@ -440,6 +808,15 @@
       workingEl.hidden=false; workingTimer=setTimeout(()=>{workingEl.hidden=true;},6000); }
 
     async function loadAgent(){ try{ const a=await (await fetch("/agent")).json();
+      _authMode=a.auth_mode||"none";
+      window._ringDefaults=a.ring_defaults||{};
+      // The card greets with the AGENT'S configured name (/agent is an
+      // open endpoint precisely so the gate can be personal pre-login).
+      if(a.name){ const ln=$("loginAgentLine");
+        if(ln){ ln.innerHTML="Sign in with your OpenNVR account to talk to <b></b>";
+          ln.querySelector("b").textContent=a.name; } }
+      if(_authMode==="opennvr"&&!_token) showLogin();
+      window._opennvrUi=a.opennvr_ui_url||"";            // deep-link base for recordings
       if(a.avatar_video===false) disableAvatarVideo();   // operator turned the video avatar off
       if(a.text_mode){
         // Text/chat profile: lead with typing; the voice controls don't apply.
@@ -456,9 +833,14 @@
       const inp=$("askInput"), q=inp.value.trim(); if(!q) return;
       inp.value=""; addMsg(q,"user"); setStatus("Thinking…"); setAvatar("thinking");
       $("askBtn").disabled=true;
+      // A pinned frame scopes the turn to its camera and rides along so the
+      // agent answers about the EXACT frame the user clicked. One-shot:
+      // cleared after the send either way.
+      const body={text:q,camera:cameraParam()};
+      if(_pinnedFrame){ body.camera=_pinnedFrame.camera; body.pinned_jpeg_b64=_pinnedFrame.b64; clearPin(); }
       try{
         const r=await fetch("/ask",{method:"POST",headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({text:q,camera:cameraParam()})});
+          body:JSON.stringify(body)});
         const d=await r.json();
         if(!r.ok){ addMsg("Error: "+(d.error||("HTTP "+r.status)),"sys"); }
         else { if(d.reply) addMsg(d.reply,"agent",d.frames); showWorking(d.cameras_used); showLatency({total:d.latency_ms}); }
@@ -467,14 +849,435 @@
       finally{ $("askBtn").disabled=false; setAvatar("idle"); }
     }
     async function loadCameras(){ try{ const r=await fetch("/cameras"); if(!r.ok)return;
-      for(const cam of ((await r.json()).cameras||[])){ const lab=document.createElement("label");
+      const cams=((await r.json()).cameras||[]);
+      for(const cam of cams){ const lab=document.createElement("label");
         const role=(cam.role||"").trim(); const txt=role&&role!=="(no role configured)"?`${cam.camera_id} · ${role.slice(0,28)}`:cam.camera_id;
-        lab.innerHTML=`<input type="checkbox" class="cam-cb" value="${cam.camera_id}"> ${txt}`; camboxEl.appendChild(lab); }
+        // DOM + textContent: camera ids/roles are server-configured strings.
+        const cb=document.createElement("input"); cb.type="checkbox"; cb.className="cam-cb"; cb.value=cam.camera_id;
+        lab.appendChild(cb); lab.appendChild(document.createTextNode(" "+txt)); camboxEl.appendChild(lab); }
       const all=$("cam-all"), cbs=()=>[...document.querySelectorAll(".cam-cb")];
       all.addEventListener("change",()=>{ if(all.checked) cbs().forEach(c=>{c.checked=false;}); });
       camboxEl.addEventListener("change",(e)=>{ if(e.target.classList.contains("cam-cb")&&e.target.checked) all.checked=false;
         if(!cbs().some(c=>c.checked)) all.checked=true; });
+      buildCamStrip(cams);
     }catch{} }
+
+    // ── camera strip: live thumbnails ──────────────────────────────
+    // tap = PEEK (the agent drops the camera's current frame into the
+    // chat with an Open link) · ⤢ / name = the camera's own screen.
+    const _camRoles={};
+    function buildCamStrip(cams){ const strip=$("camstrip"); if(!strip||!cams.length) return;
+      strip.innerHTML="";
+      for(const cam of cams){ _camRoles[cam.camera_id]=(cam.role||"").trim();
+        const t=document.createElement("div"); t.className="camtile"; t.dataset.cam=cam.camera_id;
+        t.title="Tap to peek — the agent shows this camera in the chat";
+        t.innerHTML='<img alt="" hidden><div class="ct-off" hidden>no frame</div>'+
+          '<div class="ct-nm"><span></span><button class="ct-x" title="Open this camera’s screen" aria-label="Open camera screen">⤤</button></div>';
+        t.querySelector(".ct-nm span").textContent=cam.camera_id;
+        t.querySelector("img").addEventListener("click",()=>peekCam(cam.camera_id));
+        t.querySelector(".ct-off").addEventListener("click",()=>peekCam(cam.camera_id));
+        t.querySelector(".ct-nm span").addEventListener("click",()=>openCamScreen(cam.camera_id));
+        t.querySelector(".ct-x").addEventListener("click",(e)=>{ e.stopPropagation(); openCamScreen(cam.camera_id); });
+        strip.appendChild(t); }
+      refreshCamStrip(); setInterval(()=>{ if(document.visibilityState==="visible" && !window._camScreenCam) refreshCamStrip(); },6000); }
+    async function refreshCamStrip(){
+      if(!authReady())return;
+      for(const t of document.querySelectorAll(".camtile")){ const cam=t.dataset.cam;
+        const img=t.querySelector("img"), off=t.querySelector(".ct-off");
+        try{ const r=await fetch("/frame/"+encodeURIComponent(cam)+"?t="+Date.now());
+          if(!r.ok) throw new Error();
+          setBlobSrc(img,await r.blob()); img.hidden=false; off.hidden=true;
+        }catch{ img.hidden=true; off.hidden=false; } } }
+    // One blob URL per <img>: revoke the previous BEFORE assigning — onload
+    // revocation leaks when a new src lands before the old one loaded.
+    function setBlobSrc(img,blob){ if(img.dataset.blobUrl) URL.revokeObjectURL(img.dataset.blobUrl);
+      const url=URL.createObjectURL(blob); img.dataset.blobUrl=url; img.src=url; }
+    async function fetchFrameB64(cam,at){
+      const q=at?("?at="+encodeURIComponent(at)):("?t="+Date.now());
+      const r=await fetch("/frame/"+encodeURIComponent(cam)+q);
+      if(!r.ok) return null;
+      const buf=new Uint8Array(await r.arrayBuffer());
+      let bin=""; for(let i=0;i<buf.length;i+=0x8000) bin+=String.fromCharCode.apply(null,buf.subarray(i,i+0x8000));
+      return btoa(bin); }
+
+    // PEEK: agent-style bubble with the live frame + Open / Pin actions.
+    async function peekCam(cam){
+      const b64=await fetchFrameB64(cam);
+      if(!b64){ addMsg(cam+" is offline — no frame right now.","sys"); return; }
+      const d=document.createElement("div"); d.className="msg agent";
+      d.innerHTML='<span class="who">agent</span>';
+      d.appendChild(document.createTextNode("Here’s "+cam+(_camRoles[cam]?(" · "+_camRoles[cam]):"")+" now:"));
+      const fr=document.createElement("div"); fr.className="frames";
+      const wrap=document.createElement("div"); const im=document.createElement("img"); im.className="frame-thumb";
+      im.src="data:image/jpeg;base64,"+b64; im.alt=cam;
+      im.addEventListener("click",()=>openLightbox(im.src,cam));
+      wrap.appendChild(im); fr.appendChild(wrap); d.appendChild(fr);
+      const row=document.createElement("div");
+      const ob=document.createElement("button"); ob.className="ghost olink"; ob.textContent="Open "+cam+" →";
+      ob.addEventListener("click",()=>openCamScreen(cam));
+      const pb=document.createElement("button"); pb.className="ghost olink"; pb.textContent="📌 Ask about this frame";
+      pb.addEventListener("click",()=>{ setPin(cam,b64); });
+      row.appendChild(ob); row.appendChild(document.createTextNode(" ")); row.appendChild(pb);
+      d.appendChild(row);
+      logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight; }
+
+    // ── pinned frame ("ask about THIS frame") ──────────────────────
+    let _pinnedFrame=null;   // {camera, b64}
+    function setPin(cam,b64){ _pinnedFrame={camera:cam,b64:b64};
+      $("pinCam").textContent=cam; $("pinChip").hidden=false; $("askInput").focus(); }
+    async function pinFrame(cam,at){
+      const b64=await fetchFrameB64(cam,at);
+      if(!b64){ addMsg("No frame available from "+cam+" right now.","sys"); return; }
+      addMsg("Pinned this frame from "+cam+" — ask your question.","user",[{jpeg_b64:b64,camera_id:cam,role:_camRoles[cam]||cam}]);
+      setPin(cam,b64); }
+    function clearPin(){ _pinnedFrame=null; $("pinChip").hidden=true; }
+    (function(){ const c=$("pinClear"); if(c) c.addEventListener("click",clearPin); })();
+
+    // ── per-camera screen (URL: /demo/camera/{id}) ─────────────────
+    let _liveTimer=null, _tl=null, _revTs=null, _playing=true, _stepTimer=null;
+    // View generation: bumped on every mode/frame change so an in-flight
+    // fetch from a previous state can never overwrite the current picture
+    // (live tick landing after a scrub, or two scrubs racing).
+    let _viewGen=0;
+    let _playback=false;   // a recorded segment is in the player
+    let _pc=null, _whepResource=null;   // live WebRTC (WHEP) session
+    function openCamScreen(cam,push=true){
+      if(window._camScreenCam===cam) return;   // already here — no dup history
+      window._camScreenCam=cam; _tl=null;      // stale timeline never drives the new camera
+      $("mainScreen").hidden=true; $("camScreen").hidden=false;
+      $("camTitle").textContent=cam; $("camSub").textContent=_camRoles[cam]||"";
+      if(push) history.pushState({cam:cam},"","/demo/camera/"+encodeURIComponent(cam));
+      goLive(); loadTimeline(cam); loadCamScoped(cam); loadRecordings(cam); _evAllCams=false; renderEventsCard();
+      addMsg("Focused on "+cam+" — talk or type, everything is scoped to this camera. ‹ Back returns to all cameras.","sys"); }
+    function closeCamScreen(push=true){
+      window._camScreenCam=null;
+      const inp=$("askInput"); if(inp) inp.placeholder="Type a question, e.g. how many people on cam1?";
+      if(_liveTimer){clearInterval(_liveTimer);_liveTimer=null;}
+      if(_stepTimer){clearInterval(_stepTimer);_stepTimer=null;}
+      stopPlayback(); stopWebrtc();
+      $("camScreen").hidden=true; $("mainScreen").hidden=false;
+      renderEventsCard();
+      if(push) history.pushState({},"","/demo");
+      refreshCamStrip(); }
+    window.addEventListener("popstate",()=>{
+      const m=location.pathname.match(/\/demo\/camera\/([^/]+)$/);
+      if(m) openCamScreen(decodeURIComponent(m[1]),false); else if(window._camScreenCam) closeCamScreen(false); });
+    (function(){ const b=$("camBack"); if(b) b.addEventListener("click",()=>closeCamScreen()); })();
+    // Free CPU when nobody's watching: a live WebRTC decode keeps running
+    // full-tilt in a hidden/backgrounded tab, competing with the on-box
+    // STT/LLM/TTS. Tear the stream down when the tab is hidden and stop the
+    // still-frame poll; when the user returns to a LIVE camera screen (not
+    // one paused on review/playback), re-establish it. No decode happens
+    // while you're not looking.
+    document.addEventListener("visibilitychange",()=>{
+      if(document.hidden){
+        stopWebrtc();
+        if(_liveTimer){ clearInterval(_liveTimer); _liveTimer=null; }
+      } else if(window._camScreenCam&&!_revTs&&!_playback&&_playing){
+        goLive();   // re-establish live video + the still fallback poll
+      }
+    });
+
+    function fmtClock(ts){ const d=new Date(ts*1000);
+      return ("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2)+":"+("0"+d.getSeconds()).slice(-2); }
+    async function refreshPlayerLive(){ const cam=window._camScreenCam; if(!cam||_pc) return;
+      const gen=_viewGen, img=$("camImg"), off=$("camNoFrame");
+      try{ const r=await fetch("/frame/"+encodeURIComponent(cam)+"?t="+Date.now());
+        if(gen!==_viewGen||cam!==window._camScreenCam) return;   // view moved on
+        if(!r.ok) throw new Error();
+        setBlobSrc(img,await r.blob()); img.hidden=false; off.hidden=true;
+        $("camTs").textContent=fmtClock(Date.now()/1000);
+      }catch{ if(gen===_viewGen){ img.hidden=true; off.hidden=false; } } }
+    function setMode(kind){ const live=kind==="live";
+      $("camMode").classList.toggle("review",!live);
+      $("camModeText").textContent=live?"LIVE":(kind==="playback"?"PLAYBACK":"REVIEW");
+      $("camPlayer").classList.toggle("review",!live);
+      $("camLive").classList.toggle("on",live);
+      $("camTnote").textContent=live?"Live · marks = detections · drag to review the last few minutes"
+        :(kind==="playback"?"Playing a recorded segment — ● LIVE returns"
+          :("Reviewing "+(_revTs?fmtClock(_revTs):"")+" — ● LIVE snaps back")); }
+    function stopPlayback(){ _playback=false; const v=$("camVideo"); if(!v) return;
+      try{ v.pause(); }catch{} v.removeAttribute("src"); v.load(); v.hidden=true;
+      document.querySelectorAll(".rec-seg.on").forEach(el=>el.classList.remove("on")); }
+    function stopWebrtc(){
+      if(_pc){ try{ _pc.close(); }catch{} _pc=null; }
+      if(_whepResource){ fetch(_whepResource,{method:"DELETE"}).catch(()=>{}); _whepResource=null; }
+      const v=$("camVideo"); if(v&&v.srcObject){ v.srcObject=null; } }
+    // The same WebRTC (WHEP) the OpenNVR Live view plays — that's why its
+    // streams are smooth while snapshot polling looks 'laggy/buffering'.
+    // Returns true when the stream is up; false → caller falls back.
+    async function tryWebrtcLive(cam){
+      if(_authMode!=="opennvr") return false;   // needs the user's token
+      window._whepHadUrl=false;
+      let d=null;
+      try{ const r=await fetch("/streams/"+encodeURIComponent(cam)+"/live");
+        if(!r.ok) return false; d=await r.json(); }catch{ return false; }
+      if(!d||!d.whep_url) return false;
+      window._whepHadUrl=true;   // linked + URL granted; failures below are reachability
+      try{
+        const pc=new RTCPeerConnection({iceServers:[{urls:["stun:stun.l.google.com:19302"]}]});
+        _pc=pc;
+        pc.addTransceiver("video",{direction:"recvonly"});
+        pc.addTransceiver("audio",{direction:"recvonly"});
+        const gotTrack=new Promise((res)=>{ pc.ontrack=(ev)=>{ const [stream]=ev.streams;
+          const v=$("camVideo"); if(v&&stream){ v.src=""; v.removeAttribute("src");
+            v.srcObject=stream; v.muted=true; v.controls=false; v.hidden=false;
+            $("camImg").hidden=true; $("camNoFrame").hidden=true;
+            v.play().catch(()=>{}); res(true); } }; });
+        const offer=await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        const resp=await fetch(d.whep_url,{method:"POST",
+          headers:{"Content-Type":"application/sdp"},body:offer.sdp||""});
+        if(!(resp.status===200||resp.status===201)) throw new Error("WHEP "+resp.status);
+        _whepResource=resp.headers.get("Location");
+        await pc.setRemoteDescription({type:"answer",sdp:await resp.text()});
+        // give ICE a moment; if no track arrives, treat as failed
+        const ok=await Promise.race([gotTrack,new Promise(r=>setTimeout(()=>r(false),6000))]);
+        if(!ok) throw new Error("no media");
+        return window._camScreenCam===cam&&_pc===pc;   // user may have left
+      }catch{ stopWebrtc(); return false; } }
+    function goLive(){ _revTs=null; _viewGen++; stopPlayback(); stopWebrtc(); setMode("live");
+      // LIVE always plays: a ⏸ from a previous visit (or from review) must
+      // not leave a frozen picture under a green LIVE pill.
+      _playing=true; const pb=$("camPlay"); if(pb) pb.textContent="⏸";
+      if(_stepTimer){clearInterval(_stepTimer);_stepTimer=null;}
+      const s=$("camScrub"); if(_tl&&_tl.frames&&_tl.frames.length){ s.value=s.max; }
+      refreshPlayerLive();   // instant first picture while WHEP negotiates
+      if(!_liveTimer) _liveTimer=setInterval(()=>{ if(window._camScreenCam&&!_revTs&&!_playback&&!_pc&&_playing) refreshPlayerLive(); },2000);
+      const cam=window._camScreenCam;
+      if(cam) tryWebrtcLive(cam).then((ok)=>{
+        if(window._camScreenCam!==cam||_revTs||_playback) return;
+        $("camTnote").textContent = ok
+          ? "Live · real-time stream · marks = detections · drag to review"
+          : "Live preview — stills every 2 s"+(window._whepHadUrl
+             ? " (camera stream unreachable right now)"
+             : (_authMode==="opennvr"
+                ? " (link this camera to OpenNVR for full-motion video)"
+                : " (sign in with auth_mode: opennvr for full-motion video)")); }); }
+    async function loadTimeline(cam){
+      let tl=null;
+      try{ tl=await (await fetch("/timeline/"+encodeURIComponent(cam))).json(); }catch{ tl=null; }
+      if(window._camScreenCam!==cam) return;   // user switched cameras mid-fetch
+      _tl=tl;
+      const s=$("camScrub"), marks=$("camMarks");
+      marks.innerHTML="";
+      if(!_tl||!_tl.frames||_tl.frames.length<2){ s.disabled=true; s.max=0;
+        s.title="Review fills up as frames arrive — leave the page open a minute."; return; }
+      s.disabled=false; s.max=_tl.frames.length-1; s.value=s.max; s.title="";
+      const t0=_tl.frames[0], t1=_tl.frames[_tl.frames.length-1], span=(t1-t0)||1;
+      for(const ev of (_tl.events||[])){ if(ev.ts<t0||ev.ts>t1) continue;
+        const mk=document.createElement("span"); mk.className="mk";
+        mk.style.left=(((ev.ts-t0)/span)*100)+"%"; mk.title=(ev.summary||"detection")+" · "+fmtClock(ev.ts);
+        mk.addEventListener("click",()=>{ let best=0,bd=1e18;
+          _tl.frames.forEach((f,i)=>{ const d=Math.abs(f-ev.ts); if(d<bd){bd=d;best=i;} });
+          s.value=best; reviewAt(best); });
+        marks.appendChild(mk); } }
+    async function reviewAt(idx){ if(!_tl||!_tl.frames[idx]) return;
+      _revTs=_tl.frames[idx]; _viewGen++; stopPlayback(); stopWebrtc(); const gen=_viewGen; setMode("review");
+      const ts=_revTs, img=$("camImg"), off=$("camNoFrame");
+      try{ const r=await fetch("/frame/"+encodeURIComponent(window._camScreenCam)+"?at="+encodeURIComponent(ts));
+        if(gen!==_viewGen) return;                               // a newer scrub/live won
+        if(!r.ok) throw new Error();
+        setBlobSrc(img,await r.blob()); img.hidden=false; off.hidden=true;
+        $("camTs").textContent=fmtClock(ts);
+      }catch{ if(gen===_viewGen){ img.hidden=true; off.hidden=false; } } }
+    (function(){ const s=$("camScrub"); let deb=null;
+      if(s) s.addEventListener("input",()=>{ const v=+s.value;
+        if(_tl&&v>=+s.max){ goLive(); return; }
+        if(deb) clearTimeout(deb); deb=setTimeout(()=>reviewAt(v),120); });
+      const lb=$("camLive"); if(lb) lb.addEventListener("click",goLive);
+      const pb=$("camPlay"); if(pb) pb.addEventListener("click",()=>{ _playing=!_playing;
+        pb.textContent=_playing?"⏸":"▶";
+        if(_playing&&_revTs&&!_stepTimer){ _stepTimer=setInterval(()=>{ const s2=$("camScrub");
+          const nxt=+s2.value+1; if(nxt>=+s2.max){ goLive(); } else { s2.value=nxt; reviewAt(nxt); } },1000); }
+        if(!_playing&&_stepTimer){ clearInterval(_stepTimer); _stepTimer=null; } });
+      const player=$("camPlayer");
+      if(player) player.addEventListener("click",(e)=>{ if(e.target.closest(".modepill,.ovl")) return;
+        if(_playback) return;               // recorded playback has its own controls
+        const cam=window._camScreenCam; if(!cam) return;
+        pinFrame(cam,_revTs||undefined); }); })();
+
+    // ── Events: ONE what-happened feed (alarms + watches + app alerts).
+    // Clicking an event opens the camera AND jumps to the moment: review
+    // ring if it covers the timestamp, else the recorded segment, else live.
+    let _events=[];
+    function _ago(ts){ const s=Math.max(0,Date.now()/1000-ts);
+      if(s<60) return Math.floor(s)+"s ago"; if(s<3600) return Math.floor(s/60)+"m ago";
+      if(s<86400) return Math.floor(s/3600)+"h ago"; return Math.floor(s/86400)+"d ago"; }
+    function _evDot(sev){ return (sev==="critical"||sev==="high")?"#e5695b"
+      :(sev==="medium"||sev==="warn")?"#f6c453":"var(--muted)"; }
+    async function loadEvents(){
+      if(!authReady())return;
+      try{ const r=await fetch("/events"); if(!r.ok) return;
+        _events=(await r.json()).events||[]; }catch{ return; }
+      renderEventsCard(); }
+    // On a camera's screen the rail feed scopes to THAT camera (with a
+    // one-click way back) — one home for events, zero left-column noise.
+    let _evAllCams=false;
+    function renderEventsCard(){ const el=$("eventsList"), scope=$("evScope");
+      const cam=window._camScreenCam; let list=_events;
+      if(cam){ scope.hidden=false; scope.innerHTML="";
+        const a=document.createElement("a"); a.href="#";
+        if(!_evAllCams){ list=_events.filter(e=>e.camera_id===cam);
+          scope.appendChild(document.createTextNode("on "+cam+" · "));
+          a.textContent="show all";
+          a.addEventListener("click",(ev)=>{ ev.preventDefault(); _evAllCams=true; renderEventsCard(); });
+        } else { scope.appendChild(document.createTextNode("all cameras · "));
+          a.textContent="this camera";
+          a.addEventListener("click",(ev)=>{ ev.preventDefault(); _evAllCams=false; renderEventsCard(); }); }
+        scope.appendChild(a);
+      } else { scope.hidden=true; }
+      if(sessionStorage.getItem("evCollapsed")==="1"){ el.hidden=true; $("evToggle").textContent="▸";
+        renderEvents(el,[]); return; }
+      el.hidden=false; $("evToggle").textContent="▾";
+      renderEvents(el,list.slice(0,8)); }
+    (function(){ const b=$("evToggle"); if(b) b.addEventListener("click",()=>{
+      const c=sessionStorage.getItem("evCollapsed")==="1";
+      sessionStorage.setItem("evCollapsed",c?"0":"1"); renderEventsCard(); }); })();
+    function renderEvents(el,list){ if(!el) return;
+      if(!list.length){ el.innerHTML='<div class="empty-note">Nothing yet — alarm rings, watch hits, and app alerts land here.</div>'; return; }
+      el.innerHTML="";
+      for(const ev of list){ const b=document.createElement("button"); b.type="button"; b.className="evt";
+        b.innerHTML='<span class="ev-dot"></span><span class="ev-body"><span class="ev-title"></span><span class="ev-sub"></span></span>';
+        b.querySelector(".ev-dot").style.background=_evDot(ev.severity);
+        b.querySelector(".ev-title").textContent=ev.title;
+        b.title=ev.detail||ev.title;
+        b.querySelector(".ev-sub").textContent=(ev.camera_id||"all cameras")+" · "+_ago(ev.ts);
+        b.addEventListener("click",()=>{ if(ev.camera_id) openCamAtMoment(ev.camera_id,ev.ts); });
+        el.appendChild(b); } }
+    async function openCamAtMoment(cam,ts){
+      if(window._camScreenCam!==cam) openCamScreen(cam);
+      // the ring first: the honest "see that exact moment"
+      try{ await loadTimeline(cam); }catch{}
+      if(_tl&&_tl.frames&&_tl.frames.length>1){
+        const f=_tl.frames;
+        if(ts>=f[0]-3&&ts<=f[f.length-1]+3){
+          let best=0,bd=1e18; f.forEach((t,i)=>{ const d=Math.abs(t-ts); if(d<bd){bd=d;best=i;} });
+          $("camScrub").value=best; reviewAt(best); return; } }
+      // else a recorded segment covering the moment
+      try{ await loadRecordings(cam); }catch{}
+      const seg=_recs.find(x=>{ const s0=Date.parse(x.start)/1000;
+        return ts>=s0-2&&ts<=s0+(x.duration||0)+2; });
+      if(seg) playRecording(cam,seg,null);
+      // else: live view (openCamScreen already did that)
+    }
+
+    // ── Recorded row: segments from the MAIN server, played by URL ──
+    let _recs=[];   // [{start, duration}] for the open camera
+    function _dayKey(iso){ return String(iso).slice(0,10); }
+    function _dayLabel(key){ const today=new Date().toISOString().slice(0,10);
+      const y=new Date(Date.now()-86400000).toISOString().slice(0,10);
+      return key===today?"Today":(key===y?"Yesterday":key); }
+    async function loadRecordings(cam){
+      const row=$("recRow"), segs=$("recSegs"), day=$("recDay"), link=$("camRecordings");
+      row.hidden=true; segs.innerHTML=""; day.hidden=true; _recs=[];
+      if(link){ if(window._opennvrUi){ link.href=window._opennvrUi.replace(/\/$/,"")+"/recordings"; link.hidden=false; } else link.hidden=true; }
+      const fallback=(note)=>{ if(window._opennvrUi){ row.hidden=false;
+        segs.innerHTML='<div class="rec-note"></div>'; segs.firstChild.textContent=note; } };
+      if(_authMode!=="opennvr"){ fallback("Recorded playback needs auth_mode: opennvr — full history in OpenNVR ↗"); return; }
+      let d=null;
+      try{ const r=await fetch("/recordings/"+encodeURIComponent(cam));
+        d=await r.json().catch(()=>null);
+        if(r.status===404&&d&&d.unlinked){ fallback("Link this camera (opennvr_camera_id) to see its recordings here."); return; }
+        if(!r.ok||!d){ fallback("Recordings unavailable right now — full history in OpenNVR ↗"); return; }
+      }catch{ fallback("Recordings unavailable right now — full history in OpenNVR ↗"); return; }
+      _recs=(d.recordings||[]).filter(x=>x&&x.start);
+      if(!_recs.length){ fallback("No recordings for this camera yet."); return; }
+      row.hidden=false;
+      const days=[...new Set(_recs.map(x=>_dayKey(x.start)))].sort().reverse();
+      day.innerHTML=""; for(const k of days){ const o=document.createElement("option");
+        o.value=k; o.textContent=_dayLabel(k); day.appendChild(o); }
+      day.hidden=days.length<2&&_dayLabel(days[0])==="Today";
+      day.onchange=()=>renderSegs(cam,day.value);
+      renderSegs(cam,days[0]); }
+    function renderSegs(cam,dayKey){ const segs=$("recSegs"); segs.innerHTML="";
+      const list=_recs.filter(x=>_dayKey(x.start)===dayKey)
+        .sort((a,b)=>String(b.start).localeCompare(String(a.start)));
+      for(const seg of list){ const b=document.createElement("button");
+        b.type="button"; b.className="rec-seg";
+        const t=new Date(seg.start); const mins=Math.max(1,Math.round((seg.duration||0)/60));
+        b.innerHTML="<span></span><small></small>";
+        b.querySelector("span").textContent=("0"+t.getHours()).slice(-2)+":"+("0"+t.getMinutes()).slice(-2);
+        b.querySelector("small").textContent=mins+" min";
+        b.addEventListener("click",()=>playRecording(cam,seg,b));
+        segs.appendChild(b); } }
+    async function playRecording(cam,seg,btn){
+      try{ const r=await fetch("/recordings/"+encodeURIComponent(cam)+"/play?start="+
+          encodeURIComponent(seg.start)+"&duration="+encodeURIComponent(seg.duration||60));
+        const d=await r.json().catch(()=>({}));
+        if(!r.ok||!d.url){ addMsg("Couldn't get a playback URL: "+(d.error||("HTTP "+r.status)),"sys"); return; }
+        _revTs=null; _viewGen++; stopWebrtc(); _playback=true;   // leave live/review cleanly
+        if(_stepTimer){clearInterval(_stepTimer);_stepTimer=null;}
+        const img=$("camImg"), off=$("camNoFrame"), v=$("camVideo");
+        img.hidden=true; off.hidden=true;
+        v.srcObject=null; v.controls=true; v.src=d.url; v.hidden=false;
+        // Autoplay: the click gesture is gone after the fetch, so an
+        // unmuted play() may be blocked — fall back to muted (controls
+        // let the user unmute), never to a frozen first frame.
+        v.muted=false;
+        v.play().catch(()=>{ v.muted=true; v.play().catch(()=>{}); });
+        setMode("playback");
+        document.querySelectorAll(".rec-seg.on").forEach(el=>el.classList.remove("on"));
+        if(btn) btn.classList.add("on");
+        const t=new Date(seg.start);
+        $("camTs").textContent=("0"+t.getHours()).slice(-2)+":"+("0"+t.getMinutes()).slice(-2)+":"+("0"+t.getSeconds()).slice(-2);
+      }catch(err){ addMsg("Couldn't play the recording: "+err.message,"sys"); } }
+
+    // camera-screen actions: talk/ask scoped by cameraParam(); quick popovers.
+    function closePops(){ document.querySelectorAll(".pop").forEach(p=>p.classList.remove("show")); }
+    function togglePop(id){ const el=$(id.slice(1)); const show=!el.classList.contains("show"); closePops(); if(show) el.classList.add("show"); }
+    // Click anywhere outside the actions row closes an open popover —
+    // an armed transparent-looking leftover popover was a reported bug.
+    document.addEventListener("click",(e)=>{ if(!e.target.closest(".acts")) closePops(); });
+    async function loadCamScoped(cam){
+      const el=$("camScoped"); const bits=[];
+      try{ const d=await (await fetch("/monitors")).json();
+        const mine=(d.monitors||[]).filter(m=>m.active&&(m.camera_ids||[]).includes(cam));
+        bits.push("Watching: "+(mine.length?mine.map(m=>"#"+m.id+" "+m.kind+" "+m.target).join(", "):"none"));
+      }catch{}
+      try{ const d=await (await fetch("/alarms")).json();
+        const mine=(d.alarms||[]).filter(a=>a.active&&(a.camera_ids||[]).includes(cam));
+        bits.push("Alarms: "+(mine.length?mine.map(a=>"#"+a.id+" "+a.name).join(", "):"none"));
+      }catch{}
+      el.textContent=bits.join("  ·  "); }
+    (function(){
+      const t=$("camTalk"); if(t) t.addEventListener("click",()=>{ closePops(); const tb=$("talk"); if(tb) tb.click(); });
+      const a=$("camAsk"); if(a) a.addEventListener("click",()=>{ closePops();
+        // Ask has no dialog of its own — it hands you to the type box.
+        // Make that VISIBLE (scoped placeholder + a brief pulse) so the
+        // pill never reads as a dead button.
+        const inp=$("askInput"), row=inp.closest(".askrow");
+        inp.placeholder="Ask about "+(window._camScreenCam||"this camera")+" — e.g. what do you see right now?";
+        inp.scrollIntoView({block:"center",behavior:"smooth"}); inp.focus();
+        if(row){ row.classList.remove("pulse"); void row.offsetWidth; row.classList.add("pulse");
+          setTimeout(()=>row.classList.remove("pulse"),1400); } });
+      const w=$("camWatch"); if(w) w.addEventListener("click",()=>togglePop("#popWatch"));
+      const al=$("camAlarm"); if(al) al.addEventListener("click",()=>togglePop("#popAlarm"));
+      const wg=$("pwGo"); if(wg) wg.addEventListener("click",async()=>{
+        const cam=window._camScreenCam, target=($("pwTarget").value||"").trim();
+        if(!cam||!target){ $("pwTarget").focus(); return; }
+        try{ const r=await fetch("/monitors",{method:"POST",headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({kind:$("pwKind").value,target,camera_ids:[cam]})});
+          const d=await r.json().catch(()=>({}));
+          addMsg(r.ok?(d.message||("Watching "+cam+" for "+target+".")):("Couldn't start the watch: "+(d.error||("HTTP "+r.status))),r.ok?"sys":"sys");
+        }catch(err){ addMsg("Couldn't start the watch: "+err.message,"sys"); }
+        $("pwTarget").value=""; closePops(); pollMonitors(); loadCamScoped(cam); });
+      const ag=$("paGo"); if(ag) ag.addEventListener("click",async()=>{
+        const cam=window._camScreenCam, target=($("paTarget").value||"").trim();
+        if(!cam||!target){ $("paTarget").focus(); return; }
+        const body={name:"Alarm: "+target+" on "+cam,target,camera_ids:[cam],
+                    ring:$("paRing").value};
+        const after=$("paAfter").value; if(after) body.after=after;
+        try{ const r=await fetch("/alarms",{method:"POST",headers:{"Content-Type":"application/json"},
+            body:JSON.stringify(body)});
+          const d=await r.json().catch(()=>({}));
+          addMsg(r.ok?(d.message||("Armed on "+cam+" for "+target+".")):("Couldn't arm the alarm: "+(d.error||("HTTP "+r.status))),"sys");
+        }catch(err){ addMsg("Couldn't arm the alarm: "+err.message,"sys"); }
+        $("paTarget").value=""; closePops(); pollAlarms(); loadCamScoped(cam); }); })();
+    // deep link: /demo/camera/{id} opens that camera once the strip knows roles
+    function openDeepLinkedCamera(){
+      const m=location.pathname.match(/\/demo\/camera\/([^/]+)$/);
+      if(m) openCamScreen(decodeURIComponent(m[1]),false); }
     async function useLocalCamera(){
       const btn=$("useLocalCam"); if(btn) btn.disabled=true;
       setStatus("Looking for a camera on this machine…");
@@ -493,7 +1296,10 @@
       }catch(err){ setStatus("Could not access a local camera: "+err.message,"error"); }
       finally{ if(btn) btn.disabled=false; }
     }
-    function cameraParam(){ const all=$("cam-all"); if(all&&all.checked) return "all";
+    function cameraParam(){
+      // On a camera's own screen every ask/talk is scoped to that camera.
+      if(window._camScreenCam) return window._camScreenCam;
+      const all=$("cam-all"); if(all&&all.checked) return "all";
       const picked=[...document.querySelectorAll(".cam-cb:checked")].map(c=>c.value); return picked.length?picked.join(","):"all"; }
 
     function pickMimeType(){ for(const t of ["audio/webm;codecs=opus","audio/webm","audio/ogg;codecs=opus","audio/mp4"])
@@ -554,13 +1360,16 @@
     async function startSession(){ ensureOutputAudio();
       try{ await ensureMic(); }catch(err){ setStatus("Microphone access denied.","error"); addMsg("Microphone access denied: "+err,"sys"); return; }
       sessionActive=true; lastActivity=performance.now(); loudFrames=0;
+      // Voice turns answer from LIVE frames — an armed pin would be a lie
+      // (only typed asks carry it), so unpin loudly instead of silently.
+      if(_pinnedFrame){ clearPin(); addMsg("Unpinned — voice questions use live frames; type to ask about a pinned frame.","sys"); }
       talkBtn.innerHTML=IC.stop+" Stop"; talkBtn.classList.add("listening");
       if(!introPlayed){ introPlayed=true; await playIntro(); }
       if(!sessionActive) return;
       micdotEl.hidden=false; setAvatar("listening"); setStatus("Listening… just speak.","active");
       if(!levelRAF) levelRAF=requestAnimationFrame(levelRing);
       if(!vadTimer) vadTimer=setInterval(vadTick,TICK_MS);
-      if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();},POLL_MS);
+      if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();loadEvents();},POLL_MS);
       if(!alarmTimer) alarmTimer=setInterval(pollAlarms,2500);
     }
     function endSession(){ sessionActive=false; if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(capturing)stopCapture();
@@ -572,7 +1381,7 @@
       addMsg("The agent stopped listening after a quiet spell. Tap Talk to chat again.","sys"); }
 
     // ── tasks ──
-    async function pollTasks(){ let tasks; try{ tasks=(await (await fetch("/tasks")).json()).tasks||[]; }catch{ return; }
+    async function pollTasks(){ if(!authReady())return; let tasks; try{ tasks=(await (await fetch("/tasks")).json()).tasks||[]; }catch{ return; }
       for(const t of tasks){ if((t.status==="done"||t.status==="error")&&knownTasks[t.id]!==t.status){
         const msg=`Done with task #${t.id}: ${t.result||"no result"}`; addMsg(msg,"agent"); playChime("done"); await announce(msg); }
         knownTasks[t.id]=t.status; }
@@ -590,7 +1399,7 @@
         if(d.audio_b64){ speaking=true; setAvatar("speaking"); await playWav(d.audio_b64); speaking=false; if(sessionActive)setAvatar("listening"); } }catch{} }
 
     // ── monitors ──
-    async function pollMonitors(){ let data; try{ data=await (await fetch("/monitors")).json(); }catch{ return; }
+    async function pollMonitors(){ if(!authReady())return; let data; try{ data=await (await fetch("/monitors")).json(); }catch{ return; }
       for(const n of (data.notifications||[])){ if(!seenNotes[n.id]){ seenNotes[n.id]=true; addMsg(n.text,"agent"); playChime("notify"); await announce(n.text); } }
       renderMonitors(data.monitors||[]); }
     function renderMonitors(monitors){ const active=monitors.filter(m=>m.active);
@@ -607,7 +1416,7 @@
     async function stopMonitor(id){ try{ await fetch("/monitors/"+id,{method:"DELETE"}); }catch{} pollMonitors(); }
 
     // ── scheduled reports ──
-    async function pollReports(){ let data; try{ data=await (await fetch("/reports")).json(); }catch{ return; }
+    async function pollReports(){ if(!authReady())return; let data; try{ data=await (await fetch("/reports")).json(); }catch{ return; }
       for(const rep of (data.reports||[])){ if(!seenReports[rep.id]){ seenReports[rep.id]=true;
         addMsg(`📋 ${rep.name}: ${rep.text}`,"agent"); playChime("done"); await announce(`${rep.name}. ${rep.text}`); } }
       renderReports(data.schedules||[]); }
@@ -622,12 +1431,26 @@
     async function stopReport(id){ try{ await fetch("/reports/"+id,{method:"DELETE"}); }catch{} pollReports(); }
 
     // ── alarms ──
-    async function pollAlarms(){ let data; try{ data=await (await fetch("/alarms")).json(); }catch{ return; }
-      for(const e of (data.events||[])){ if(!seenAlarmEvents[e.id]){ seenAlarmEvents[e.id]=true; addMsg("Alarm: "+e.text,"agent"); } }
+    let _chimeHideT=null;
+    function flashChime(text){ if(alarmRinging) return;   // a latched siren owns the banner
+      alarmbarEl.classList.add("chime"); alarmTextEl.textContent=text; alarmbarEl.hidden=false;
+      if(_chimeHideT) clearTimeout(_chimeHideT);
+      _chimeHideT=setTimeout(()=>{ if(!alarmRinging){ alarmbarEl.hidden=true; } alarmbarEl.classList.remove("chime"); },5000); }
+    async function pollAlarms(){ if(!authReady())return; let data; try{ data=await (await fetch("/alarms")).json(); }catch{ return; }
+      for(const e of (data.events||[])){ if(!seenAlarmEvents[e.id]){ seenAlarmEvents[e.id]=true;
+        addMsg("Alarm: "+e.text,"agent");
+        if(e.ring==="chime"){ playChime("bell"); flashChime(e.text); } } }
       const names=(data.alarms||[]).filter(a=>a.triggered).map(a=>a.name);
-      if(data.ringing){ alarmRinging=true; alarmTextEl.textContent=names.length?("Alarm: "+names.join(", ")):"Alarm triggered";
-        alarmbarEl.hidden=false; setAvatar("speaking"); startSiren(); }
-      else { alarmRinging=false; alarmbarEl.hidden=true; stopSiren(); }
+      if(data.ringing){ alarmRinging=true; alarmbarEl.classList.remove("chime");
+        alarmbarEl.classList.toggle("pulse",data.ringing_kind==="pulse");
+        alarmTextEl.textContent=names.length?("Alarm: "+names.join(", ")):"Alarm triggered";
+        alarmbarEl.hidden=false; setAvatar("speaking");
+        if(data.ringing_kind==="pulse"&&!sirenOsc) startPulse();
+        else if(data.ringing_kind!=="pulse"){ if(alarmRingKind==="pulse") stopSiren(); startSiren(); }
+        alarmRingKind=data.ringing_kind; }
+      else { alarmRinging=false; stopSiren();
+        // don't cut a chime flash short — it hides itself after 5s
+        if(!alarmbarEl.classList.contains("chime")) alarmbarEl.hidden=true; }
       renderAlarms(data.alarms||[]); }
     function renderAlarms(alarms){ const active=alarms.filter(a=>a.active);
       if(!active.length){ alarmListEl.innerHTML='<div class="empty-note">No alarms armed.</div>'; return; }
@@ -635,7 +1458,8 @@
       for(const a of active){ const d=document.createElement("div"); d.className="item"+(a.triggered?" ringing":"");
         d.innerHTML=`<span class="badge">${IC.bell}</span>`; const q=document.createElement("span"); q.className="q";
         const when=a.window==="any time"?"":` · ${a.window}`; const contact=a.emergency_contact_configured?" · ☎":"";
-        q.textContent=`${a.name}: ${a.target} on ${a.camera_ids.join(", ")}${when}${contact}`; d.appendChild(q);
+        const ring=a.ring==="chime"?" · 🔔":(a.ring==="silent"?" · 🤫":(a.ring==="pulse"?" · ⚠️":""));
+        q.textContent=`${a.name}: ${a.target} on ${a.camera_ids.join(", ")}${when}${contact}${ring}`; d.appendChild(q);
         const s=document.createElement("button"); s.className="stop"; s.title="Disarm"; s.textContent="✕";
         s.addEventListener("click",()=>disarmAlarm(a.id)); d.appendChild(s); alarmListEl.appendChild(d); } }
     async function ackAlarms(){ ensureOutputAudio(); try{ await fetch("/alarms/ack",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});}catch{}
@@ -649,13 +1473,14 @@
     silenceBtn.addEventListener("click", ackAlarms);
     document.querySelectorAll(".preset").forEach(btn=>btn.addEventListener("click",()=>{
       const body={name:btn.dataset.name,target:btn.dataset.target,camera_id:cameraParam()};
-      if(btn.dataset.after) body.after=btn.dataset.after; addAlarm(body); }));
+      if(btn.dataset.after) body.after=btn.dataset.after;
+      if(btn.dataset.ring) body.ring=btn.dataset.ring; addAlarm(body); }));
     $("askBtn").addEventListener("click", ask);
     $("askInput").addEventListener("keydown",(e)=>{ if(e.key==="Enter") ask(); });
     // Click Talk to start/stop the listening session.
     talkBtn.addEventListener("click",()=>{ ensureOutputAudio();
       if(busy&&sessionActive)return; if(sessionActive)stopSession(); else startSession(); });
-    resetBtn.addEventListener("click",async()=>{ stopSpeaking(); try{ await fetch("/reset",{method:"POST"}); logEl.innerHTML=""; addMsg("Conversation reset.","sys"); }catch{} });
+    resetBtn.addEventListener("click",async()=>{ stopSpeaking(); clearPin(); try{ await fetch("/reset",{method:"POST"}); logEl.innerHTML=""; addMsg("Conversation reset.","sys"); }catch{} });
 
     async function loadNotify(){
       try{ const s=await (await fetch("/notify")).json();
@@ -695,15 +1520,25 @@
     function gateRailCards(enabledIds){ const map={alarm:"alarmCard",watch:"watchCard",task:"taskCard",report:"reportCard"};
       const set=new Set(enabledIds);
       for(const id in map){ const card=$(map[id]); if(card) card.style.display=set.has(id)?"":"none"; } }
+    // Core task-shaped skills: removing one takes a whole rail panel's
+    // capability away, so the ✕ asks first. Value = what the agent loses.
+    const CORE_SKILLS={alarm:"set or silence alarms",watch:"keep watches and live counts",
+      report:"run scheduled reports",task:"work on longer jobs in the background"};
     function renderSkills(){ const el=$("skillsList"); if(!el) return; el.innerHTML="";
       const on=_skills.filter(s=>s.enabled);
       gateRailCards(on.map(s=>s.id));
+      // "Restore defaults" appears only when something is actually restorable:
+      // a skill that's off but whose backend is available (backend-gated
+      // skills aren't the toggle's fault and restoring can't enable them).
+      const rb=$("skillRestore"); if(rb) rb.hidden=!_skills.some(s=>!s.enabled&&s.available);
       if(!on.length) el.innerHTML='<div class="empty-note">No skills enabled — tap + to add.</div>';
       for(const s of on){ const d=document.createElement("div"); d.className="skill";
         d.innerHTML=`<span class="sk-ic">${s.icon}</span><span class="sk-body"><span class="sk-nm"></span><span class="sk-uses"></span></span><button class="sk-x" title="Remove skill">✕</button>`;
         d.querySelector(".sk-nm").textContent=s.name;
         d.querySelector(".sk-uses").textContent="uses "+s.uses;
-        d.querySelector(".sk-x").addEventListener("click",()=>toggleSkill(s.id,"disable"));
+        d.querySelector(".sk-x").addEventListener("click",()=>{
+          if(CORE_SKILLS[s.id] && !window.confirm('Turn off "'+s.name+'"? The agent will no longer be able to '+CORE_SKILLS[s.id]+' until you add it back.')) return;
+          toggleSkill(s.id,"disable"); });
         el.appendChild(d); }
       renderBrowse(); }
     // Pretty display names for the reference adapters named in tasks.yml's
@@ -766,23 +1601,146 @@
       try{ const r=await fetch("/skills/"+encodeURIComponent(id)+"/"+action,{method:"POST"});
         const d=await r.json().catch(()=>({}));
         if(!r.ok){ addMsg("Couldn't "+action+" skill: "+(d.hint||d.error||("HTTP "+r.status)),"sys"); return; }
-        _skills=d.skills||_skills; renderSkills();
+        _skills=d.skills||_skills; renderSkills(); loadHardware();
         addMsg((action==="enable"?"Enabled":"Removed")+" a skill — the agent reconfigured its tools.","sys");
       }catch(err){ addMsg("Couldn't "+action+" skill: "+err.message,"sys"); } }
-    // + / browse / search wiring
-    (function(){ const add=$("skillAdd"), br=$("skillBrowse"), close=$("skillBrowseClose"), search=$("skillSearch");
+    // One-click undo for an over-pruned agent: clears every runtime toggle
+    // server-side (fresh-boot state). Backend-gated skills stay gated.
+    async function restoreSkills(){
+      try{ const r=await fetch("/skills/restore",{method:"POST"});
+        const d=await r.json().catch(()=>({}));
+        if(!r.ok){ addMsg("Couldn't restore default skills: "+(d.error||("HTTP "+r.status)),"sys"); return; }
+        _skills=d.skills||_skills; renderSkills(); loadHardware();
+        addMsg(d.restored?("Restored "+d.restored+" default skill"+(d.restored===1?"":"s")+" — the agent reconfigured its tools."):"Skills already at defaults.","sys");
+      }catch(err){ addMsg("Couldn't restore default skills: "+err.message,"sys"); } }
+    // + / browse / search / restore wiring
+    (function(){ const add=$("skillAdd"), br=$("skillBrowse"), close=$("skillBrowseClose"), search=$("skillSearch"), restore=$("skillRestore");
       if(add&&br) add.addEventListener("click",()=>{ br.hidden=!br.hidden; add.classList.toggle("open",!br.hidden); if(!br.hidden){ renderBrowse(); search&&search.focus(); } });
       if(close) close.addEventListener("click",()=>{ br.hidden=true; add.classList.remove("open"); });
-      if(search) search.addEventListener("input", renderBrowse); })();
+      if(search) search.addEventListener("input", renderBrowse);
+      if(restore) restore.addEventListener("click", restoreSkills); })();
+
+    // ── Site alert-level defaults editor (admin): edits the OVERRIDE
+    // layer; config/built-in entries show as inherited. Saving updates
+    // the form preselects live (window._ringDefaults).
+    const RING_LEVELS=[["chime","🔔 Notice"],["pulse","⚠️ Urgent"],["siren","🚨 Critical"],["silent","🤫 Silent"]];
+    function _ringRow(target,level){ const d=document.createElement("div"); d.className="ringrow";
+      const t=document.createElement("input"); t.type="text"; t.placeholder="target, e.g. snake"; t.value=target||"";
+      const sel=document.createElement("select");
+      for(const [v,lbl] of RING_LEVELS){ const o=document.createElement("option"); o.value=v; o.textContent=lbl; sel.appendChild(o); }
+      sel.value=level||"chime";
+      const x=document.createElement("button"); x.type="button"; x.className="sk-x"; x.textContent="✕";
+      x.title="Remove"; x.addEventListener("click",()=>d.remove());
+      d.appendChild(t); d.appendChild(sel); d.appendChild(x); return d; }
+    async function openRingCfg(){
+      const f=$("ringCfgForm"); if(!f.hidden){ f.hidden=true; return; }
+      let d=null; try{ d=await (await fetch("/alarm-defaults")).json(); }catch{}
+      if(!d){ addMsg("Couldn't load alert defaults.","sys"); return; }
+      const rows=$("ringRows"); rows.innerHTML="";
+      for(const [k,v] of Object.entries(d.overrides||{})) rows.appendChild(_ringRow(k,v));
+      const inherited=Object.entries(d.defaults||{}).filter(([k])=>!(k in (d.overrides||{})));
+      $("ringInherited").textContent=inherited.length?
+        ("Inherited: "+inherited.map(([k,v])=>k+" → "+v).join(", ")):"";
+      f.hidden=false; }
+    (function(){ const g=$("ringCfg"); if(g) g.addEventListener("click",openRingCfg);
+      const add=$("ringAddRow"); if(add) add.addEventListener("click",()=>{ $("ringRows").appendChild(_ringRow("","chime")); });
+      const save=$("ringSave"); if(save) save.addEventListener("click",async()=>{
+        const overrides={};
+        for(const row of document.querySelectorAll("#ringRows .ringrow")){
+          const t=row.querySelector("input").value.trim().toLowerCase();
+          if(t) overrides[t]=row.querySelector("select").value; }
+        try{ const r=await fetch("/alarm-defaults",{method:"PUT",
+            headers:{"Content-Type":"application/json"},body:JSON.stringify({overrides})});
+          const d=await r.json().catch(()=>({}));
+          if(!r.ok){ addMsg("Couldn't save alert defaults: "+(d.error||("HTTP "+r.status)),"sys"); return; }
+          window._ringDefaults=d.defaults||{};
+          addMsg("Alert-level defaults saved — new alarms will follow them.","sys");
+          $("ringCfgForm").hidden=true;
+        }catch(err){ addMsg("Couldn't save alert defaults: "+err.message,"sys"); } }); })();
+
+    // The SITE decides its defaults (config alarm_ring_defaults — a farm
+    // maps snake→siren, a bank maps person→siren): an untouched select
+    // follows the map as the target is typed; a deliberate user choice
+    // is never overridden.
+    function wireRingPreselect(targetId,ringId){ const t=$(targetId), r=$(ringId);
+      if(!t||!r) return;
+      r.addEventListener("change",()=>{ r.dataset.touched="1"; });
+      t.addEventListener("input",()=>{ if(r.dataset.touched) return;
+        const map=window._ringDefaults||{};
+        const word=(t.value||"").trim().toLowerCase();
+        r.value=map[word]||( /\b(fire|smoke|flame|gas)\b/i.test(t.value)?"siren":"chime"); }); }
+    wireRingPreselect("alarmTarget","alarmRing");
+    wireRingPreselect("paTarget","paRing");
 
     // Alarms: + reveals a small custom-alarm form (POST /alarms via addAlarm).
     (function(){ const add=$("alarmAdd"), f=$("alarmForm"), arm=$("alarmArm");
       if(add&&f) add.addEventListener("click",()=>{ f.hidden=!f.hidden; add.classList.toggle("open",!f.hidden); if(!f.hidden) $("alarmName").focus(); });
       if(arm) arm.addEventListener("click",()=>{ const target=$("alarmTarget").value.trim();
         if(!target){ $("alarmTarget").focus(); return; }
-        const body={name:$("alarmName").value.trim()||("Alarm: "+target),target,camera_id:cameraParam()};
+        const body={name:$("alarmName").value.trim()||("Alarm: "+target),target,camera_id:cameraParam(),
+                    ring:$("alarmRing").value};
         const after=$("alarmAfter").value; if(after) body.after=after; addAlarm(body);
         $("alarmName").value=""; $("alarmTarget").value=""; $("alarmAfter").value=""; f.hidden=true; add.classList.remove("open"); }); })();
+
+    // ── hardware: what the ENABLED skills run on vs. what makes them fast.
+    // Advisory (fallbacks always work); recomputed whenever skills change.
+    async function loadHardware(){
+      const sum=$("hwSummary"), det=$("hwDetail"); if(!sum) return;
+      let hw; try{ hw=await (await fetch("/hardware")).json(); }catch{ sum.textContent="Hardware guidance unavailable."; return; }
+      sum.textContent=hw.summary||"";
+      if(!det) return; det.innerHTML="";
+      for(const r of (hw.rows||[])){
+        const d=document.createElement("div"); d.className="hwrow";
+        d.innerHTML='<div class="hw-nm"></div><div class="hw-min"></div><div class="hw-rec"></div><div class="hw-note"></div>';
+        d.querySelector(".hw-nm").textContent=r.label+(r.adapters&&r.adapters.length?" · "+r.adapters.join(", "):"");
+        d.querySelector(".hw-min").textContent="Runs on: "+(r.min||"—");
+        const rec=d.querySelector(".hw-rec");
+        if(r.recommended){ rec.textContent="Faster with: "+r.recommended; } else { rec.textContent="CPU is fine"; rec.classList.add("ok"); }
+        d.querySelector(".hw-note").textContent=r.note||"";
+        det.appendChild(d); }
+      if(hw.tips&&hw.tips.length){ const t=document.createElement("div"); t.className="hwtips";
+        t.innerHTML="<div class='hw-min'>Tips</div>"+hw.tips.map(()=>'<div class="hw-note"></div>').join("");
+        const nodes=t.querySelectorAll(".hw-note"); hw.tips.forEach((tip,i)=>{nodes[i].textContent="• "+tip;});
+        det.appendChild(t); } }
+    (function(){ const btn=$("hwToggle"), det=$("hwDetail");
+      if(btn&&det) btn.addEventListener("click",()=>{ det.hidden=!det.hidden; btn.textContent=det.hidden?"▸":"▾"; btn.classList.toggle("open",!det.hidden); }); })();
+
+    // Watching: + reveals a small watch form (POST /monitors). Only the
+    // notify/count kinds — a line-crossing watch needs the operator to place
+    // the line, which is a conversation (the agent asks), not a text field.
+    (function(){ const add=$("watchAdd"), f=$("watchForm"), go=$("watchStart"), ti=$("watchTarget");
+      if(add&&f) add.addEventListener("click",()=>{ f.hidden=!f.hidden; add.classList.toggle("open",!f.hidden); if(!f.hidden) ti.focus(); });
+      async function start(){ const target=(ti.value||"").trim(); if(!target){ ti.focus(); return; }
+        const body={kind:$("watchKind").value,target,camera_id:cameraParam()};
+        try{ const r=await fetch("/monitors",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+          const d=await r.json().catch(()=>({}));
+          if(!r.ok){ addMsg("Couldn't start the watch: "+(d.error||("HTTP "+r.status)),"sys"); return; }
+          addMsg(d.message||("Watching for "+target+"."),"sys");
+          ti.value=""; f.hidden=true; add.classList.remove("open");
+          pollMonitors(); if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();loadEvents();},POLL_MS);
+        }catch(err){ addMsg("Couldn't start the watch: "+err.message,"sys"); } }
+      if(go) go.addEventListener("click", start);
+      if(ti) ti.addEventListener("keydown",e=>{ if(e.key==="Enter") start(); }); })();
+
+    // Scheduled reports: + reveals a small schedule form (POST /reports).
+    // One schedule per report: an interval ("every N minutes") wins when
+    // given, else a daily time, else the server's 08:00-daily default.
+    (function(){ const add=$("reportAdd"), f=$("reportForm"), go=$("reportCreate"), qi=$("reportQuery");
+      if(add&&f) add.addEventListener("click",()=>{ f.hidden=!f.hidden; add.classList.toggle("open",!f.hidden); if(!f.hidden) qi.focus(); });
+      async function schedule(){ const query=(qi.value||"").trim(); if(!query){ qi.focus(); return; }
+        const body={name:$("reportName").value.trim()||("Report: "+query.slice(0,40)),query};
+        const every=parseInt($("reportEvery").value,10);
+        if(every>0) body.every_minutes=every; else if($("reportAt").value) body.at=$("reportAt").value;
+        try{ const r=await fetch("/reports",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+          const d=await r.json().catch(()=>({}));
+          if(!r.ok){ addMsg("Couldn't schedule the report: "+(d.error||("HTTP "+r.status)),"sys"); return; }
+          addMsg(d.message||("Scheduled: "+body.name),"sys");
+          qi.value=""; $("reportName").value=""; $("reportAt").value=""; $("reportEvery").value="";
+          f.hidden=true; add.classList.remove("open");
+          pollReports(); if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();loadEvents();},POLL_MS);
+        }catch(err){ addMsg("Couldn't schedule the report: "+err.message,"sys"); } }
+      if(go) go.addEventListener("click", schedule);
+      if(qi) qi.addEventListener("keydown",e=>{ if(e.key==="Enter") schedule(); }); })();
 
     // Background tasks: + reveals a query input (POST /tasks).
     (function(){ const add=$("taskAdd"), f=$("taskForm"), run=$("taskRun"), qi=$("taskQuery");
@@ -790,14 +1748,18 @@
       async function go(){ const q=(qi.value||"").trim(); if(!q){ qi.focus(); return; }
         try{ const r=await fetch("/tasks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:q})});
           if(r.ok){ addMsg("Background task queued: "+q,"sys"); qi.value=""; f.hidden=true; add.classList.remove("open");
-            pollTasks(); if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();},POLL_MS); }
+            pollTasks(); if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();loadEvents();},POLL_MS); }
           else { const d=await r.json().catch(()=>({})); addMsg("Task failed: "+(d.error||("HTTP "+r.status)),"sys"); }
         }catch(err){ addMsg("Task failed: "+err.message,"sys"); } }
       if(run) run.addEventListener("click", go);
       if(qi) qi.addEventListener("keydown",e=>{ if(e.key==="Enter") go(); }); })();
 
     const _ulc=$("useLocalCam"); if(_ulc) _ulc.addEventListener("click", useLocalCamera);
-    loadAgent(); loadCameras(); loadNotify(); loadSkills(); setAvatar("idle");
+    // Resolve auth state (open /agent) BEFORE loading any gated data, so a
+    // signed-out visitor doesn't fire a burst of 401s behind the login. After
+    // sign-in the page reloads with a token and these run normally.
+    loadAgent().then(()=>{ if(authReady()){ loadCameras().then(openDeepLinkedCamera); loadNotify(); loadSkills(); loadHardware(); loadEvents(); } });
+    setAvatar("idle");
     renderTasks([]); renderMonitors([]); renderAlarms([]); renderReports([]);
     alarmTimer = setInterval(pollAlarms, 2500);   // alarms ring even before Talk
   </script>

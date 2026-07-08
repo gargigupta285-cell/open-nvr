@@ -129,6 +129,9 @@ def test_rollup_snapshot_with_no_samples_is_all_null():
         "outcomes": {},
         "inflight": None,
         "queue_depth": None,
+        "hardware": {"cpu_percent": None, "memory_bytes": None,
+                     "gpu_utilization": None, "gpu_memory_bytes": None},
+        "series": [],
         "fingerprint_changes": [],
         "samples": 0,
     }
@@ -419,3 +422,62 @@ def test_metrics_endpoint_serves_rollup_after_refresh(kaic_app):
     assert body["inflight"] == 2
     assert body["max_inflight"] == 8
     assert body["queue_depth"] == 5
+
+
+def test_parser_reads_optional_hardware_gauges():
+    text = """
+adapter_infer_latency_seconds_bucket{le="0.1"} 5
+adapter_infer_latency_seconds_bucket{le="+Inf"} 5
+adapter_infer_total{outcome="ok"} 5
+adapter_inflight_requests 2
+adapter_process_cpu_percent 137.5
+adapter_process_memory_bytes 1073741824
+adapter_gpu_utilization 62.0
+adapter_gpu_memory_bytes 2147483648
+"""
+    sample = parse_adapter_metrics(text, scraped_at=100.0)
+    assert sample.cpu_percent == 137.5
+    assert sample.memory_bytes == 1073741824.0
+    assert sample.gpu_utilization == 62.0
+    assert sample.gpu_memory_bytes == 2147483648.0
+
+
+def test_snapshot_series_and_hardware():
+    """The series carries per-interval rate + p95 and point-in-time
+    gauges — the UI's 'over the period of time' sparklines."""
+    rollup = MetricsRollup()
+    t0 = 1000.0
+    for i in range(3):
+        text = f"""
+adapter_infer_latency_seconds_bucket{{le="0.1"}} {10*(i+1)}
+adapter_infer_latency_seconds_bucket{{le="+Inf"}} {10*(i+1)}
+adapter_infer_total{{outcome="ok"}} {60*(i+1)}
+adapter_inflight_requests {i}
+adapter_process_cpu_percent {50+i}
+"""
+        rollup.record_sample("a", parse_adapter_metrics(text, scraped_at=t0 + i*60))
+    snap = rollup.snapshot("a")
+    assert len(snap["series"]) == 3
+    first, second = snap["series"][0], snap["series"][1]
+    assert first["rpm"] is None                  # no prior sample
+    assert second["rpm"] == 60.0                 # 60 requests / 1 min
+    assert second["p95_ms"] is not None
+    assert snap["series"][2]["cpu_percent"] == 52
+    assert snap["hardware"]["cpu_percent"] == 52
+    assert snap["hardware"]["gpu_utilization"] is None   # never exported
+
+
+def test_fleet_metrics_endpoint(kaic_app):
+    """One call for the whole fleet — each adapter's snapshot keyed by
+    name, with its declared ceiling and registry status alongside."""
+    client, _ = kaic_app
+    client.post("/api/v1/adapters/register", json={"name": "stub-x", "url": "http://127.0.0.1:9100"})
+    client.post("/api/v1/adapters/refresh?name=stub-x")
+    response = client.get("/api/v1/adapters-metrics")
+    assert response.status_code == 200, response.text
+    fleet = response.json()["adapters"]
+    assert "stub-x" in fleet
+    snap = fleet["stub-x"]
+    assert snap["samples"] == 1
+    assert "max_inflight" in snap and "status" in snap
+    assert isinstance(snap["series"], list) and len(snap["series"]) == 1

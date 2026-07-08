@@ -111,3 +111,30 @@ def test_unknown_camera_ignored():
     ev = _event("t1", 0.70)
     ev["camera_id"] = "cam-other"
     assert d.handle_event(ev) == []
+
+
+# ── App Catalog tripwire editor → running rule (normalized line) ───────
+
+
+def test_registry_line_override_scaled_to_pixels(tmp_path):
+    """The catalog tripwire editor stores a top-level normalized `line`
+    dict keyed by camera_id; load_config applies it scaled to pixels,
+    overriding the nested line."""
+    import yaml as _yaml
+
+    from line_crossing import load_config
+
+    cfg = tmp_path / "c.yml"
+    cfg.write_text(_yaml.safe_dump({
+        "nats_url": "nats://x",
+        "cameras": [{
+            "camera_id": "cam-1", "frame_width": 1000, "frame_height": 800,
+            "line": {"a": [0, 0], "b": [1, 1]},  # nested — must be OVERRIDDEN
+        }],
+        "line": {"cam-1": {"a": [0.2, 0.5], "b": [0.8, 0.5], "count_direction": "a_to_b"}},
+    }))
+    parsed = load_config(str(cfg))
+    wire = parsed.cameras["cam-1"].wire
+    assert (wire.a.x, wire.a.y) == (200.0, 400.0)
+    assert (wire.b.x, wire.b.y) == (800.0, 400.0)
+    assert wire.count_direction == "a_to_b"

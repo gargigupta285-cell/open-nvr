@@ -47,12 +47,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import binascii
 import json
 import logging
+import re
 import signal
 import sys
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -75,7 +78,7 @@ from face_recognition_pipeline import (
     RecognitionClient,
 )
 from frame_sources import FrameSource, FrameSourceError, build_frame_source
-from opennvr_app_sdk import AlertType, AppManifest, FrameApp, Param
+from opennvr_app_sdk import Action, AlertType, AppManifest, FrameApp, Param, StateView
 from opennvr_app_sdk.frame_sources import DictFrameSource
 
 logger = logging.getLogger("smart-doorbell")
@@ -123,6 +126,43 @@ MANIFEST = AppManifest(
         AlertType("known_visitor", severity="low"),
         AlertType("unknown_visitor", severity="high",
                   description="Unrecognised face; carries a snapshot when enabled."),
+    ],
+    state_schema=[
+        StateView(name="deduped", label="Visitors tracked", kind="metric",
+                  path="deduped_visitors_tracked"),
+        StateView(name="recent", label="Recent visitors", kind="log",
+                  path="recent", limit=12,
+                  description="Latest faces at the door; strangers show red."),
+    ],
+    # Operator actions (user-JWT-only): the face-enrollment UI that was
+    # previously CLI-only. Talks to the InsightFace adapter's /faces/*
+    # routes via the same _FaceAdminClient the CLI uses.
+    actions=[
+        Action(
+            "enroll_face", "Enroll a face",
+            params=[
+                Param("name", str, required=True,
+                      description="Display name (e.g. 'Alex Rivera')."),
+                Param("image", "image", required=True,
+                      description="A clear, front-facing photo of the person."),
+                Param("category", str, default="known",
+                      description="known / family / staff / … (drives alert severity)."),
+            ],
+            description="Register a known face so the doorbell greets them "
+                        "instead of flagging a stranger.",
+        ),
+        Action(
+            "list_faces", "Enrolled faces", params=[],
+            description="Show everyone currently enrolled.",
+        ),
+        Action(
+            "delete_face", "Remove a face",
+            params=[
+                Param("person_id", str, required=True,
+                      description="The id shown in 'Enrolled faces'."),
+            ],
+            description="Un-enroll a face.", confirm=True,
+        ),
     ],
 )
 
@@ -316,6 +356,14 @@ class KaicRecognitionClient:
 # ── The orchestrator ───────────────────────────────────────────────
 
 
+def _slug(name: str) -> str:
+    """A stable person_id from a display name: lowercase, non-alnum runs
+    collapsed to single hyphens. Re-enrolling the same name upserts the
+    face (the adapter keys on person_id)."""
+    s = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return s or "face"
+
+
 class SmartDoorbell(FrameApp):
     """Polls all configured cameras (via the SDK FrameApp loop), runs
     recognition, dispatches.
@@ -376,6 +424,10 @@ class SmartDoorbell(FrameApp):
         # "last actually-fired", never refreshes on suppression, and
         # its shape is pinned by this app's test suite.
         self._last_fired: dict[tuple[str, Any], float] = {}
+        # Rolling feed of the most recent visitors — powers the "Recent
+        # visitors" log on the app's dashboard. Kept lightweight (no
+        # embedded snapshots) since /state is polled frequently.
+        self._recent: deque[dict[str, Any]] = deque(maxlen=25)
 
     def request_stop(self) -> None:
         """Historical name — the SDK base spells it ``stop()``."""
@@ -425,6 +477,13 @@ class SmartDoorbell(FrameApp):
                 )
         alert = self._build_alert(cam, read, snapshot_bytes)
         self.dispatcher.dispatch(alert)
+        self._recent.append({
+            "message": (f"{read.person_id} recognised" if read.recognized
+                        else "Unknown visitor")
+                       + f" at {cam.camera_id}",
+            "time": time.time(),
+            "level": "low" if read.recognized else "high",
+        })
         # Wire the app-dispatched alert into the SDK contract counters
         # (/health's alerts_fired) — the base loop can't see it because
         # on_frame returns None.
@@ -436,7 +495,76 @@ class SmartDoorbell(FrameApp):
         return {
             "cameras": [cam.camera_id for cam in self.config.cameras],
             "deduped_visitors_tracked": len(self._last_fired),
+            "recent": list(self._recent),
         }
+
+    # ── Operator actions (App Catalog face-enrollment UI) ──────────────
+
+    def _face_admin(self) -> "_FaceAdminClient":
+        return _FaceAdminClient(
+            self.config.adapter_url,
+            self.config.adapter_token,
+            self.config.request_timeout_seconds,
+        )
+
+    def on_action(self, name: str, params: dict[str, Any]) -> dict[str, Any]:
+        """enroll_face / list_faces / delete_face — the catalog's
+        face-DB management, previously CLI-only. Runs on the contract
+        server's thread; talks to the InsightFace adapter's /faces/*
+        routes via the same client the CLI uses. ValueError → 400 in
+        the SDK dispatcher, KeyError → 404, adapter errors → 500."""
+        if name == "list_faces":
+            faces = self._face_admin().list_faces()
+            rows = faces.get("faces", faces) if isinstance(faces, dict) else faces
+            out = []
+            for f in rows if isinstance(rows, list) else []:
+                out.append({
+                    "person_id": f.get("person_id") or f.get("id"),
+                    "name": f.get("name"),
+                    "category": f.get("category"),
+                })
+            return {"results": out}
+
+        if name == "delete_face":
+            person_id = str(params.get("person_id") or "").strip()
+            if not person_id:
+                raise ValueError("'person_id' is required")
+            self._face_admin().delete_face(person_id)
+            return {"deleted": person_id}
+
+        if name == "enroll_face":
+            display = str(params.get("name") or "").strip()
+            if not display:
+                raise ValueError("'name' is required")
+            image_b64 = str(params.get("image") or "").strip()
+            if not image_b64:
+                raise ValueError("'image' is required (a base64 JPEG/PNG)")
+            # The UI sends raw base64 (data: prefix stripped client-side);
+            # be tolerant and strip it here too.
+            if "," in image_b64 and image_b64.lstrip().startswith("data:"):
+                image_b64 = image_b64.split(",", 1)[1]
+            try:
+                image_bytes = base64.b64decode(image_b64, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise ValueError(f"'image' is not valid base64: {exc}") from None
+            if not image_bytes:
+                raise ValueError("'image' decoded to empty bytes")
+            category = str(params.get("category") or "known").strip() or "known"
+            # Deterministic id from the name (the CLI does the same); the
+            # adapter upserts, so re-enrolling a name refreshes the face.
+            person_id = _slug(display)
+            result = self._face_admin().register(
+                image_bytes=image_bytes,
+                person_id=person_id,
+                name=display,
+                category=category,
+            )
+            return {
+                "enrolled": {"person_id": person_id, "name": display, "category": category},
+                "adapter": result,
+            }
+
+        raise KeyError(name)
 
     def _build_alert(
         self,

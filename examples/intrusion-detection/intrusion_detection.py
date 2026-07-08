@@ -50,6 +50,7 @@ import signal
 import sys
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,9 +61,9 @@ import yaml
 
 from alerts import Alert, AlertDispatcher, build_dispatcher
 from frame_sources import FrameSource, FrameSourceError, build_frame_source
-from opennvr_app_sdk import AlertType, AppManifest, FrameApp, Param
+from opennvr_app_sdk import AlertType, AppManifest, FrameApp, Param, StateView
 from opennvr_app_sdk.frame_sources import DictFrameSource
-from zone import Point, Zone, bbox_center
+from zone import Point, Zone, bbox_center, scale_vertices
 
 logger = logging.getLogger("intrusion-detection")
 
@@ -81,13 +82,38 @@ MANIFEST = AppManifest(
     params=[
         Param("watch_labels", list, default=["person"]),
         Param("poll_interval_seconds", float, default=5.0),
-        Param("restricted_hours", dict,
+        Param("restricted_hours", "time_range",
               description="Daily {start, end} window; cross-midnight supported."),
         Param("kaic_transport", str, default="http",
               description="'http' polls per frame; 'ws' streams per camera (§6)."),
         Param("zones", "geometry.polygon", per_camera=True),  # drawn in the catalog UI
     ],
     emits=[AlertType("intrusion", severity="high")],
+    state_schema=[
+        StateView(
+            "restricted_now",
+            "Restricted now",
+            path="restricted_now",
+            description=(
+                "Whether the app is currently within restricted hours "
+                "(i.e. armed and firing on intrusions)."
+            ),
+        ),
+        StateView(
+            "intrusions",
+            "Intrusions today",
+            path="intrusions",
+            description="Count of intrusion alerts fired since the app started.",
+        ),
+        StateView(
+            "recent",
+            "Recent intrusions",
+            path="recent",
+            kind="log",
+            limit=10,
+            description="Most recent intrusion alerts, newest last.",
+        ),
+    ],
 )
 
 
@@ -212,20 +238,36 @@ def load_config(path: str) -> AppConfig:
     cameras_raw = raw.get("cameras") or []
     if not cameras_raw:
         raise ValueError("config: at least one camera entry is required")
+    # The App Catalog's zone editor stores geometry as a top-level
+    # ``zones`` dict keyed by camera_id, in NORMALIZED 0-1 coords. When
+    # present it OVERRIDES the per-camera ``zone`` (the operator's drawn
+    # zone wins), scaled to that camera's pixels. The nested ``zone:``
+    # form still works for hand-written / legacy config.
+    zones_override = raw.get("zones")
+    zones_map = zones_override if isinstance(zones_override, dict) else {}
     cameras: list[CameraWatch] = []
     for idx, c in enumerate(cameras_raw):
         try:
+            camera_id = str(c["camera_id"])
+            frame_width = int(c.get("frame_width", 1920))
+            frame_height = int(c.get("frame_height", 1080))
+            drawn = zones_map.get(camera_id)
+            zone_vertices = (
+                scale_vertices(drawn, frame_width, frame_height)
+                if isinstance(drawn, list) and drawn
+                else c["zone"]
+            )
             zone = Zone.from_config(
                 name=str(c.get("zone_name", f"zone-{idx}")),
-                vertices=c["zone"],
+                vertices=zone_vertices,
             )
             cameras.append(
                 CameraWatch(
-                    camera_id=str(c["camera_id"]),
+                    camera_id=camera_id,
                     frame_url=str(c["frame_url"]),
                     zone=zone,
-                    frame_width=int(c.get("frame_width", 1920)),
-                    frame_height=int(c.get("frame_height", 1080)),
+                    frame_width=frame_width,
+                    frame_height=frame_height,
                 )
             )
         except (KeyError, TypeError, ValueError) as exc:
@@ -638,6 +680,10 @@ class IntrusionDetector(FrameApp):
             camera.camera_id: camera for camera in self.cfg.cameras
         }
         self._stream_clients: dict[str, KaicStreamClient] = {}
+        # Live dashboard state (spec §03 /state). Bounded feed of the
+        # most recent intrusions + a running count since start.
+        self._recent: deque[dict[str, Any]] = deque(maxlen=25)
+        self._intrusions = 0
 
     def _default_stream_client_factory(self, camera_id: str) -> KaicStreamClient:
         return KaicStreamClient(
@@ -775,6 +821,15 @@ class IntrusionDetector(FrameApp):
             if not camera.zone.contains(center):
                 continue
             fired.append(self._build_alert(camera, det, center, correlation_id))
+            # Record for the live dashboard (§03 /state).
+            camera_id = camera.camera_id
+            zone_name = camera.zone.name
+            self._intrusions += 1
+            self._recent.append({
+                "message": f"{label} entered {zone_name!r} on {camera_id}",
+                "time": time.time(),
+                "level": "high",
+            })
         return fired
 
     def _build_alert(
@@ -804,6 +859,19 @@ class IntrusionDetector(FrameApp):
             },
             tags=["intrusion", "restricted-zone", label],
         )
+
+    # ── Live dashboard (spec §03 /state) ───────────────────────────
+
+    def state_snapshot(self) -> dict[str, Any]:
+        """Point-in-time view for the App Catalog's live dashboard.
+        ``restricted_now`` reuses the same restricted-hours gate the
+        rule uses, so the dashboard shows exactly whether the app is
+        armed right now."""
+        return {
+            "restricted_now": self._config.restricted_hours.contains(self._now()),
+            "intrusions": self._intrusions,
+            "recent": list(self._recent),
+        }
 
 
 # ── CLI ────────────────────────────────────────────────────────────
