@@ -292,6 +292,14 @@ def test_webrtc_live_player_wired(script: str, html: str) -> None:
     assert script.count("stopWebrtc()") >= 4
 
 
+def test_login_error_shows_message_not_object(script: str) -> None:
+    # OpenNVR nests the error as {detail:{error,message,...}}; rendering
+    # d.detail directly printed "[object Object]". errText pulls the message.
+    assert "function errText" in script, "login error helper missing"
+    assert "errText(d,r.status)" in script, "login no longer uses errText"
+    assert 'typeof dt==="object"' in script, "errText must handle a nested detail object"
+
+
 def test_live_video_pauses_when_tab_hidden(script: str) -> None:
     # A live WebRTC decode competes with the on-box STT/LLM/TTS. When the tab
     # is backgrounded the stream is torn down, and re-established on return to

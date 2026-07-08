@@ -758,7 +758,10 @@ class OpennvrAuthClient(_ReusableClientMixin):
         semantics stay exactly the server's."""
         body: dict = {"username": username, "password": password}
         if totp_code:
-            body["totp_code"] = totp_code
+            # OpenNVR's UserLogin schema names the MFA field ``code`` (see
+            # server/schemas.py). Sending ``totp_code`` was silently dropped by
+            # Pydantic, so the server saw no code → "Invalid or missing MFA code".
+            body["code"] = totp_code
         try:
             resp = await self._client().post(f"{self._base}/login-json", json=body)
             try:

@@ -585,6 +585,14 @@
       return r;
     };
     function showLogin(){ const ov=$("loginOverlay"); if(ov&&ov.hidden){ ov.hidden=false; const u=$("loginUser"); if(u) u.focus(); } }
+    // Pull a readable message out of an error body. OpenNVR nests it as
+    // {detail:{error,message,remaining_attempts}}, so rendering d.detail
+    // directly printed "[object Object]".
+    function errText(d,status){
+      const dt=d&&d.detail;
+      if(dt&&typeof dt==="object") return dt.message||dt.error||JSON.stringify(dt);
+      return dt||d.error||d.message||("Sign-in failed (HTTP "+status+")");
+    }
     (function(){ const go=$("loginGo");
       async function doLogin(){
         const err=$("loginErr"), btn=$("loginGo"); err.hidden=true;
@@ -597,7 +605,7 @@
         try{ const r=await _rawFetch("/auth/login",{method:"POST",
             headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
           const d=await r.json().catch(()=>({}));
-          if(!r.ok||!d.access_token){ err.textContent=d.detail||d.error||("Sign-in failed (HTTP "+r.status+")"); err.hidden=false; return; }
+          if(!r.ok||!d.access_token){ err.textContent=errText(d,r.status); err.hidden=false; return; }
           sessionStorage.setItem("agent_token",d.access_token);
           if(d.refresh_token) sessionStorage.setItem("agent_refresh",d.refresh_token);
           location.reload();   // clean re-boot with the token attached
