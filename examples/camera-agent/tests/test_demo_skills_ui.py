@@ -231,11 +231,27 @@ def test_events_feed_wired(script: str, html: str) -> None:
     assert html.index('id="eventsCard"') < html.index('id="skillsCard"'), (
         "Events must lead the rail — what happened beats configuration"
     )
-    assert 'id="camEvents"' in html
+    # one home for events: the rail card scopes to the focused camera
+    # (no left-column list — that was reported as noise)
+    assert 'id="camEvents"' not in html
+    assert 'id="evScope"' in html
     for fn in ("async function loadEvents", "function renderEvents",
-               "async function openCamAtMoment"):
+               "function renderEventsCard", "async function openCamAtMoment"):
         assert fn in script, f"events handler missing: {fn!r}"
     assert '"/events"' in script
     assert re.search(r"openCamAtMoment[\s\S]{0,400}loadTimeline", script), (
         "click-to-moment no longer tries the review ring first"
     )
+
+
+def test_alarm_ring_levels_wired(script: str, html: str) -> None:
+    # Annunciation levels: chime dings once (amber flash, no latch),
+    # siren latches until silenced, silent pushes only. Both alarm forms
+    # offer the choice; fire-grade targets preselect the siren.
+    assert 'id="alarmRing"' in html and 'id="paRing"' in html
+    for v in ('value="chime"', 'value="siren"', 'value="silent"'):
+        assert html.count(v) >= 2, f"ring option missing from a form: {v}"
+    assert "function wireRingPreselect" in script
+    assert "flashChime" in script and 'playChime("bell")' in script
+    assert ".alarmbar.chime" in html, "chime banner style missing"
+    assert 'data-ring="siren"' in html, "presets lost their siren grade"

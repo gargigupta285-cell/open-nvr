@@ -160,3 +160,54 @@ def test_alarm_endpoints():
     assert client.delete(f"/alarms/{aid}").status_code == 200
     assert client.delete("/alarms/9999").status_code == 404
     assert client.post("/alarms", json={"name": "x", "camera_id": "cam1"}).status_code == 400
+
+
+def test_chime_alarm_fires_event_without_latching():
+    """A chime alarm dings (event + notification) but never latches the
+    siren — no acknowledge needed, re-arm anchors on the last firing."""
+    rt = _runtime(detections=[{"label": "person"}])
+
+    async def go():
+        alarm = rt.alarms.create(name="Gate visitor", target="person",
+                                 camera_ids=["cam1"], ring="chime")
+        await rt.alarms._poll(alarm, "cam1")
+        assert alarm.triggered is False          # no latch
+        assert alarm.trigger_count == 1
+        ev = rt.alarms.events()[-1]
+        assert ev["ring"] == "chime" and ev["camera"] == "cam1"
+        # within the re-arm window: quiet
+        await rt.alarms._poll(alarm, "cam1")
+        assert alarm.trigger_count == 1
+
+    asyncio.run(go())
+
+
+def test_silent_alarm_records_without_latching():
+    rt = _runtime(detections=[{"label": "person"}])
+
+    async def go():
+        alarm = rt.alarms.create(name="Quiet", target="person",
+                                 camera_ids=["cam1"], ring="silent")
+        await rt.alarms._poll(alarm, "cam1")
+        assert alarm.triggered is False
+        assert rt.alarms.events()[-1]["ring"] == "silent"
+
+    asyncio.run(go())
+
+
+def test_handler_defaults_ring_by_target():
+    """Voice/REST default: fire-grade targets latch the siren; a person
+    at the gate is a doorbell-grade chime (the operator can override)."""
+    rt = _runtime()
+
+    async def go():
+        await rt._handle_create_alarm({"name": "F", "target": "fire",
+                                       "camera_id": "cam1"})
+        await rt._handle_create_alarm({"name": "P", "target": "person",
+                                       "camera_id": "cam1"})
+        await rt._handle_create_alarm({"name": "O", "target": "person",
+                                       "camera_id": "cam1", "ring": "siren"})
+        rings = {a["name"]: a["ring"] for a in rt.alarms.list()}
+        assert rings == {"F": "siren", "P": "chime", "O": "siren"}
+
+    asyncio.run(go())

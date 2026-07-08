@@ -33,6 +33,8 @@
     body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
       background:var(--bg); color:var(--text); padding:1.5rem 1rem; }
     .wrap { max-width:60rem; margin:0 auto; }
+    .alarmbar.chime{background:#b7791f;}
+    .alarmbar.chime .ab-btn{display:none;}
     .alarmbar { display:flex; align-items:center; gap:0.6rem; background:var(--danger); color:#fff;
       padding:0.7rem 0.9rem; border-radius:0.6rem; margin-bottom:1rem; font-weight:700;
       animation:alarmflash 0.9s ease-in-out infinite; }
@@ -250,7 +252,8 @@
     .evt .ev-body{flex:1;min-width:0;}
     .evt .ev-title{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
     .evt .ev-sub{display:block;color:var(--muted);font-size:.66rem;}
-    .cam-events{margin-top:.45rem;}
+    .ev-scope{font-size:.66rem;color:var(--muted);}
+    .ev-scope a{color:var(--accent);text-decoration:none;}
     .hwrow{padding:.42rem .5rem;background:var(--panel2);border:1px solid var(--border);
       border-radius:8px;margin:.3rem 0;font-size:.74rem;}
     .hwrow .hw-nm{font-weight:600;font-size:.78rem;}
@@ -387,12 +390,16 @@
               <div class="pop" id="popAlarm">
                 <h4>Alarm on this camera</h4>
                 <input id="paTarget" type="text" placeholder="Alert on, e.g. person / fire" autocomplete="off">
+                <select id="paRing" aria-label="How it announces">
+                  <option value="chime">🔔 Chime once</option>
+                  <option value="siren">🚨 Siren until silenced</option>
+                  <option value="silent">🤫 Silent — notifications only</option>
+                </select>
                 <label class="addform-lbl">Only after <input id="paAfter" type="time"></label>
                 <button class="go" id="paGo" type="button">Arm alarm</button>
               </div>
             </div>
             <div class="empty-note" id="camScoped"></div>
-            <div id="camEvents" class="cam-events"></div>
           </div>
 
           <button id="talk" class="talk" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg> Talk</button>
@@ -417,7 +424,7 @@
 
       <div class="side">
         <div class="card" id="eventsCard">
-          <div class="cardhead"><h2>Events</h2></div>
+          <div class="cardhead"><h2>Events</h2><span class="ev-scope" id="evScope" hidden></span></div>
           <div id="eventsList"><div class="empty-note">Nothing yet — alarm rings, watch hits, and app alerts land here.</div></div>
         </div>
         <div class="card" id="skillsCard">
@@ -433,12 +440,17 @@
         <div class="card" id="alarmCard">
           <div class="cardhead"><h2>Alarms</h2><button class="addbtn" id="alarmAdd" type="button" title="Add an alarm" aria-label="Add an alarm">+</button></div>
           <div class="presets">
-            <button class="ghost preset" data-name="Fire" data-target="fire" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 2c1 3 4 4 4 8a4 4 0 0 1-8 0c0-2 1-3 2-4 0 2 2 2 2 0 0-2-2-2-2-4z"/></svg> Fire</button>
-            <button class="ghost preset" data-name="After-hours person" data-target="person" data-after="18:00" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A8 8 0 1 1 11.2 3 6 6 0 0 0 21 12.8z"/></svg> After-hours</button>
+            <button class="ghost preset" data-name="Fire" data-target="fire" data-ring="siren" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 2c1 3 4 4 4 8a4 4 0 0 1-8 0c0-2 1-3 2-4 0 2 2 2 2 0 0-2-2-2-2-4z"/></svg> Fire</button>
+            <button class="ghost preset" data-name="After-hours person" data-target="person" data-after="18:00" data-ring="siren" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A8 8 0 1 1 11.2 3 6 6 0 0 0 21 12.8z"/></svg> After-hours</button>
           </div>
           <div class="addform" id="alarmForm" hidden>
             <input id="alarmName" type="text" placeholder="Name, e.g. Porch person" autocomplete="off">
             <input id="alarmTarget" type="text" placeholder="Watch for, e.g. person / car / package" autocomplete="off">
+            <select id="alarmRing" aria-label="How it announces">
+              <option value="chime">🔔 Chime once (visitors, deliveries)</option>
+              <option value="siren">🚨 Siren until silenced (fire, break-in)</option>
+              <option value="silent">🤫 Silent — notifications only</option>
+            </select>
             <label class="addform-lbl">Only after <input id="alarmAfter" type="time"></label>
             <button class="ghost primary" id="alarmArm" type="button">Arm alarm</button>
           </div>
@@ -631,7 +643,8 @@
     function rms(){ analyser.getFloatTimeDomainData(floatBuf); let s=0; for(let i=0;i<floatBuf.length;i++)s+=floatBuf[i]*floatBuf[i]; return Math.sqrt(s/floatBuf.length); }
     function playChime(kind="done") {
       if (!audioCtx) return;
-      const now=audioCtx.currentTime, notes = kind==="done" ? [660,880] : [520];
+      const now=audioCtx.currentTime,
+        notes = kind==="done" ? [660,880] : (kind==="bell" ? [880,660] : [520]);
       notes.forEach((f,i)=>{ const o=audioCtx.createOscillator(), g=audioCtx.createGain();
         o.type="sine"; o.frequency.value=f; o.connect(g); g.connect(audioCtx.destination);
         const t=now+i*0.16; g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.25,t+0.02);
@@ -896,7 +909,7 @@
       $("mainScreen").hidden=true; $("camScreen").hidden=false;
       $("camTitle").textContent=cam; $("camSub").textContent=_camRoles[cam]||"";
       if(push) history.pushState({cam:cam},"","/demo/camera/"+encodeURIComponent(cam));
-      goLive(); loadTimeline(cam); loadCamScoped(cam); loadRecordings(cam); renderCamEvents(cam);
+      goLive(); loadTimeline(cam); loadCamScoped(cam); loadRecordings(cam); _evAllCams=false; renderEventsCard();
       addMsg("Focused on "+cam+" — talk or type, everything is scoped to this camera. ‹ Back returns to all cameras.","sys"); }
     function closeCamScreen(push=true){
       window._camScreenCam=null;
@@ -905,6 +918,7 @@
       if(_stepTimer){clearInterval(_stepTimer);_stepTimer=null;}
       stopPlayback();
       $("camScreen").hidden=true; $("mainScreen").hidden=false;
+      renderEventsCard();
       if(push) history.pushState({},"","/demo");
       refreshCamStrip(); }
     window.addEventListener("popstate",()=>{
@@ -996,8 +1010,24 @@
     async function loadEvents(){
       try{ const r=await fetch("/events"); if(!r.ok) return;
         _events=(await r.json()).events||[]; }catch{ return; }
-      renderEvents($("eventsList"),_events.slice(0,15));
-      if(window._camScreenCam) renderCamEvents(window._camScreenCam); }
+      renderEventsCard(); }
+    // On a camera's screen the rail feed scopes to THAT camera (with a
+    // one-click way back) — one home for events, zero left-column noise.
+    let _evAllCams=false;
+    function renderEventsCard(){ const el=$("eventsList"), scope=$("evScope");
+      const cam=window._camScreenCam; let list=_events;
+      if(cam){ scope.hidden=false; scope.innerHTML="";
+        const a=document.createElement("a"); a.href="#";
+        if(!_evAllCams){ list=_events.filter(e=>e.camera_id===cam);
+          scope.appendChild(document.createTextNode("on "+cam+" · "));
+          a.textContent="show all";
+          a.addEventListener("click",(ev)=>{ ev.preventDefault(); _evAllCams=true; renderEventsCard(); });
+        } else { scope.appendChild(document.createTextNode("all cameras · "));
+          a.textContent="this camera";
+          a.addEventListener("click",(ev)=>{ ev.preventDefault(); _evAllCams=false; renderEventsCard(); }); }
+        scope.appendChild(a);
+      } else { scope.hidden=true; }
+      renderEvents(el,list.slice(0,15)); }
     function renderEvents(el,list){ if(!el) return;
       if(!list.length){ el.innerHTML='<div class="empty-note">Nothing yet — alarm rings, watch hits, and app alerts land here.</div>'; return; }
       el.innerHTML="";
@@ -1009,11 +1039,6 @@
         b.querySelector(".ev-sub").textContent=(ev.camera_id||"all cameras")+" · "+_ago(ev.ts);
         b.addEventListener("click",()=>{ if(ev.camera_id) openCamAtMoment(ev.camera_id,ev.ts); });
         el.appendChild(b); } }
-    function renderCamEvents(cam){ const el=$("camEvents"); if(!el) return;
-      const mine=_events.filter(e=>e.camera_id===cam).slice(0,8);
-      el.innerHTML=""; if(!mine.length) return;
-      const h=document.createElement("div"); h.className="rec-lbl"; h.textContent="Events on this camera";
-      el.appendChild(h); renderEvents(el.appendChild(document.createElement("div")),mine); }
     async function openCamAtMoment(cam,ts){
       if(window._camScreenCam!==cam) openCamScreen(cam);
       // the ring first: the honest "see that exact moment"
@@ -1134,7 +1159,8 @@
       const ag=$("paGo"); if(ag) ag.addEventListener("click",async()=>{
         const cam=window._camScreenCam, target=($("paTarget").value||"").trim();
         if(!cam||!target){ $("paTarget").focus(); return; }
-        const body={name:"Alarm: "+target+" on "+cam,target,camera_ids:[cam]};
+        const body={name:"Alarm: "+target+" on "+cam,target,camera_ids:[cam],
+                    ring:$("paRing").value};
         const after=$("paAfter").value; if(after) body.after=after;
         try{ const r=await fetch("/alarms",{method:"POST",headers:{"Content-Type":"application/json"},
             body:JSON.stringify(body)});
@@ -1299,12 +1325,22 @@
     async function stopReport(id){ try{ await fetch("/reports/"+id,{method:"DELETE"}); }catch{} pollReports(); }
 
     // ── alarms ──
+    let _chimeHideT=null;
+    function flashChime(text){ if(alarmRinging) return;   // a latched siren owns the banner
+      alarmbarEl.classList.add("chime"); alarmTextEl.textContent=text; alarmbarEl.hidden=false;
+      if(_chimeHideT) clearTimeout(_chimeHideT);
+      _chimeHideT=setTimeout(()=>{ if(!alarmRinging){ alarmbarEl.hidden=true; } alarmbarEl.classList.remove("chime"); },5000); }
     async function pollAlarms(){ let data; try{ data=await (await fetch("/alarms")).json(); }catch{ return; }
-      for(const e of (data.events||[])){ if(!seenAlarmEvents[e.id]){ seenAlarmEvents[e.id]=true; addMsg("Alarm: "+e.text,"agent"); } }
+      for(const e of (data.events||[])){ if(!seenAlarmEvents[e.id]){ seenAlarmEvents[e.id]=true;
+        addMsg("Alarm: "+e.text,"agent");
+        if(e.ring==="chime"){ playChime("bell"); flashChime(e.text); } } }
       const names=(data.alarms||[]).filter(a=>a.triggered).map(a=>a.name);
-      if(data.ringing){ alarmRinging=true; alarmTextEl.textContent=names.length?("Alarm: "+names.join(", ")):"Alarm triggered";
+      if(data.ringing){ alarmRinging=true; alarmbarEl.classList.remove("chime");
+        alarmTextEl.textContent=names.length?("Alarm: "+names.join(", ")):"Alarm triggered";
         alarmbarEl.hidden=false; setAvatar("speaking"); startSiren(); }
-      else { alarmRinging=false; alarmbarEl.hidden=true; stopSiren(); }
+      else { alarmRinging=false; stopSiren();
+        // don't cut a chime flash short — it hides itself after 5s
+        if(!alarmbarEl.classList.contains("chime")) alarmbarEl.hidden=true; }
       renderAlarms(data.alarms||[]); }
     function renderAlarms(alarms){ const active=alarms.filter(a=>a.active);
       if(!active.length){ alarmListEl.innerHTML='<div class="empty-note">No alarms armed.</div>'; return; }
@@ -1312,7 +1348,8 @@
       for(const a of active){ const d=document.createElement("div"); d.className="item"+(a.triggered?" ringing":"");
         d.innerHTML=`<span class="badge">${IC.bell}</span>`; const q=document.createElement("span"); q.className="q";
         const when=a.window==="any time"?"":` · ${a.window}`; const contact=a.emergency_contact_configured?" · ☎":"";
-        q.textContent=`${a.name}: ${a.target} on ${a.camera_ids.join(", ")}${when}${contact}`; d.appendChild(q);
+        const ring=a.ring==="chime"?" · 🔔":(a.ring==="silent"?" · 🤫":"");
+        q.textContent=`${a.name}: ${a.target} on ${a.camera_ids.join(", ")}${when}${contact}${ring}`; d.appendChild(q);
         const s=document.createElement("button"); s.className="stop"; s.title="Disarm"; s.textContent="✕";
         s.addEventListener("click",()=>disarmAlarm(a.id)); d.appendChild(s); alarmListEl.appendChild(d); } }
     async function ackAlarms(){ ensureOutputAudio(); try{ await fetch("/alarms/ack",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});}catch{}
@@ -1326,7 +1363,8 @@
     silenceBtn.addEventListener("click", ackAlarms);
     document.querySelectorAll(".preset").forEach(btn=>btn.addEventListener("click",()=>{
       const body={name:btn.dataset.name,target:btn.dataset.target,camera_id:cameraParam()};
-      if(btn.dataset.after) body.after=btn.dataset.after; addAlarm(body); }));
+      if(btn.dataset.after) body.after=btn.dataset.after;
+      if(btn.dataset.ring) body.ring=btn.dataset.ring; addAlarm(body); }));
     $("askBtn").addEventListener("click", ask);
     $("askInput").addEventListener("keydown",(e)=>{ if(e.key==="Enter") ask(); });
     // Click Talk to start/stop the listening session.
@@ -1472,12 +1510,23 @@
       if(search) search.addEventListener("input", renderBrowse);
       if(restore) restore.addEventListener("click", restoreSkills); })();
 
+    // Fire-grade targets deserve the siren: flip an UNTOUCHED ring select
+    // when the target says so; a deliberate user choice is never overridden.
+    function wireRingPreselect(targetId,ringId){ const t=$(targetId), r=$(ringId);
+      if(!t||!r) return;
+      r.addEventListener("change",()=>{ r.dataset.touched="1"; });
+      t.addEventListener("input",()=>{ if(r.dataset.touched) return;
+        r.value=/\b(fire|smoke|flame|gas)\b/i.test(t.value)?"siren":"chime"; }); }
+    wireRingPreselect("alarmTarget","alarmRing");
+    wireRingPreselect("paTarget","paRing");
+
     // Alarms: + reveals a small custom-alarm form (POST /alarms via addAlarm).
     (function(){ const add=$("alarmAdd"), f=$("alarmForm"), arm=$("alarmArm");
       if(add&&f) add.addEventListener("click",()=>{ f.hidden=!f.hidden; add.classList.toggle("open",!f.hidden); if(!f.hidden) $("alarmName").focus(); });
       if(arm) arm.addEventListener("click",()=>{ const target=$("alarmTarget").value.trim();
         if(!target){ $("alarmTarget").focus(); return; }
-        const body={name:$("alarmName").value.trim()||("Alarm: "+target),target,camera_id:cameraParam()};
+        const body={name:$("alarmName").value.trim()||("Alarm: "+target),target,camera_id:cameraParam(),
+                    ring:$("alarmRing").value};
         const after=$("alarmAfter").value; if(after) body.after=after; addAlarm(body);
         $("alarmName").value=""; $("alarmTarget").value=""; $("alarmAfter").value=""; f.hidden=true; add.classList.remove("open"); }); })();
 

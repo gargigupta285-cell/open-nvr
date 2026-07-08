@@ -1313,6 +1313,11 @@ class Alarm:
     after_min: int | None = None
     before_min: int | None = None
     emergency_contact: str | None = None
+    # Annunciation level (a real CCTV concept — not every alarm deserves
+    # the siren): "siren" latches + rings until acknowledged (fire,
+    # intrusion); "chime" dings once per re-arm window, no latch (a
+    # visitor at the gate); "silent" records + pushes only.
+    ring: str = "siren"
     active: bool = True
     triggered: bool = False
     created_at: float = 0.0
@@ -1335,6 +1340,7 @@ class Alarm:
         return {
             "id": self.id, "name": self.name, "target": self.target,
             "camera_ids": self.camera_ids, "window": self.window_label(),
+            "ring": self.ring,
             "active": self.active, "triggered": self.triggered,
             "trigger_count": self.trigger_count,
             "emergency_contact_configured": bool(self.emergency_contact),
@@ -1362,13 +1368,16 @@ class AlarmManager:
 
     def create(self, *, name: str, target: str, camera_ids: list[str],
                after_min: int | None = None, before_min: int | None = None,
-               emergency_contact: str | None = None) -> Alarm:
+               emergency_contact: str | None = None,
+               ring: str = "siren") -> Alarm:
         import time
 
+        if ring not in ("siren", "chime", "silent"):
+            ring = "siren"
         alarm = Alarm(
             id=self._next_id, name=name.strip() or "Alarm",
             target=target.strip().lower(), camera_ids=list(camera_ids),
-            after_min=after_min, before_min=before_min,
+            after_min=after_min, before_min=before_min, ring=ring,
             emergency_contact=emergency_contact, created_at=time.time(),
         )
         self._next_id += 1
@@ -1412,7 +1421,8 @@ class AlarmManager:
 
     def export(self) -> list[dict[str, Any]]:
         return [{"name": a.name, "target": a.target, "camera_ids": a.camera_ids,
-                 "after_min": a.after_min, "before_min": a.before_min}
+                 "after_min": a.after_min, "before_min": a.before_min,
+                 "ring": a.ring}
                 for a in self._alarms.values() if a.active]
 
     def restore(self, specs: list[dict[str, Any]], *, contact_for=None) -> None:
@@ -1420,6 +1430,7 @@ class AlarmManager:
             try:
                 self.create(name=s["name"], target=s["target"], camera_ids=s["camera_ids"],
                             after_min=s.get("after_min"), before_min=s.get("before_min"),
+                            ring=str(s.get("ring") or "siren"),
                             emergency_contact=(contact_for(s["name"], s["target"]) if contact_for else None))
             except Exception:  # pragma: no cover
                 logger.exception("alarm restore failed for %r", s)
@@ -1470,24 +1481,38 @@ class AlarmManager:
         detections = (resp.get("result") or {}).get("detections") or []
         present = self._runtime.monitors._count_target(detections, alarm.target) > 0
         now = time.time()
-        if present and not alarm.triggered and (now - alarm.last_ack) >= self._rearm:
+        if not present:
+            return
+        if alarm.ring == "siren":
+            # Latching: rings until a human acknowledges; re-arm cooldown
+            # runs from the acknowledge.
+            if alarm.triggered or (now - alarm.last_ack) < self._rearm:
+                return
             alarm.triggered = True
-            alarm.last_triggered = now
-            alarm.trigger_count += 1
-            text = f"{alarm.name}: {alarm.target} detected on {cam}"
-            if alarm.emergency_contact:
-                text += f" (would alert {alarm.emergency_contact})"
-            self._events.append({
-                "id": self._next_event_id, "alarm_id": alarm.id, "name": alarm.name,
-                "text": text, "camera": cam, "ts": now,
-                "emergency_contact": alarm.emergency_contact,
-            })
-            self._next_event_id += 1
-            logger.warning("ALARM #%d TRIGGERED: %s", alarm.id, text)
-            self._runtime.notifier.fire({
-                "type": "alarm", "title": alarm.name, "text": text,
-                "camera": cam, "severity": "critical", "ts": now,
-            })
+        else:
+            # chime / silent: one EVENT per re-arm window, never a latch —
+            # the cooldown anchors on the last firing (nothing to ack).
+            anchor = max(alarm.last_ack, alarm.last_triggered or 0.0)
+            if (now - anchor) < self._rearm:
+                return
+        alarm.last_triggered = now
+        alarm.trigger_count += 1
+        text = f"{alarm.name}: {alarm.target} detected on {cam}"
+        if alarm.emergency_contact:
+            text += f" (would alert {alarm.emergency_contact})"
+        self._events.append({
+            "id": self._next_event_id, "alarm_id": alarm.id, "name": alarm.name,
+            "text": text, "camera": cam, "ts": now, "ring": alarm.ring,
+            "emergency_contact": alarm.emergency_contact,
+        })
+        self._next_event_id += 1
+        logger.warning("ALARM #%d TRIGGERED (%s): %s", alarm.id, alarm.ring, text)
+        self._runtime.notifier.fire({
+            "type": "alarm", "title": alarm.name, "text": text,
+            "camera": cam,
+            "severity": "critical" if alarm.ring == "siren" else "medium",
+            "ts": now,
+        })
 
 
 def _create_alarm_tool(camera_enum_all: list[str]) -> dict[str, Any]:
@@ -1500,7 +1525,7 @@ def _create_alarm_tool(camera_enum_all: list[str]) -> dict[str, Any]:
                 "optionally only within a time window. Use for 'sound a fire "
                 "alarm if you see fire', 'alarm if a person is seen after 6pm', "
                 "'alert me loudly if a car enters at night'. Different from a "
-                "monitor: an alarm rings until acknowledged."
+                "monitor: a 'siren' alarm rings until acknowledged."
             ),
             "parameters": {
                 "type": "object",
@@ -1511,6 +1536,12 @@ def _create_alarm_tool(camera_enum_all: list[str]) -> dict[str, Any]:
                     "camera_ids": {"type": "array", "items": {"type": "string", "enum": camera_enum_all}},
                     "after": {"type": "string", "description": "Only active after this 24h time 'HH:MM' (e.g. '18:00' for after 6pm)."},
                     "before": {"type": "string", "description": "Only active before this 24h time 'HH:MM'."},
+                    "ring": {"type": "string", "enum": ["siren", "chime", "silent"],
+                             "description": "How it announces. 'siren' rings until "
+                                            "silenced — fire/smoke/gas and break-in-grade "
+                                            "threats. 'chime' dings once — visitors, "
+                                            "deliveries, vehicles. 'silent' = notifications "
+                                            "only. Omit to pick by target."},
                 },
                 "required": ["name", "target", "camera_id"],
             },
@@ -2870,17 +2901,25 @@ class CameraAgentRuntime:
         after_min = _parse_hhmm(args.get("after"))
         before_min = _parse_hhmm(args.get("before"))
         contact = self._emergency_contact_for(name, target)
+        ring = str(args.get("ring") or "").strip().lower()
+        if ring not in ("siren", "chime", "silent"):
+            # Domain default: life-safety targets latch the siren; a
+            # person/car/package at the gate is a doorbell-style chime.
+            ring = "siren" if target in ("fire", "smoke", "flame", "gas") else "chime"
         alarm = self.alarms.create(
             name=name, target=target, camera_ids=cams,
             after_min=after_min, before_min=before_min, emergency_contact=contact,
+            ring=ring,
         )
         self.persist()
         where = "all cameras" if set(cams) == {c.camera_id for c in self.cfg.cameras} else ", ".join(cams)
         window = alarm.window_label()
         when = "" if window == "any time" else f" ({window})"
         extra = f" If it fires I'll flag the emergency contact ({contact})." if contact else ""
-        return (f"Armed alarm #{alarm.id} '{name}' — I'll sound it if I see "
-                f"{target} on {where}{when}.{extra}")
+        style = {"siren": "siren until silenced", "chime": "a single chime",
+                 "silent": "silent — notifications only"}[alarm.ring]
+        return (f"Armed alarm #{alarm.id} '{name}' ({style}) — I'll fire it "
+                f"if I see {target} on {where}{when}.{extra}")
 
     async def _handle_stop_alarm(self, args: dict[str, Any]) -> str:
         try:
