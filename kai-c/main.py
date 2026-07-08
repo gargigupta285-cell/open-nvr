@@ -30,6 +30,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import AnyHttpUrl, BaseModel, Field
 from typing import Dict, Any, Optional
+import hmac
 import ipaddress
 import logging
 import socket
@@ -96,6 +97,31 @@ if AI_SOVEREIGNTY not in {"local_only", "federated", "cloud_allowed"}:
 # the whole module has been evaluated) but was a footgun for any
 # future refactor that calls lifespan directly.
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
+
+# When INTERNAL_API_KEY is unset, the internal surface used to be fully
+# anonymous — a silent, fail-OPEN default. That insecure mode is now explicit
+# opt-in: set KAI_C_ALLOW_ANONYMOUS=true only for a local single-host dev box
+# with no key. Otherwise an empty key fails CLOSED (all internal endpoints 401).
+KAI_C_ALLOW_ANONYMOUS = os.getenv("KAI_C_ALLOW_ANONYMOUS", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+
+def _internal_api_key_ok(supplied: Optional[str]) -> bool:
+    """Return True if a request bearing X-Internal-Api-Key ``supplied`` may
+    reach KAI-C's internal surface (v2 endpoints, /infer/cloud, the WS proxy).
+
+    * Key set   -> constant-time match required (no timing oracle, no silent
+      bypass when the key happens to be empty).
+    * Key empty + KAI_C_ALLOW_ANONYMOUS -> allowed (explicit local-dev opt-in).
+    * Key empty + no opt-in -> DENIED (fail closed).
+    """
+    if INTERNAL_API_KEY:
+        return bool(supplied) and hmac.compare_digest(supplied, INTERNAL_API_KEY)
+    return KAI_C_ALLOW_ANONYMOUS
 
 
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -283,6 +309,22 @@ async def lifespan(app: FastAPI):
     serves HTTP/WS inference correctly without broadcast.
     """
     global _registry, _nats_publisher
+
+    # Auth posture (finding #8): make the effective auth mode explicit in the
+    # logs so an operator is never silently running fail-open.
+    if INTERNAL_API_KEY:
+        logger.info("Internal API key auth ENABLED for the internal surface.")
+    elif KAI_C_ALLOW_ANONYMOUS:
+        logger.warning(
+            "INTERNAL_API_KEY is unset and KAI_C_ALLOW_ANONYMOUS is on: the "
+            "internal surface is ANONYMOUS. Local-dev only — never production."
+        )
+    else:
+        logger.warning(
+            "INTERNAL_API_KEY is unset: the internal surface fails CLOSED (all "
+            "calls 401). Set INTERNAL_API_KEY, or KAI_C_ALLOW_ANONYMOUS=true for "
+            "a local dev box."
+        )
 
     _registry = AdapterRegistry(
         sovereignty_mode=AI_SOVEREIGNTY,
@@ -744,8 +786,9 @@ async def process_cloud_inference(
             ),
         )
 
-    # Validate internal API key
-    if INTERNAL_API_KEY and x_internal_api_key != INTERNAL_API_KEY:
+    # Validate internal API key (constant-time; an empty key fails closed
+    # unless KAI_C_ALLOW_ANONYMOUS is explicitly set).
+    if not _internal_api_key_ok(x_internal_api_key):
         raise HTTPException(
             status_code=401,
             detail="Unauthorized: Invalid internal API key"
@@ -937,17 +980,17 @@ async def get_schemas(task: Optional[str] = None):
 def require_internal_api_key(x_internal_api_key: Optional[str] = Header(None)) -> None:
     """Auth dependency for the v2 endpoints (peer-review SR-NEW-7).
 
-    Same dev-mode-bypass pattern as the legacy ``/infer/cloud`` endpoint:
-    if ``INTERNAL_API_KEY`` is empty (dev / single-host loopback
-    deployments) all calls pass. In production the operator sets the
-    env var and OpenNVR backend MUST send the matching
-    ``X-Internal-Api-Key`` header.
+    Delegates to ``_internal_api_key_ok``: with ``INTERNAL_API_KEY`` set a
+    constant-time header match is required; with it empty the call is denied
+    unless ``KAI_C_ALLOW_ANONYMOUS`` is explicitly set for local dev. (An empty
+    key used to fail OPEN — silently disabling auth for the whole surface; it
+    now fails closed.)
 
     All v2 endpoints depend on this so register/deregister/infer cannot
     be reached anonymously by an attacker who finds KAI-C's port open
     on a non-loopback interface.
     """
-    if INTERNAL_API_KEY and x_internal_api_key != INTERNAL_API_KEY:
+    if not _internal_api_key_ok(x_internal_api_key):
         raise HTTPException(
             status_code=401,
             detail="Unauthorized: missing or invalid X-Internal-Api-Key",
@@ -1362,14 +1405,13 @@ async def v1_infer_stream(websocket: WebSocket, adapter_name: str):
     # Defensive: require both INTERNAL_API_KEY to be set AND the
     # supplied header to non-empty-match. (Peer review H3 — guards
     # against a future code path that sets INTERNAL_API_KEY=None.)
-    if INTERNAL_API_KEY:
-        supplied = websocket.headers.get("x-internal-api-key")
-        if not supplied or supplied != INTERNAL_API_KEY:
-            await websocket.close(
-                code=CLOSE_POLICY_REFUSED,
-                reason="unauthorized",
-            )
-            return
+    supplied = websocket.headers.get("x-internal-api-key")
+    if not _internal_api_key_ok(supplied):
+        await websocket.close(
+            code=CLOSE_POLICY_REFUSED,
+            reason="unauthorized",
+        )
+        return
 
     registry = get_registry()
     adapter = registry.get(adapter_name)
