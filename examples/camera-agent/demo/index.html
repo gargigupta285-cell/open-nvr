@@ -951,6 +951,20 @@
       const m=location.pathname.match(/\/demo\/camera\/([^/]+)$/);
       if(m) openCamScreen(decodeURIComponent(m[1]),false); else if(window._camScreenCam) closeCamScreen(false); });
     (function(){ const b=$("camBack"); if(b) b.addEventListener("click",()=>closeCamScreen()); })();
+    // Free CPU when nobody's watching: a live WebRTC decode keeps running
+    // full-tilt in a hidden/backgrounded tab, competing with the on-box
+    // STT/LLM/TTS. Tear the stream down when the tab is hidden and stop the
+    // still-frame poll; when the user returns to a LIVE camera screen (not
+    // one paused on review/playback), re-establish it. No decode happens
+    // while you're not looking.
+    document.addEventListener("visibilitychange",()=>{
+      if(document.hidden){
+        stopWebrtc();
+        if(_liveTimer){ clearInterval(_liveTimer); _liveTimer=null; }
+      } else if(window._camScreenCam&&!_revTs&&!_playback&&_playing){
+        goLive();   // re-establish live video + the still fallback poll
+      }
+    });
 
     function fmtClock(ts){ const d=new Date(ts*1000);
       return ("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2)+":"+("0"+d.getSeconds()).slice(-2); }

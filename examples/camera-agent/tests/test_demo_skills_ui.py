@@ -290,3 +290,18 @@ def test_webrtc_live_player_wired(script: str, html: str) -> None:
     )
     # review, recorded playback, and leaving the screen all stop the stream
     assert script.count("stopWebrtc()") >= 4
+
+
+def test_live_video_pauses_when_tab_hidden(script: str) -> None:
+    # A live WebRTC decode competes with the on-box STT/LLM/TTS. When the tab
+    # is backgrounded the stream is torn down, and re-established on return to
+    # a live camera screen — so no decode burns CPU while nobody's watching.
+    assert 'addEventListener("visibilitychange"' in script, (
+        "no visibilitychange handler — live decode keeps running in a hidden tab"
+    )
+    assert re.search(r"document\.hidden[\s\S]{0,120}stopWebrtc\(\)", script), (
+        "hidden tab should stop the WebRTC stream"
+    )
+    assert re.search(r"document\.hidden[\s\S]{0,200}goLive\(\)", script), (
+        "returning to a live camera screen should re-establish the stream"
+    )
