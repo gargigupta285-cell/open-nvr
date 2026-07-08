@@ -583,14 +583,25 @@ if os.path.exists(FRONTEND_DIST):
         # 1. API routes are already handled above (FastAPI checks them first).
 
         # 2. Check if a physical file exists at the requested path in build/dist
-        #    (This handles /logo.png, /manifest.json, /favicon.ico)
-        full_path = os.path.join(FRONTEND_DIST, file_path)
-        if os.path.isfile(full_path):
-            return FileResponse(full_path)
+        #    (This handles /logo.png, /manifest.json, /favicon.ico).
+        #
+        #    SECURITY: os.path.join happily escapes FRONTEND_DIST when
+        #    file_path contains ``..`` segments or is absolute, and FileResponse
+        #    would then serve arbitrary files (.env, JWT signing keys, DB creds)
+        #    to an unauthenticated client. Resolve the path (collapsing ``..``
+        #    and symlinks) and require it to stay inside FRONTEND_DIST before
+        #    serving; anything that escapes falls through to the SPA index.
+        dist_root = os.path.realpath(FRONTEND_DIST)
+        requested = os.path.realpath(os.path.join(dist_root, file_path))
+        if os.path.isfile(requested) and (
+            requested == dist_root or requested.startswith(dist_root + os.sep)
+        ):
+            return FileResponse(requested)
 
-        # 3. If no file found, and it's not an API route, assume it's a client-side route
+        # 3. If no file found (or the path escaped the build dir), and it's not
+        #    an API route, assume it's a client-side route
         #    (e.g. /dashboard, /login) -> Serve index.html
-        return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
+        return FileResponse(os.path.join(dist_root, "index.html"))
 
 else:
     main_logger.warning(
