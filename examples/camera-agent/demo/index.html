@@ -144,15 +144,44 @@
     /* NOTE: a display: rule beats the hidden attribute, so [hidden] must
        win explicitly or flex containers leak open on load. */
     [hidden]{display:none !important;}
-    #loginOverlay{position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:100;
-      display:flex;align-items:center;justify-content:center;padding:1rem;}
-    .login-card{background:var(--panel);border:1px solid var(--border);border-radius:12px;
-      width:min(340px,94vw);padding:1.1rem;display:flex;flex-direction:column;gap:.5rem;}
-    .login-card h2{margin:0;font-size:1rem;}
+    #loginOverlay{position:fixed;inset:0;z-index:100;display:flex;align-items:center;
+      justify-content:center;padding:1rem;background:
+      radial-gradient(60% 50% at 50% 32%, rgba(94,179,246,.10), transparent 70%),
+      rgba(5,8,14,.82);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);}
+    .login-card{background:linear-gradient(180deg,var(--panel),var(--bg2));
+      border:1px solid var(--border);border-radius:16px;width:min(360px,94vw);
+      padding:1.6rem 1.5rem 1.2rem;display:flex;flex-direction:column;gap:.4rem;
+      box-shadow:0 24px 60px rgba(0,0,0,.55),0 0 0 1px rgba(94,179,246,.06);
+      animation:login-in .28s ease;}
+    @keyframes login-in{from{opacity:0;transform:translateY(10px) scale(.985);}to{opacity:1;transform:none;}}
+    .login-brand{display:flex;flex-direction:column;align-items:center;gap:.35rem;
+      margin-bottom:.9rem;text-align:center;}
+    .login-avatar{width:64px;height:64px;border-radius:50%;display:grid;place-items:center;
+      color:var(--accent);background:rgba(94,179,246,.08);
+      box-shadow:0 0 0 1px rgba(94,179,246,.35),0 0 24px rgba(94,179,246,.18);}
+    .login-avatar svg{width:44px;height:44px;}
+    .login-wordmark{font-size:1.25rem;font-weight:700;color:var(--wordmark);letter-spacing:.01em;}
+    .login-wordmark .wm-nvr{color:var(--accent);}
+    .login-agent{font-size:.76rem;color:var(--muted);}
+    .login-agent b{color:var(--text);font-weight:600;}
+    .login-lbl{font-size:.68rem;color:var(--muted);text-transform:uppercase;
+      letter-spacing:.06em;margin:.35rem 0 .15rem;}
+    .login-opt{text-transform:none;letter-spacing:0;opacity:.7;}
     .login-card input{background:var(--panel2);color:var(--text);border:1px solid var(--border);
-      border-radius:7px;padding:.5rem .6rem;font-size:.85rem;}
-    .login-card input:focus{outline:none;border-color:var(--accent);}
-    .login-err{color:#f87171;font-size:.75rem;}
+      border-radius:9px;padding:.6rem .7rem;font-size:.88rem;
+      transition:border-color .15s ease,box-shadow .15s ease;}
+    .login-card input:focus{outline:none;border-color:var(--accent);
+      box-shadow:0 0 0 3px rgba(94,179,246,.18);}
+    .login-err{color:#f87171;font-size:.75rem;margin-top:.35rem;
+      background:rgba(229,62,62,.08);border:1px solid rgba(229,62,62,.35);
+      border-radius:8px;padding:.45rem .6rem;}
+    #loginGo{margin-top:.8rem;background:linear-gradient(180deg,var(--accent),var(--accent-strong));
+      color:#04121f;border:none;border-radius:10px;padding:.65rem;font-size:.9rem;
+      font-weight:700;cursor:pointer;transition:filter .15s ease,transform .1s ease;}
+    #loginGo:hover{filter:brightness(1.08);}
+    #loginGo:active{transform:translateY(1px);}
+    #loginGo:disabled{opacity:.6;cursor:default;}
+    .login-foot{margin-top:.7rem;font-size:.66rem;color:var(--muted);text-align:center;}
     .camlbl{font-size:.7rem;color:var(--muted);margin:.2rem 0 .1rem;}
     /* per-camera screen (in-page navigation; URL = /demo/camera/{id}) */
     .ctop{display:flex;align-items:center;gap:.6rem;margin-bottom:.5rem;}
@@ -425,13 +454,26 @@
        bearer contract, revocation/MFA stay the server's job. -->
   <div id="loginOverlay" hidden>
     <div class="login-card">
-      <h2>Sign in to OpenNVR</h2>
-      <div class="empty-note">This agent uses your OpenNVR account.</div>
-      <input id="loginUser" type="text" placeholder="Username" autocomplete="username">
-      <input id="loginPass" type="password" placeholder="Password" autocomplete="current-password">
-      <input id="loginTotp" type="text" inputmode="numeric" placeholder="MFA code (if enabled)" autocomplete="one-time-code">
+      <div class="login-brand">
+        <div class="login-avatar" aria-hidden="true">
+          <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="50" cy="50" r="40" fill="none" stroke="currentColor" stroke-width="5" opacity=".9"/>
+            <circle cx="50" cy="47" r="13" fill="currentColor"/>
+            <ellipse cx="50" cy="70" rx="11" ry="2.4" fill="currentColor" opacity=".7"/>
+          </svg>
+        </div>
+        <div class="login-wordmark"><span class="wm-open">Open</span><span class="wm-nvr">NVR</span> Agent</div>
+        <div class="login-agent" id="loginAgentLine">Sign in with your OpenNVR account</div>
+      </div>
+      <label class="login-lbl" for="loginUser">Username</label>
+      <input id="loginUser" type="text" placeholder="e.g. admin" autocomplete="username">
+      <label class="login-lbl" for="loginPass">Password</label>
+      <input id="loginPass" type="password" placeholder="••••••••" autocomplete="current-password">
+      <label class="login-lbl" for="loginTotp">MFA code <span class="login-opt">if enabled</span></label>
+      <input id="loginTotp" type="text" inputmode="numeric" placeholder="123 456" autocomplete="one-time-code">
       <div id="loginErr" class="login-err" hidden></div>
-      <button class="ghost primary" id="loginGo" type="button">Sign in</button>
+      <button id="loginGo" type="button">Sign in</button>
+      <div class="login-foot">Access follows your OpenNVR role — viewer · operator · admin</div>
     </div>
   </div>
 
@@ -480,7 +522,10 @@
     function showLogin(){ const ov=$("loginOverlay"); if(ov&&ov.hidden){ ov.hidden=false; const u=$("loginUser"); if(u) u.focus(); } }
     (function(){ const go=$("loginGo");
       async function doLogin(){
-        const err=$("loginErr"); err.hidden=true;
+        const err=$("loginErr"), btn=$("loginGo"); err.hidden=true;
+        btn.disabled=true; btn.textContent="Signing in…";
+        try{ await _doLoginInner(err); } finally{ btn.disabled=false; btn.textContent="Sign in"; } }
+      async function _doLoginInner(err){
         const body={username:$("loginUser").value.trim(),password:$("loginPass").value};
         const totp=$("loginTotp").value.trim(); if(totp) body.totp_code=totp;
         if(!body.username||!body.password){ err.textContent="Username and password are required."; err.hidden=false; return; }
@@ -493,6 +538,7 @@
           location.reload();   // clean re-boot with the token attached
         }catch(e2){ err.textContent="Sign-in failed: "+e2.message; err.hidden=false; }
       }
+
       if(go) go.addEventListener("click",doLogin);
       for(const id of ["loginUser","loginPass","loginTotp"]){ const el=$(id);
         if(el) el.addEventListener("keydown",e=>{ if(e.key==="Enter") doLogin(); }); } })();
@@ -675,6 +721,11 @@
 
     async function loadAgent(){ try{ const a=await (await fetch("/agent")).json();
       _authMode=a.auth_mode||"none";
+      // The card greets with the AGENT'S configured name (/agent is an
+      // open endpoint precisely so the gate can be personal pre-login).
+      if(a.name){ const ln=$("loginAgentLine");
+        if(ln){ ln.innerHTML="Sign in with your OpenNVR account to talk to <b></b>";
+          ln.querySelector("b").textContent=a.name; } }
       if(_authMode==="opennvr"&&!_token) showLogin();
       window._opennvrUi=a.opennvr_ui_url||"";            // deep-link base for recordings
       if(a.avatar_video===false) disableAvatarVideo();   // operator turned the video avatar off
