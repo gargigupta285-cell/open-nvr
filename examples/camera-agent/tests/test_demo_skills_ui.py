@@ -220,3 +220,22 @@ def test_recorded_row_wired(script: str, html: str) -> None:
     # goLive must tear playback down — a lingering <video> under a LIVE
     # pill is the same class of bug as the frozen-pause finding.
     assert re.search(r"function goLive\(\)\{[^\n]*stopPlayback\(\)", script)
+
+
+def test_events_feed_wired(script: str, html: str) -> None:
+    # The Events card leads the rail (operational truth before Skills),
+    # a per-camera filter rides the camera screen, and clicking an event
+    # jumps to THE MOMENT: review ring first, covering recorded segment
+    # second, live as the fallback.
+    assert 'id="eventsCard"' in html and 'id="eventsList"' in html
+    assert html.index('id="eventsCard"') < html.index('id="skillsCard"'), (
+        "Events must lead the rail — what happened beats configuration"
+    )
+    assert 'id="camEvents"' in html
+    for fn in ("async function loadEvents", "function renderEvents",
+               "async function openCamAtMoment"):
+        assert fn in script, f"events handler missing: {fn!r}"
+    assert '"/events"' in script
+    assert re.search(r"openCamAtMoment[\s\S]{0,400}loadTimeline", script), (
+        "click-to-moment no longer tries the review ring first"
+    )

@@ -202,6 +202,12 @@ class AppConfig:
     # speaks the identical bearer contract. See AGENT_DESIGN.md.
     auth_mode: str = "none"
 
+    # Public base URL of THIS agent (e.g. "https://agent.nvr.example"), used
+    # only to put a tap-to-open deep link (/demo/camera/{id}) into outgoing
+    # notifications — a phone push lands on the right camera's screen.
+    # Unset = notifications carry no link.
+    agent_public_url: str | None = None
+
     # Optional base URL of the main OpenNVR UI (e.g. "https://nvr.example"),
     # used only to build a deep link into the AI Adapters view when a skill is
     # greyed out for want of a backing adapter. The agent GUIDES the operator
@@ -1076,6 +1082,7 @@ class MonitorManager:
             "id": self._next_note_id,
             "monitor_id": monitor_id,
             "text": f"{alert.title} — {alert.description}",
+            "camera": getattr(alert, "camera_id", "") or "",
             "ts": now,
         })
         self._next_note_id += 1
@@ -1215,6 +1222,7 @@ class MonitorManager:
                     "id": self._next_note_id,
                     "monitor_id": mon.id,
                     "text": f"Heads up — I see {noun} on {cam}.",
+                    "camera": cam,
                     "ts": now,
                 })
                 self._next_note_id += 1
@@ -1616,6 +1624,11 @@ class Notifier:
         source = event.get("source")
         if source:
             payload["source"] = source
+        # Tap-to-open: a phone push should land ON the camera's screen.
+        base = getattr(self._runtime.cfg, "agent_public_url", None)
+        cam = event.get("camera")
+        if base and cam:
+            payload["link"] = f"{str(base).rstrip('/')}/demo/camera/{cam}"
         return payload
 
     async def send(self, event: dict[str, Any]) -> int:
@@ -2265,6 +2278,7 @@ def load_config(path: str | Path) -> AppConfig:
         opennvr_api_url=_opennvr_api_url,
         opennvr_ui_url=_opennvr_ui_url,
         auth_mode=str(raw.get("auth_mode") or "none").strip().lower(),
+        agent_public_url=raw.get("agent_public_url"),
         emergency_contacts=(
             dict(raw["emergency_contacts"])
             if isinstance(raw.get("emergency_contacts"), dict) else None
@@ -2554,6 +2568,31 @@ class CameraAgentRuntime:
         _viewer_safe = {"list_apps", "app_status", "recent_app_alerts", "list_people"}
         self.viewer_tool_definitions = base + [
             t for t in control if t["function"]["name"] in _viewer_safe]
+
+    def events_feed(self, limit: int = 50) -> list[dict[str, Any]]:
+        """ONE feed of what happened — alarm rings, watch hits, and app
+        alerts relayed off the bus — newest first. The demo's Events card
+        and its per-camera filter render this; nothing new is collected,
+        it's a VIEW over the three streams the agent already records."""
+        out: list[dict[str, Any]] = []
+        for e in self.alarms.events():
+            out.append({"ts": e.get("ts"), "camera_id": e.get("camera") or "",
+                        "title": str(e.get("name") or "Alarm"),
+                        "detail": str(e.get("text") or ""),
+                        "severity": "critical", "kind": "alarm"})
+        for n in self.monitors.notifications():
+            out.append({"ts": n.get("ts"), "camera_id": n.get("camera") or "",
+                        "title": str(n.get("text") or "Watch"),
+                        "detail": "", "severity": "info", "kind": "watch"})
+        for al in self.context.recent_app_alerts(window_seconds=24 * 3600):
+            out.append({"ts": al.received_at, "camera_id": al.camera_id or "",
+                        "title": str(al.title or al.app_id),
+                        "detail": str(al.summary or ""),
+                        "severity": str(al.severity or "info"),
+                        "kind": "app", "source": al.app_id})
+        out = [e for e in out if e.get("ts")]
+        out.sort(key=lambda e: e["ts"], reverse=True)
+        return out[:limit]
 
     def tools_for_tier(self, tier: str) -> list[dict[str, Any]]:
         """The toolset a caller of this permission tier may drive."""
@@ -3801,6 +3840,12 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 {"error": "no recordings for this camera yet", "recordings": []},
                 status_code=200), None
         return None, (token, path)
+
+    @app.get("/events")
+    async def _events() -> dict[str, Any]:
+        """The merged what-happened feed (alarms + watches + app alerts).
+        Viewer tier: events are LOOK; acting on them stays operator+."""
+        return {"events": runtime.events_feed()}
 
     @app.get("/recordings/{camera_id}")
     async def _recordings_list(camera_id: str, request: Request) -> Any:

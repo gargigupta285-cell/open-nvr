@@ -242,6 +242,15 @@
     .rec-seg small{display:block;color:var(--muted);font-size:.62rem;}
     .rec-seg:hover,.rec-seg.on{border-color:var(--accent);color:var(--accent);}
     .rec-note{font-size:.7rem;color:var(--muted);padding:.3rem 0;}
+    .evt{display:flex;align-items:flex-start;gap:.45rem;padding:.4rem .5rem;background:var(--panel2);
+      border:1px solid var(--border);border-radius:8px;margin-top:.32rem;cursor:pointer;
+      font-size:.75rem;text-align:left;width:100%;}
+    .evt:hover{border-color:var(--accent);}
+    .evt .ev-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;margin-top:.28rem;}
+    .evt .ev-body{flex:1;min-width:0;}
+    .evt .ev-title{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .evt .ev-sub{display:block;color:var(--muted);font-size:.66rem;}
+    .cam-events{margin-top:.45rem;}
     .hwrow{padding:.42rem .5rem;background:var(--panel2);border:1px solid var(--border);
       border-radius:8px;margin:.3rem 0;font-size:.74rem;}
     .hwrow .hw-nm{font-weight:600;font-size:.78rem;}
@@ -383,6 +392,7 @@
               </div>
             </div>
             <div class="empty-note" id="camScoped"></div>
+            <div id="camEvents" class="cam-events"></div>
           </div>
 
           <button id="talk" class="talk" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg> Talk</button>
@@ -406,6 +416,10 @@
       </div>
 
       <div class="side">
+        <div class="card" id="eventsCard">
+          <div class="cardhead"><h2>Events</h2></div>
+          <div id="eventsList"><div class="empty-note">Nothing yet — alarm rings, watch hits, and app alerts land here.</div></div>
+        </div>
         <div class="card" id="skillsCard">
           <div class="cardhead"><h2>Skills</h2><span class="headbtns"><button class="restorebtn" id="skillRestore" type="button" hidden title="Re-enable every default skill you've removed">Restore defaults</button><button class="addbtn" id="skillAdd" type="button" title="Add a skill" aria-label="Add a skill">+</button></span></div>
           <div class="skillhint">Capabilities the agent carries. × to remove.</div>
@@ -882,7 +896,7 @@
       $("mainScreen").hidden=true; $("camScreen").hidden=false;
       $("camTitle").textContent=cam; $("camSub").textContent=_camRoles[cam]||"";
       if(push) history.pushState({cam:cam},"","/demo/camera/"+encodeURIComponent(cam));
-      goLive(); loadTimeline(cam); loadCamScoped(cam); loadRecordings(cam);
+      goLive(); loadTimeline(cam); loadCamScoped(cam); loadRecordings(cam); renderCamEvents(cam);
       addMsg("Focused on "+cam+" — talk or type, everything is scoped to this camera. ‹ Back returns to all cameras.","sys"); }
     function closeCamScreen(push=true){
       window._camScreenCam=null;
@@ -969,6 +983,53 @@
         if(!$("camVideo").hidden) return;   // playback has its own controls
         const cam=window._camScreenCam; if(!cam) return;
         pinFrame(cam,_revTs||undefined); }); })();
+
+    // ── Events: ONE what-happened feed (alarms + watches + app alerts).
+    // Clicking an event opens the camera AND jumps to the moment: review
+    // ring if it covers the timestamp, else the recorded segment, else live.
+    let _events=[];
+    function _ago(ts){ const s=Math.max(0,Date.now()/1000-ts);
+      if(s<60) return Math.floor(s)+"s ago"; if(s<3600) return Math.floor(s/60)+"m ago";
+      if(s<86400) return Math.floor(s/3600)+"h ago"; return Math.floor(s/86400)+"d ago"; }
+    function _evDot(sev){ return (sev==="critical"||sev==="high")?"#e5695b"
+      :(sev==="medium"||sev==="warn")?"#f6c453":"var(--muted)"; }
+    async function loadEvents(){
+      try{ const r=await fetch("/events"); if(!r.ok) return;
+        _events=(await r.json()).events||[]; }catch{ return; }
+      renderEvents($("eventsList"),_events.slice(0,15));
+      if(window._camScreenCam) renderCamEvents(window._camScreenCam); }
+    function renderEvents(el,list){ if(!el) return;
+      if(!list.length){ el.innerHTML='<div class="empty-note">Nothing yet — alarm rings, watch hits, and app alerts land here.</div>'; return; }
+      el.innerHTML="";
+      for(const ev of list){ const b=document.createElement("button"); b.type="button"; b.className="evt";
+        b.innerHTML='<span class="ev-dot"></span><span class="ev-body"><span class="ev-title"></span><span class="ev-sub"></span></span>';
+        b.querySelector(".ev-dot").style.background=_evDot(ev.severity);
+        b.querySelector(".ev-title").textContent=ev.title;
+        b.title=ev.detail||ev.title;
+        b.querySelector(".ev-sub").textContent=(ev.camera_id||"all cameras")+" · "+_ago(ev.ts);
+        b.addEventListener("click",()=>{ if(ev.camera_id) openCamAtMoment(ev.camera_id,ev.ts); });
+        el.appendChild(b); } }
+    function renderCamEvents(cam){ const el=$("camEvents"); if(!el) return;
+      const mine=_events.filter(e=>e.camera_id===cam).slice(0,8);
+      el.innerHTML=""; if(!mine.length) return;
+      const h=document.createElement("div"); h.className="rec-lbl"; h.textContent="Events on this camera";
+      el.appendChild(h); renderEvents(el.appendChild(document.createElement("div")),mine); }
+    async function openCamAtMoment(cam,ts){
+      if(window._camScreenCam!==cam) openCamScreen(cam);
+      // the ring first: the honest "see that exact moment"
+      try{ await loadTimeline(cam); }catch{}
+      if(_tl&&_tl.frames&&_tl.frames.length>1){
+        const f=_tl.frames;
+        if(ts>=f[0]-3&&ts<=f[f.length-1]+3){
+          let best=0,bd=1e18; f.forEach((t,i)=>{ const d=Math.abs(t-ts); if(d<bd){bd=d;best=i;} });
+          $("camScrub").value=best; reviewAt(best); return; } }
+      // else a recorded segment covering the moment
+      try{ await loadRecordings(cam); }catch{}
+      const seg=_recs.find(x=>{ const s0=Date.parse(x.start)/1000;
+        return ts>=s0-2&&ts<=s0+(x.duration||0)+2; });
+      if(seg) playRecording(cam,seg,null);
+      // else: live view (openCamScreen already did that)
+    }
 
     // ── Recorded row: segments from the MAIN server, played by URL ──
     let _recs=[];   // [{start, duration}] for the open camera
@@ -1176,7 +1237,7 @@
       micdotEl.hidden=false; setAvatar("listening"); setStatus("Listening… just speak.","active");
       if(!levelRAF) levelRAF=requestAnimationFrame(levelRing);
       if(!vadTimer) vadTimer=setInterval(vadTick,TICK_MS);
-      if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();},POLL_MS);
+      if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();loadEvents();},POLL_MS);
       if(!alarmTimer) alarmTimer=setInterval(pollAlarms,2500);
     }
     function endSession(){ sessionActive=false; if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(capturing)stopCapture();
@@ -1455,7 +1516,7 @@
           if(!r.ok){ addMsg("Couldn't start the watch: "+(d.error||("HTTP "+r.status)),"sys"); return; }
           addMsg(d.message||("Watching for "+target+"."),"sys");
           ti.value=""; f.hidden=true; add.classList.remove("open");
-          pollMonitors(); if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();},POLL_MS);
+          pollMonitors(); if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();loadEvents();},POLL_MS);
         }catch(err){ addMsg("Couldn't start the watch: "+err.message,"sys"); } }
       if(go) go.addEventListener("click", start);
       if(ti) ti.addEventListener("keydown",e=>{ if(e.key==="Enter") start(); }); })();
@@ -1475,7 +1536,7 @@
           addMsg(d.message||("Scheduled: "+body.name),"sys");
           qi.value=""; $("reportName").value=""; $("reportAt").value=""; $("reportEvery").value="";
           f.hidden=true; add.classList.remove("open");
-          pollReports(); if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();},POLL_MS);
+          pollReports(); if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();loadEvents();},POLL_MS);
         }catch(err){ addMsg("Couldn't schedule the report: "+err.message,"sys"); } }
       if(go) go.addEventListener("click", schedule);
       if(qi) qi.addEventListener("keydown",e=>{ if(e.key==="Enter") schedule(); }); })();
@@ -1486,14 +1547,14 @@
       async function go(){ const q=(qi.value||"").trim(); if(!q){ qi.focus(); return; }
         try{ const r=await fetch("/tasks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:q})});
           if(r.ok){ addMsg("Background task queued: "+q,"sys"); qi.value=""; f.hidden=true; add.classList.remove("open");
-            pollTasks(); if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();},POLL_MS); }
+            pollTasks(); if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();loadEvents();},POLL_MS); }
           else { const d=await r.json().catch(()=>({})); addMsg("Task failed: "+(d.error||("HTTP "+r.status)),"sys"); }
         }catch(err){ addMsg("Task failed: "+err.message,"sys"); } }
       if(run) run.addEventListener("click", go);
       if(qi) qi.addEventListener("keydown",e=>{ if(e.key==="Enter") go(); }); })();
 
     const _ulc=$("useLocalCam"); if(_ulc) _ulc.addEventListener("click", useLocalCamera);
-    loadAgent(); loadCameras().then(openDeepLinkedCamera); loadNotify(); loadSkills(); loadHardware(); setAvatar("idle");
+    loadAgent(); loadCameras().then(openDeepLinkedCamera); loadNotify(); loadSkills(); loadHardware(); loadEvents(); setAvatar("idle");
     renderTasks([]); renderMonitors([]); renderAlarms([]); renderReports([]);
     alarmTimer = setInterval(pollAlarms, 2500);   // alarms ring even before Talk
   </script>
