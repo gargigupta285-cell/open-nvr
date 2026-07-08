@@ -123,6 +123,7 @@ class CameraConfigService:
         payload = {
             "protocol": cfg.stream_protocol,
             "source_url": cfg.source_url,
+            "substream_url": cam.substream_url,
             "recording": {
                 "enabled": cfg.recording_enabled,
                 "path": cfg.recording_path,

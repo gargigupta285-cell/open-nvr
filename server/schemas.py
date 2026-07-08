@@ -87,6 +87,8 @@ class CameraBase(BaseModel):
     username: str | None = Field(None, max_length=50)
     # password removed to prevent leak in Response
     rtsp_url: str | None = Field(None, max_length=500)
+    # Optional low-res secondary RTSP profile for the camera-agent live view.
+    substream_url: str | None = Field(None, max_length=500)
     location: str | None = Field(None, max_length=200)
     vlan: str | None = Field(None, max_length=50)
     status: str | None = Field("unknown", max_length=20)
@@ -112,7 +114,7 @@ class CameraBase(BaseModel):
             return html.escape(v)
         return v
 
-    @field_validator("rtsp_url")
+    @field_validator("rtsp_url", "substream_url")
     @classmethod
     def validate_rtsp_url(cls, v: str | None) -> str | None:
         if not v:
@@ -366,6 +368,7 @@ class CameraUpdate(BaseModel):
     username: str | None = Field(None, max_length=50)
     password: str | None = Field(None, max_length=255)
     rtsp_url: str | None = Field(None, max_length=500)
+    substream_url: str | None = Field(None, max_length=500)
     location: str | None = Field(None, max_length=200)
     vlan: str | None = Field(None, max_length=50)
     status: str | None = Field(None, max_length=20)

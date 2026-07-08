@@ -943,7 +943,10 @@ class MediaMtxAdminService:
             (config.get("source_url") or config.get("source"))
             if isinstance(config, dict) else None
         )
-        sub_source = derive_substream_url(main_source)
+        # An operator-stored substream URL wins (covers cameras whose sub path
+        # isn't a known Hikvision/Dahua convention); otherwise derive it.
+        stored_sub = config.get("substream_url") if isinstance(config, dict) else None
+        sub_source = stored_sub or derive_substream_url(main_source)
         name = _build_stream_name(settings.mediamtx_stream_prefix, camera_id, camera_ip)
         sub = substream_name(name)
         if not sub_source:

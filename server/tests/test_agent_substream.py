@@ -123,6 +123,36 @@ def test_provision_substream_adds_on_demand_path(monkeypatch):
     assert body["sourceOnDemand"] is True
 
 
+def test_provision_substream_prefers_stored_url(monkeypatch):
+    # An operator-stored substream_url wins over the vendor-derived default —
+    # covers cameras whose sub path isn't a Hikvision/Dahua convention.
+    mod = mmadmin
+    MediaMtxAdminService = mmadmin.MediaMtxAdminService
+    posts: list[tuple[str, dict]] = []
+
+    class _Resp:
+        status_code = 200
+
+    class _Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, json=None, headers=None):
+            posts.append((url, json)); return _Resp()
+
+    monkeypatch.setattr(mod.httpx, "AsyncClient", lambda *a, **k: _Client())
+    monkeypatch.setattr(MediaMtxAdminService, "_base", staticmethod(lambda: "http://mtx/v3"))
+    monkeypatch.setattr(MediaMtxAdminService, "_headers", staticmethod(lambda: {}))
+    monkeypatch.setattr(mod.settings, "mediamtx_stream_prefix", "cam-")
+    monkeypatch.setattr(mod.settings, "mediamtx_path_mode", "id", raising=False)
+
+    cfg = {"source_url": "rtsp://1.2.3.4/live/main",       # not derivable
+           "substream_url": "rtsp://1.2.3.4:554/vendor/lowres"}
+    asyncio.run(MediaMtxAdminService._provision_substream(1, "1.2.3.4", cfg))
+
+    assert len(posts) == 1
+    assert posts[0][1]["source"] == "rtsp://1.2.3.4:554/vendor/lowres"
+
+
 def test_provision_substream_skips_when_not_derivable(monkeypatch):
     mod = mmadmin
     MediaMtxAdminService = mmadmin.MediaMtxAdminService

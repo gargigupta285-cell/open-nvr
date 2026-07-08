@@ -196,6 +196,11 @@ class Camera(Base):
             self.encrypted_password = None
 
     rtsp_url = Column(String(500), nullable=True)
+    # Optional low-res secondary RTSP profile. When set, the camera-agent's
+    # live view (AGENT_LIVE_USE_SUBSTREAM) uses it instead of the derived
+    # vendor default — covers cameras whose substream path isn't a known
+    # Hikvision/Dahua convention.
+    substream_url = Column(String(500), nullable=True)
     is_active = Column(Boolean, default=True)
     location = Column(String(200), nullable=True)
     vlan = Column(String(50), nullable=True)

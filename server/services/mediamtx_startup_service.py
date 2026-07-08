@@ -420,6 +420,7 @@ class MediaMtxStartupService:
         """Build provisioning configuration for a camera."""
         provision_config = {
             "source_url": camera.rtsp_url,
+            "substream_url": camera.substream_url,
             "rtsp_transport": "tcp",  # Default transport
         }
 
