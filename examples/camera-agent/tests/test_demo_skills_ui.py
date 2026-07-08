@@ -231,6 +231,9 @@ def test_events_feed_wired(script: str, html: str) -> None:
     assert html.index('id="eventsCard"') < html.index('id="skillsCard"'), (
         "Events must lead the rail — what happened beats configuration"
     )
+    assert 'id="evToggle"' in html and "evCollapsed" in script, (
+        "Events card must be collapsible (it was eating the rail)"
+    )
     # one home for events: the rail card scopes to the focused camera
     # (no left-column list — that was reported as noise)
     assert 'id="camEvents"' not in html
@@ -249,8 +252,11 @@ def test_alarm_ring_levels_wired(script: str, html: str) -> None:
     # siren latches until silenced, silent pushes only. Both alarm forms
     # offer the choice; fire-grade targets preselect the siren.
     assert 'id="alarmRing"' in html and 'id="paRing"' in html
-    for v in ('value="chime"', 'value="siren"', 'value="silent"'):
+    for v in ('value="chime"', 'value="pulse"', 'value="siren"', 'value="silent"'):
         assert html.count(v) >= 2, f"ring option missing from a form: {v}"
+    assert "function startPulse" in script, "urgent level lost its own sound"
+    assert "ringing_kind" in script, "page no longer picks the sound by kind"
+    assert "_ringDefaults" in script, "preselect no longer follows the site map"
     assert "function wireRingPreselect" in script
     assert "flashChime" in script and 'playChime("bell")' in script
     assert ".alarmbar.chime" in html, "chime banner style missing"

@@ -202,6 +202,12 @@ class AppConfig:
     # speaks the identical bearer contract. See AGENT_DESIGN.md.
     auth_mode: str = "none"
 
+    # Per-site target→annunciation defaults, merged over the built-ins
+    # (fire/smoke/flame/gas → siren). A farm adds  snake: siren ; a bank
+    # arms its after-hours person alarm as  person: siren . An explicit
+    # ring on the alarm always wins; this only decides the DEFAULT.
+    alarm_ring_defaults: dict[str, str] | None = None
+
     # Public base URL of THIS agent (e.g. "https://agent.nvr.example"), used
     # only to put a tap-to-open deep link (/demo/camera/{id}) into outgoing
     # notifications — a phone push lands on the right camera's screen.
@@ -1314,9 +1320,15 @@ class Alarm:
     before_min: int | None = None
     emergency_contact: str | None = None
     # Annunciation level (a real CCTV concept — not every alarm deserves
-    # the siren): "siren" latches + rings until acknowledged (fire,
-    # intrusion); "chime" dings once per re-arm window, no latch (a
-    # visitor at the gate); "silent" records + pushes only.
+    # the siren). Four levels, alarm-panel style:
+    #   "siren"  — CRITICAL: latches + rings until a human silences it
+    #              (fire, a snake on the farm, a person in the bank
+    #              after hours).
+    #   "pulse"  — URGENT: latches + pulses loud, then STANDS DOWN on
+    #              its own after pulse_seconds (default 60) — demands
+    #              attention without demanding an acknowledgement.
+    #   "chime"  — NOTICE: one ding per re-arm window, no latch.
+    #   "silent" — LOG: records + pushes only.
     ring: str = "siren"
     active: bool = True
     triggered: bool = False
@@ -1354,7 +1366,9 @@ class AlarmManager:
     (the UI plays a siren while any alarm is ``triggered``). In-memory only."""
 
     def __init__(self, runtime: "CameraAgentRuntime", *, interval: float = 5.0,
-                 rearm_cooldown: float = 20.0, max_alarms: int = 20) -> None:
+                 rearm_cooldown: float = 20.0, max_alarms: int = 20,
+                 pulse_seconds: float = 60.0) -> None:
+        self._pulse = pulse_seconds
         self._runtime = runtime
         self._alarms: dict[int, Alarm] = {}
         self._order: list[int] = []
@@ -1372,7 +1386,7 @@ class AlarmManager:
                ring: str = "siren") -> Alarm:
         import time
 
-        if ring not in ("siren", "chime", "silent"):
+        if ring not in ("siren", "pulse", "chime", "silent"):
             ring = "siren"
         alarm = Alarm(
             id=self._next_id, name=name.strip() or "Alarm",
@@ -1463,11 +1477,27 @@ class AlarmManager:
                         if not alarm.active:
                             break
                         await self._poll(alarm, cam)
+                self._maybe_stand_down(alarm)
                 await asyncio.sleep(self._interval)
         except asyncio.CancelledError:  # pragma: no cover
             pass
         except Exception:  # pragma: no cover
             logger.exception("alarm #%d loop crashed", alarm.id)
+
+    def _maybe_stand_down(self, alarm: Alarm, now: float | None = None) -> None:
+        """URGENT stands down on its own: a pulse alarm that has rung for
+        pulse_seconds auto-acknowledges — loud enough to turn heads, no
+        human click required. (CRITICAL sirens never do this.)"""
+        if alarm.ring != "pulse" or not alarm.triggered:
+            return
+        if alarm.last_triggered is None:
+            return
+        import time as _t
+        now = _t.time() if now is None else now
+        if now - alarm.last_triggered >= self._pulse:
+            alarm.triggered = False
+            alarm.last_ack = now
+            logger.info("alarm #%d (pulse) stood down", alarm.id)
 
     async def _poll(self, alarm: Alarm, cam: str) -> None:
         import time
@@ -1483,9 +1513,10 @@ class AlarmManager:
         now = time.time()
         if not present:
             return
-        if alarm.ring == "siren":
-            # Latching: rings until a human acknowledges; re-arm cooldown
-            # runs from the acknowledge.
+        if alarm.ring in ("siren", "pulse"):
+            # Latching: siren rings until a human acknowledges; pulse
+            # stands down on its own (the loop auto-acks it after
+            # pulse_seconds). Re-arm cooldown runs from the ack.
             if alarm.triggered or (now - alarm.last_ack) < self._rearm:
                 return
             alarm.triggered = True
@@ -1536,12 +1567,15 @@ def _create_alarm_tool(camera_enum_all: list[str]) -> dict[str, Any]:
                     "camera_ids": {"type": "array", "items": {"type": "string", "enum": camera_enum_all}},
                     "after": {"type": "string", "description": "Only active after this 24h time 'HH:MM' (e.g. '18:00' for after 6pm)."},
                     "before": {"type": "string", "description": "Only active before this 24h time 'HH:MM'."},
-                    "ring": {"type": "string", "enum": ["siren", "chime", "silent"],
+                    "ring": {"type": "string",
+                             "enum": ["siren", "pulse", "chime", "silent"],
                              "description": "How it announces. 'siren' rings until "
-                                            "silenced — fire/smoke/gas and break-in-grade "
-                                            "threats. 'chime' dings once — visitors, "
+                                            "silenced — fire/smoke/gas, dangerous animals, "
+                                            "break-in-grade threats. 'pulse' is loud for a "
+                                            "minute then stands down — urgent, not "
+                                            "evacuation. 'chime' dings once — visitors, "
                                             "deliveries, vehicles. 'silent' = notifications "
-                                            "only. Omit to pick by target."},
+                                            "only. Omit to pick by the site's defaults."},
                 },
                 "required": ["name", "target", "camera_id"],
             },
@@ -2310,6 +2344,11 @@ def load_config(path: str | Path) -> AppConfig:
         opennvr_ui_url=_opennvr_ui_url,
         auth_mode=str(raw.get("auth_mode") or "none").strip().lower(),
         agent_public_url=raw.get("agent_public_url"),
+        alarm_ring_defaults=(
+            {str(k).strip().lower(): str(v).strip().lower()
+             for k, v in raw["alarm_ring_defaults"].items()}
+            if isinstance(raw.get("alarm_ring_defaults"), dict) else None
+        ),
         emergency_contacts=(
             dict(raw["emergency_contacts"])
             if isinstance(raw.get("emergency_contacts"), dict) else None
@@ -2599,6 +2638,19 @@ class CameraAgentRuntime:
         _viewer_safe = {"list_apps", "app_status", "recent_app_alerts", "list_people"}
         self.viewer_tool_definitions = base + [
             t for t in control if t["function"]["name"] in _viewer_safe]
+
+    _RING_BUILTIN_DEFAULTS = {"fire": "siren", "smoke": "siren",
+                              "flame": "siren", "gas": "siren"}
+
+    def ring_defaults(self) -> dict[str, str]:
+        """Target→annunciation defaults: built-ins overlaid with the
+        site's config (a farm's snake, a bank's person). Values are
+        sanitized to the four known levels."""
+        merged = dict(self._RING_BUILTIN_DEFAULTS)
+        for k, v in (self.cfg.alarm_ring_defaults or {}).items():
+            if v in ("siren", "pulse", "chime", "silent"):
+                merged[k] = v
+        return merged
 
     def events_feed(self, limit: int = 50) -> list[dict[str, Any]]:
         """ONE feed of what happened — alarm rings, watch hits, and app
@@ -2902,10 +2954,10 @@ class CameraAgentRuntime:
         before_min = _parse_hhmm(args.get("before"))
         contact = self._emergency_contact_for(name, target)
         ring = str(args.get("ring") or "").strip().lower()
-        if ring not in ("siren", "chime", "silent"):
-            # Domain default: life-safety targets latch the siren; a
-            # person/car/package at the gate is a doorbell-style chime.
-            ring = "siren" if target in ("fire", "smoke", "flame", "gas") else "chime"
+        if ring not in ("siren", "pulse", "chime", "silent"):
+            # Site-configurable default (built-ins: fire-grade → siren);
+            # everything unmapped is a doorbell-style chime.
+            ring = self.ring_defaults().get(target, "chime")
         alarm = self.alarms.create(
             name=name, target=target, camera_ids=cams,
             after_min=after_min, before_min=before_min, emergency_contact=contact,
@@ -2916,7 +2968,9 @@ class CameraAgentRuntime:
         window = alarm.window_label()
         when = "" if window == "any time" else f" ({window})"
         extra = f" If it fires I'll flag the emergency contact ({contact})." if contact else ""
-        style = {"siren": "siren until silenced", "chime": "a single chime",
+        style = {"siren": "siren until silenced",
+                 "pulse": "loud for a minute, then stands down",
+                 "chime": "a single chime",
                  "silent": "silent — notifications only"}[alarm.ring]
         return (f"Armed alarm #{alarm.id} '{name}' ({style}) — I'll fire it "
                 f"if I see {target} on {where}{when}.{extra}")
@@ -3972,7 +4026,10 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 "opennvr_ui_url": runtime.cfg.opennvr_ui_url or "",
                 # "none" | "opennvr" — the page shows its login overlay
                 # (and every client must send bearer tokens) when "opennvr".
-                "auth_mode": runtime.cfg.auth_mode}
+                "auth_mode": runtime.cfg.auth_mode,
+                # target→annunciation defaults (site-configurable) — the
+                # alarm forms preselect from this map.
+                "ring_defaults": runtime.ring_defaults()}
 
     @app.get("/skills")
     async def _skills() -> dict[str, Any]:
@@ -4162,6 +4219,11 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             # disarmed alarm left the siren banner up while the panel showed
             # "No alarms armed" (observed: banner stuck the whole session).
             "ringing": any(a["triggered"] and a["active"] for a in alarms),
+            # which sound: a latched CRITICAL siren always wins over URGENT
+            "ringing_kind": ("siren" if any(
+                a["triggered"] and a["active"] and a.get("ring") != "pulse"
+                for a in alarms) else ("pulse" if any(
+                    a["triggered"] and a["active"] for a in alarms) else None)),
         }
 
     @app.post("/alarms")

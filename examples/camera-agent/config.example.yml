@@ -225,3 +225,13 @@ system_prompt: |
 #   - camera_id: front-porch
 #     frame_url: http://192.168.1.50/cgi-bin/snapshot.cgi
 #     opennvr_camera_id: 3
+
+# Per-site alert-level defaults by target (merged over the built-ins:
+# fire/smoke/flame/gas → siren). Levels: siren = CRITICAL, rings until
+# silenced · pulse = URGENT, loud ~1 min then stands down · chime =
+# NOTICE, one ding · silent = log + notifications only. An explicit
+# level chosen on the alarm always wins; this only sets the default.
+# alarm_ring_defaults:
+#   snake: siren          # farm: a snake in the feed is an emergency
+#   person: siren         # bank: any person (pair with after: "18:00")
+#   vehicle: pulse

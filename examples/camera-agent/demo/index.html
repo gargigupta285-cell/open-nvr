@@ -35,6 +35,7 @@
     .wrap { max-width:60rem; margin:0 auto; }
     .alarmbar.chime{background:#b7791f;}
     .alarmbar.chime .ab-btn{display:none;}
+    .alarmbar.pulse{background:#c05621;}
     .alarmbar { display:flex; align-items:center; gap:0.6rem; background:var(--danger); color:#fff;
       padding:0.7rem 0.9rem; border-radius:0.6rem; margin-bottom:1rem; font-weight:700;
       animation:alarmflash 0.9s ease-in-out infinite; }
@@ -390,9 +391,10 @@
               <div class="pop" id="popAlarm">
                 <h4>Alarm on this camera</h4>
                 <input id="paTarget" type="text" placeholder="Alert on, e.g. person / fire" autocomplete="off">
-                <select id="paRing" aria-label="How it announces">
-                  <option value="chime">🔔 Chime once</option>
-                  <option value="siren">🚨 Siren until silenced</option>
+                <select id="paRing" aria-label="Alert level">
+                  <option value="chime">🔔 Notice — single chime</option>
+                  <option value="pulse">⚠️ Urgent — loud 1 min, stands down</option>
+                  <option value="siren">🚨 Critical — siren until silenced</option>
                   <option value="silent">🤫 Silent — notifications only</option>
                 </select>
                 <label class="addform-lbl">Only after <input id="paAfter" type="time"></label>
@@ -424,7 +426,7 @@
 
       <div class="side">
         <div class="card" id="eventsCard">
-          <div class="cardhead"><h2>Events</h2><span class="ev-scope" id="evScope" hidden></span></div>
+          <div class="cardhead"><h2>Events</h2><span class="ev-scope" id="evScope" hidden></span><button class="addbtn" id="evToggle" type="button" title="Collapse / expand" aria-label="Toggle events">▾</button></div>
           <div id="eventsList"><div class="empty-note">Nothing yet — alarm rings, watch hits, and app alerts land here.</div></div>
         </div>
         <div class="card" id="skillsCard">
@@ -446,9 +448,10 @@
           <div class="addform" id="alarmForm" hidden>
             <input id="alarmName" type="text" placeholder="Name, e.g. Porch person" autocomplete="off">
             <input id="alarmTarget" type="text" placeholder="Watch for, e.g. person / car / package" autocomplete="off">
-            <select id="alarmRing" aria-label="How it announces">
-              <option value="chime">🔔 Chime once (visitors, deliveries)</option>
-              <option value="siren">🚨 Siren until silenced (fire, break-in)</option>
+            <select id="alarmRing" aria-label="Alert level">
+              <option value="chime">🔔 Notice — a single chime (visitors, deliveries)</option>
+              <option value="pulse">⚠️ Urgent — loud for a minute, then stands down</option>
+              <option value="siren">🚨 Critical — siren until silenced (fire, break-in)</option>
               <option value="silent">🤫 Silent — notifications only</option>
             </select>
             <label class="addform-lbl">Only after <input id="alarmAfter" type="time"></label>
@@ -623,7 +626,7 @@
     let loudFrames=0, captureStart=0, lastVoice=0, lastActivity=0;
     let vadTimer=null, pollTimer=null, alarmTimer=null, workingTimer=null, introPlayed=false;
     const knownTasks={}, seenNotes={}, seenAlarmEvents={}, seenReports={};
-    let sirenOsc=null, sirenGain=null, sirenInt=null;
+    let sirenOsc=null, sirenGain=null, sirenInt=null, alarmRingKind=null;
     let playbackAnalyser=null, currentSource=null, mouthRAF=null;
 
     // ── audio: output ctx (for siren/chimes) + mic ctx share one AudioContext ──
@@ -663,6 +666,17 @@
       if(sirenInt){clearInterval(sirenInt);sirenInt=null;}
       if(sirenOsc){try{sirenOsc.stop();}catch{}sirenOsc.disconnect();sirenOsc=null;}
       if(sirenGain){sirenGain.disconnect();sirenGain=null;}
+    }
+    // URGENT sounds different from CRITICAL: short beep bursts instead of
+    // the continuous two-tone sweep — attention without evacuation.
+    function startPulse() {
+      ensureOutputAudio();
+      if (sirenOsc || !audioCtx) return;
+      sirenOsc=audioCtx.createOscillator(); sirenGain=audioCtx.createGain(); sirenGain.gain.value=0.0001;
+      sirenOsc.type="sine"; sirenOsc.frequency.value=760;
+      sirenOsc.connect(sirenGain); sirenGain.connect(audioCtx.destination); sirenOsc.start();
+      let on=false; sirenInt=setInterval(()=>{ on=!on;
+        sirenGain.gain.setValueAtTime(on?0.14:0.0001,audioCtx.currentTime); },600);
     }
     function playWav(b64){ return new Promise(r=>{const a=new Audio("data:audio/wav;base64,"+b64); a.onended=r; a.onerror=r; a.play().catch(r);}); }
 
@@ -774,6 +788,7 @@
 
     async function loadAgent(){ try{ const a=await (await fetch("/agent")).json();
       _authMode=a.auth_mode||"none";
+      window._ringDefaults=a.ring_defaults||{};
       // The card greets with the AGENT'S configured name (/agent is an
       // open endpoint precisely so the gate can be personal pre-login).
       if(a.name){ const ln=$("loginAgentLine");
@@ -1027,7 +1042,13 @@
           a.addEventListener("click",(ev)=>{ ev.preventDefault(); _evAllCams=false; renderEventsCard(); }); }
         scope.appendChild(a);
       } else { scope.hidden=true; }
-      renderEvents(el,list.slice(0,15)); }
+      if(sessionStorage.getItem("evCollapsed")==="1"){ el.hidden=true; $("evToggle").textContent="▸";
+        renderEvents(el,[]); return; }
+      el.hidden=false; $("evToggle").textContent="▾";
+      renderEvents(el,list.slice(0,8)); }
+    (function(){ const b=$("evToggle"); if(b) b.addEventListener("click",()=>{
+      const c=sessionStorage.getItem("evCollapsed")==="1";
+      sessionStorage.setItem("evCollapsed",c?"0":"1"); renderEventsCard(); }); })();
     function renderEvents(el,list){ if(!el) return;
       if(!list.length){ el.innerHTML='<div class="empty-note">Nothing yet — alarm rings, watch hits, and app alerts land here.</div>'; return; }
       el.innerHTML="";
@@ -1336,8 +1357,12 @@
         if(e.ring==="chime"){ playChime("bell"); flashChime(e.text); } } }
       const names=(data.alarms||[]).filter(a=>a.triggered).map(a=>a.name);
       if(data.ringing){ alarmRinging=true; alarmbarEl.classList.remove("chime");
+        alarmbarEl.classList.toggle("pulse",data.ringing_kind==="pulse");
         alarmTextEl.textContent=names.length?("Alarm: "+names.join(", ")):"Alarm triggered";
-        alarmbarEl.hidden=false; setAvatar("speaking"); startSiren(); }
+        alarmbarEl.hidden=false; setAvatar("speaking");
+        if(data.ringing_kind==="pulse"&&!sirenOsc) startPulse();
+        else if(data.ringing_kind!=="pulse"){ if(alarmRingKind==="pulse") stopSiren(); startSiren(); }
+        alarmRingKind=data.ringing_kind; }
       else { alarmRinging=false; stopSiren();
         // don't cut a chime flash short — it hides itself after 5s
         if(!alarmbarEl.classList.contains("chime")) alarmbarEl.hidden=true; }
@@ -1348,7 +1373,7 @@
       for(const a of active){ const d=document.createElement("div"); d.className="item"+(a.triggered?" ringing":"");
         d.innerHTML=`<span class="badge">${IC.bell}</span>`; const q=document.createElement("span"); q.className="q";
         const when=a.window==="any time"?"":` · ${a.window}`; const contact=a.emergency_contact_configured?" · ☎":"";
-        const ring=a.ring==="chime"?" · 🔔":(a.ring==="silent"?" · 🤫":"");
+        const ring=a.ring==="chime"?" · 🔔":(a.ring==="silent"?" · 🤫":(a.ring==="pulse"?" · ⚠️":""));
         q.textContent=`${a.name}: ${a.target} on ${a.camera_ids.join(", ")}${when}${contact}${ring}`; d.appendChild(q);
         const s=document.createElement("button"); s.className="stop"; s.title="Disarm"; s.textContent="✕";
         s.addEventListener("click",()=>disarmAlarm(a.id)); d.appendChild(s); alarmListEl.appendChild(d); } }
@@ -1510,13 +1535,17 @@
       if(search) search.addEventListener("input", renderBrowse);
       if(restore) restore.addEventListener("click", restoreSkills); })();
 
-    // Fire-grade targets deserve the siren: flip an UNTOUCHED ring select
-    // when the target says so; a deliberate user choice is never overridden.
+    // The SITE decides its defaults (config alarm_ring_defaults — a farm
+    // maps snake→siren, a bank maps person→siren): an untouched select
+    // follows the map as the target is typed; a deliberate user choice
+    // is never overridden.
     function wireRingPreselect(targetId,ringId){ const t=$(targetId), r=$(ringId);
       if(!t||!r) return;
       r.addEventListener("change",()=>{ r.dataset.touched="1"; });
       t.addEventListener("input",()=>{ if(r.dataset.touched) return;
-        r.value=/\b(fire|smoke|flame|gas)\b/i.test(t.value)?"siren":"chime"; }); }
+        const map=window._ringDefaults||{};
+        const word=(t.value||"").trim().toLowerCase();
+        r.value=map[word]||( /\b(fire|smoke|flame|gas)\b/i.test(t.value)?"siren":"chime"); }); }
     wireRingPreselect("alarmTarget","alarmRing");
     wireRingPreselect("paTarget","paRing");
 
