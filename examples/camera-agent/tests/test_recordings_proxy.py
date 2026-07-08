@@ -108,3 +108,42 @@ def test_config_parses_opennvr_camera_id(tmp_path):
     cfg = load_config(cfg_file)
     assert cfg.cameras[0].opennvr_camera_id == 7
     assert cfg.cameras[1].opennvr_camera_id is None
+
+
+# ── live stream proxy (the laggy-stills fix) ───────────────────────────
+
+
+def test_live_proxy_returns_whep_with_jwt():
+    rt, c = _client()
+
+    async def stream_info(token, oid):
+        rt.recordings.tokens_seen.append(token)
+        assert oid == 7
+        return 200, {"urls": {"webrtc": "http://mtx:8889/cam-7/whep"},
+                     "token": "MMTX", "stream_name": "cam-7",
+                     "expires_in_minutes": 60}
+
+    rt.recordings.stream_info = stream_info
+    r = c.get("/streams/cam1/live", headers={"Authorization": "Bearer USERTOK"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["whep_url"] == "http://mtx:8889/cam-7/whep?jwt=MMTX"
+    assert body["stream_name"] == "cam-7"
+    assert "USERTOK" in rt.recordings.tokens_seen   # caller's token, never the service key
+
+
+def test_live_proxy_states():
+    rt, c = _client()
+    # unlinked camera → labelled 404 (page falls back to stills)
+    r = c.get("/streams/cam2/live", headers={"Authorization": "Bearer T"})
+    assert r.status_code == 404 and r.json()["unlinked"] is True
+    assert c.get("/streams/nope/live",
+                 headers={"Authorization": "Bearer T"}).status_code == 404
+    assert c.get("/streams/cam1/live").status_code == 401
+
+    async def stream_info(token, oid):
+        return 200, {"urls": {}, "token": "T"}    # server missing WebRTC
+
+    rt.recordings.stream_info = stream_info
+    assert c.get("/streams/cam1/live",
+                 headers={"Authorization": "Bearer T"}).status_code == 502

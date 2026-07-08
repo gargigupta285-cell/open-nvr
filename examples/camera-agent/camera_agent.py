@@ -4020,6 +4020,42 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             token, path, start, duration)
         return JSONResponse(data, status_code=status)
 
+    @app.get("/streams/{camera_id}/live")
+    async def _stream_live(camera_id: str, request: Request) -> Any:
+        """Real live video for the camera screen: proxies the main
+        server's stream info with the CALLER's token and returns a
+        ready-to-POST WHEP URL (?jwt= appended — MediaMTX accepts the
+        scoped token as a query param). The agent's snapshot polling
+        stays as the fallback for unlinked cameras — this is what turns
+        'laggy stills' into the same WebRTC the OpenNVR Live view plays."""
+        cam = runtime.context.get_camera(camera_id)
+        if cam is None:
+            return JSONResponse({"error": "unknown camera"}, status_code=404)
+        if runtime.recordings is None or cam.opennvr_camera_id is None:
+            return JSONResponse(
+                {"error": "live video needs opennvr_api_url + this camera's "
+                          "opennvr_camera_id", "unlinked": True},
+                status_code=404)
+        token = _bearer_of(request)
+        if not token:
+            return JSONResponse({"error": "authentication required"},
+                                status_code=401)
+        status, data = await runtime.recordings.stream_info(
+            token, cam.opennvr_camera_id)
+        if status != 200:
+            return JSONResponse(data, status_code=status)
+        whep = ((data.get("urls") or {}).get("webrtc") or "")
+        mmtx_token = data.get("token") or ""
+        if not whep:
+            return JSONResponse({"error": "server returned no WebRTC URL"},
+                                status_code=502)
+        if mmtx_token:
+            whep = f"{whep}{'&' if '?' in whep else '?'}jwt={mmtx_token}"
+        return {"camera_id": camera_id,
+                "whep_url": whep,
+                "stream_name": data.get("stream_name") or "",
+                "expires_in_minutes": data.get("expires_in_minutes")}
+
     @app.get("/demo/camera/{camera_id}", response_class=HTMLResponse)
     async def _demo_camera(camera_id: str) -> HTMLResponse:
         """Deep link into one camera's screen — same demo page; the page

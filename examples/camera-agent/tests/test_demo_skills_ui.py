@@ -275,3 +275,18 @@ def test_ring_defaults_editor_wired(script: str, html: str) -> None:
     assert "window._ringDefaults=d.defaults" in script.replace(" ", ""), (
         "saving must refresh the live preselect map"
     )
+
+
+def test_webrtc_live_player_wired(script: str, html: str) -> None:
+    # The laggy-stream fix: the camera screen plays the SAME WebRTC
+    # (WHEP) stream the OpenNVR Live view does; snapshot polling is the
+    # labelled fallback, and every exit path tears the session down.
+    for fn in ("async function tryWebrtcLive", "function stopWebrtc"):
+        assert fn in script, f"webrtc handler missing: {fn!r}"
+    assert "RTCPeerConnection" in script and '"application/sdp"' in script
+    assert '"/streams/"' in script, "player no longer asks the agent proxy"
+    assert "Live preview — stills every 2" in script, (
+        "the stills fallback lost its honest label"
+    )
+    # review, recorded playback, and leaving the screen all stop the stream
+    assert script.count("stopWebrtc()") >= 4

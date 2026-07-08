@@ -812,7 +812,8 @@ class OpennvrRecordingsClient(_ReusableClientMixin):
     """
 
     def __init__(self, *, base_url: str, timeout_seconds: float = 10.0) -> None:
-        self._base = f"{base_url.rstrip('/')}/api/v1/recordings"
+        self._root = base_url.rstrip("/")
+        self._base = f"{self._root}/api/v1/recordings"
         self._timeout = timeout_seconds
         # server camera id -> (resolved_at_monotonic, mediamtx path)
         self._paths: dict[int, tuple[float, str]] = {}
@@ -860,3 +861,20 @@ class OpennvrRecordingsClient(_ReusableClientMixin):
         return await self._get(token, "/playback/url",
                                {"path": path, "start": start,
                                 "duration": str(duration)})
+
+    async def stream_info(self, token: str, opennvr_camera_id: int) -> tuple[int, dict]:
+        """LIVE stream info from the main server: the WHEP URL + a
+        short-lived camera-scoped MediaMTX token (the same call the
+        OpenNVR Live view makes — that's why ITS streams are smooth)."""
+        try:
+            resp = await self._client().get(
+                f"{self._root}/api/v1/streams/{opennvr_camera_id}/info",
+                headers={"Authorization": f"Bearer {token}"})
+            try:
+                data = resp.json()
+            except Exception:
+                data = {"error": resp.text[:200]}
+            return resp.status_code, data
+        except Exception as exc:
+            logger.warning("streams: info proxy failed: %s", exc)
+            return 502, {"error": "OpenNVR server unreachable"}

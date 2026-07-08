@@ -928,6 +928,7 @@
     // (live tick landing after a scrub, or two scrubs racing).
     let _viewGen=0;
     let _playback=false;   // a recorded segment is in the player
+    let _pc=null, _whepResource=null;   // live WebRTC (WHEP) session
     function openCamScreen(cam,push=true){
       if(window._camScreenCam===cam) return;   // already here — no dup history
       window._camScreenCam=cam; _tl=null;      // stale timeline never drives the new camera
@@ -941,7 +942,7 @@
       const inp=$("askInput"); if(inp) inp.placeholder="Type a question, e.g. how many people on cam1?";
       if(_liveTimer){clearInterval(_liveTimer);_liveTimer=null;}
       if(_stepTimer){clearInterval(_stepTimer);_stepTimer=null;}
-      stopPlayback();
+      stopPlayback(); stopWebrtc();
       $("camScreen").hidden=true; $("mainScreen").hidden=false;
       renderEventsCard();
       if(push) history.pushState({},"","/demo");
@@ -953,7 +954,7 @@
 
     function fmtClock(ts){ const d=new Date(ts*1000);
       return ("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2)+":"+("0"+d.getSeconds()).slice(-2); }
-    async function refreshPlayerLive(){ const cam=window._camScreenCam; if(!cam) return;
+    async function refreshPlayerLive(){ const cam=window._camScreenCam; if(!cam||_pc) return;
       const gen=_viewGen, img=$("camImg"), off=$("camNoFrame");
       try{ const r=await fetch("/frame/"+encodeURIComponent(cam)+"?t="+Date.now());
         if(gen!==_viewGen||cam!==window._camScreenCam) return;   // view moved on
@@ -972,14 +973,61 @@
     function stopPlayback(){ _playback=false; const v=$("camVideo"); if(!v) return;
       try{ v.pause(); }catch{} v.removeAttribute("src"); v.load(); v.hidden=true;
       document.querySelectorAll(".rec-seg.on").forEach(el=>el.classList.remove("on")); }
-    function goLive(){ _revTs=null; _viewGen++; stopPlayback(); setMode("live");
+    function stopWebrtc(){
+      if(_pc){ try{ _pc.close(); }catch{} _pc=null; }
+      if(_whepResource){ fetch(_whepResource,{method:"DELETE"}).catch(()=>{}); _whepResource=null; }
+      const v=$("camVideo"); if(v&&v.srcObject){ v.srcObject=null; } }
+    // The same WebRTC (WHEP) the OpenNVR Live view plays — that's why its
+    // streams are smooth while snapshot polling looks 'laggy/buffering'.
+    // Returns true when the stream is up; false → caller falls back.
+    async function tryWebrtcLive(cam){
+      if(_authMode!=="opennvr") return false;   // needs the user's token
+      window._whepHadUrl=false;
+      let d=null;
+      try{ const r=await fetch("/streams/"+encodeURIComponent(cam)+"/live");
+        if(!r.ok) return false; d=await r.json(); }catch{ return false; }
+      if(!d||!d.whep_url) return false;
+      window._whepHadUrl=true;   // linked + URL granted; failures below are reachability
+      try{
+        const pc=new RTCPeerConnection({iceServers:[{urls:["stun:stun.l.google.com:19302"]}]});
+        _pc=pc;
+        pc.addTransceiver("video",{direction:"recvonly"});
+        pc.addTransceiver("audio",{direction:"recvonly"});
+        const gotTrack=new Promise((res)=>{ pc.ontrack=(ev)=>{ const [stream]=ev.streams;
+          const v=$("camVideo"); if(v&&stream){ v.src=""; v.removeAttribute("src");
+            v.srcObject=stream; v.muted=true; v.controls=false; v.hidden=false;
+            $("camImg").hidden=true; $("camNoFrame").hidden=true;
+            v.play().catch(()=>{}); res(true); } }; });
+        const offer=await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        const resp=await fetch(d.whep_url,{method:"POST",
+          headers:{"Content-Type":"application/sdp"},body:offer.sdp||""});
+        if(!(resp.status===200||resp.status===201)) throw new Error("WHEP "+resp.status);
+        _whepResource=resp.headers.get("Location");
+        await pc.setRemoteDescription({type:"answer",sdp:await resp.text()});
+        // give ICE a moment; if no track arrives, treat as failed
+        const ok=await Promise.race([gotTrack,new Promise(r=>setTimeout(()=>r(false),6000))]);
+        if(!ok) throw new Error("no media");
+        return window._camScreenCam===cam&&_pc===pc;   // user may have left
+      }catch{ stopWebrtc(); return false; } }
+    function goLive(){ _revTs=null; _viewGen++; stopPlayback(); stopWebrtc(); setMode("live");
       // LIVE always plays: a ⏸ from a previous visit (or from review) must
       // not leave a frozen picture under a green LIVE pill.
       _playing=true; const pb=$("camPlay"); if(pb) pb.textContent="⏸";
       if(_stepTimer){clearInterval(_stepTimer);_stepTimer=null;}
       const s=$("camScrub"); if(_tl&&_tl.frames&&_tl.frames.length){ s.value=s.max; }
-      refreshPlayerLive();
-      if(!_liveTimer) _liveTimer=setInterval(()=>{ if(window._camScreenCam&&!_revTs&&!_playback&&_playing) refreshPlayerLive(); },2000); }
+      refreshPlayerLive();   // instant first picture while WHEP negotiates
+      if(!_liveTimer) _liveTimer=setInterval(()=>{ if(window._camScreenCam&&!_revTs&&!_playback&&!_pc&&_playing) refreshPlayerLive(); },2000);
+      const cam=window._camScreenCam;
+      if(cam) tryWebrtcLive(cam).then((ok)=>{
+        if(window._camScreenCam!==cam||_revTs||_playback) return;
+        $("camTnote").textContent = ok
+          ? "Live · real-time stream · marks = detections · drag to review"
+          : "Live preview — stills every 2 s"+(window._whepHadUrl
+             ? " (camera stream unreachable right now)"
+             : (_authMode==="opennvr"
+                ? " (link this camera to OpenNVR for full-motion video)"
+                : " (sign in with auth_mode: opennvr for full-motion video)")); }); }
     async function loadTimeline(cam){
       let tl=null;
       try{ tl=await (await fetch("/timeline/"+encodeURIComponent(cam))).json(); }catch{ tl=null; }
@@ -999,7 +1047,7 @@
           s.value=best; reviewAt(best); });
         marks.appendChild(mk); } }
     async function reviewAt(idx){ if(!_tl||!_tl.frames[idx]) return;
-      _revTs=_tl.frames[idx]; _viewGen++; stopPlayback(); const gen=_viewGen; setMode("review");
+      _revTs=_tl.frames[idx]; _viewGen++; stopPlayback(); stopWebrtc(); const gen=_viewGen; setMode("review");
       const ts=_revTs, img=$("camImg"), off=$("camNoFrame");
       try{ const r=await fetch("/frame/"+encodeURIComponent(window._camScreenCam)+"?at="+encodeURIComponent(ts));
         if(gen!==_viewGen) return;                               // a newer scrub/live won
@@ -1019,7 +1067,7 @@
         if(!_playing&&_stepTimer){ clearInterval(_stepTimer); _stepTimer=null; } });
       const player=$("camPlayer");
       if(player) player.addEventListener("click",(e)=>{ if(e.target.closest(".modepill,.ovl")) return;
-        if(!$("camVideo").hidden) return;   // playback has its own controls
+        if(_playback) return;               // recorded playback has its own controls
         const cam=window._camScreenCam; if(!cam) return;
         pinFrame(cam,_revTs||undefined); }); })();
 
@@ -1131,11 +1179,11 @@
           encodeURIComponent(seg.start)+"&duration="+encodeURIComponent(seg.duration||60));
         const d=await r.json().catch(()=>({}));
         if(!r.ok||!d.url){ addMsg("Couldn't get a playback URL: "+(d.error||("HTTP "+r.status)),"sys"); return; }
-        _revTs=null; _viewGen++; _playback=true;   // leave live/review cleanly
+        _revTs=null; _viewGen++; stopWebrtc(); _playback=true;   // leave live/review cleanly
         if(_stepTimer){clearInterval(_stepTimer);_stepTimer=null;}
         const img=$("camImg"), off=$("camNoFrame"), v=$("camVideo");
         img.hidden=true; off.hidden=true;
-        v.src=d.url; v.hidden=false;
+        v.srcObject=null; v.controls=true; v.src=d.url; v.hidden=false;
         // Autoplay: the click gesture is gone after the fetch, so an
         // unmuted play() may be blocked — fall back to muted (controls
         // let the user unmute), never to a frozen first frame.
