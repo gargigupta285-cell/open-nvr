@@ -144,14 +144,14 @@
     /* NOTE: a display: rule beats the hidden attribute, so [hidden] must
        win explicitly or flex containers leak open on load. */
     [hidden]{display:none !important;}
-    .camlbl{font-size:.7rem;color:var(--text-dim);margin:.2rem 0 .1rem;}
+    .camlbl{font-size:.7rem;color:var(--muted);margin:.2rem 0 .1rem;}
     /* per-camera screen (in-page navigation; URL = /demo/camera/{id}) */
     .ctop{display:flex;align-items:center;gap:.6rem;margin-bottom:.5rem;}
     .ctitle{font-size:1rem;font-weight:600;}
-    .csub{font-size:.72rem;color:var(--text-dim);}
+    .csub{font-size:.72rem;color:var(--muted);}
     .ctop .recl{margin-left:auto;text-decoration:none;display:inline-flex;align-items:center;font-size:.75rem;}
     .player{position:relative;border-radius:10px;overflow:hidden;border:1px solid var(--border);
-      background:var(--bg-2);cursor:pointer;min-height:120px;}
+      background:var(--panel2);cursor:pointer;min-height:120px;}
     .player img{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;}
     .player .ovl{position:absolute;top:7px;left:8px;font-size:.72rem;color:#fff;
       background:rgba(0,0,0,.55);padding:2px 7px;border-radius:6px;font-variant-numeric:tabular-nums;}
@@ -161,27 +161,27 @@
     .modepill.review .mdot{background:#f6c453;}
     .player.review::after{content:"";position:absolute;inset:0;background:rgba(246,196,83,.06);pointer-events:none;}
     .transport{display:flex;align-items:center;gap:.5rem;margin-top:.45rem;}
-    .pbtn{background:var(--bg-2);border:1px solid var(--border);color:var(--text);border-radius:7px;
+    .pbtn{background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:7px;
       width:30px;height:28px;cursor:pointer;font-size:.75rem;}
-    .pbtn:hover{border-color:var(--accent,var(--text-dim));}
+    .pbtn:hover{border-color:var(--accent,var(--muted));}
     .track{position:relative;flex:1;height:28px;display:flex;align-items:center;}
     .track input{width:100%;accent-color:var(--accent,#4fd1c5);}
     .track .mk{position:absolute;top:4px;width:8px;height:8px;border-radius:50%;background:#f6c453;
-      transform:translateX(-50%);cursor:pointer;border:1px solid var(--bg-1);}
+      transform:translateX(-50%);cursor:pointer;border:1px solid var(--panel);}
     .livebtn{background:var(--danger,#e53e3e);color:#fff;border:none;border-radius:7px;
       padding:0 10px;height:28px;font-size:.7rem;cursor:pointer;font-weight:700;}
-    .livebtn.on{background:var(--bg-2);color:var(--text-dim);border:1px solid var(--border);font-weight:400;}
-    .tnote{font-size:.66rem;color:var(--text-dim);margin-top:.2rem;}
+    .livebtn.on{background:var(--panel2);color:var(--muted);border:1px solid var(--border);font-weight:400;}
+    .tnote{font-size:.66rem;color:var(--muted);margin-top:.2rem;}
     .acts{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.55rem;position:relative;}
     .apill{background:transparent;border:1px solid var(--border);color:var(--text);border-radius:999px;
       padding:.35rem .75rem;font-size:.75rem;cursor:pointer;}
-    .apill:hover{border-color:var(--accent,var(--text-dim));color:var(--accent,var(--text));}
+    .apill:hover{border-color:var(--accent,var(--muted));color:var(--accent,var(--text));}
     .apill.talk2{background:var(--accent,#4fd1c5);color:#062321;border-color:var(--accent,#4fd1c5);font-weight:700;}
-    .pop{position:absolute;top:38px;left:0;z-index:20;background:var(--bg-1);border:1px solid var(--border);
+    .pop{position:absolute;top:38px;left:0;z-index:20;background:var(--panel2);border:1px solid var(--border);
       border-radius:9px;padding:.6rem;width:250px;box-shadow:0 8px 22px rgba(0,0,0,.5);display:none;}
     .pop.show{display:block;}
     .pop h4{margin:0 0 .4rem;font-size:.78rem;font-weight:600;}
-    .pop input,.pop select{width:100%;background:var(--bg-2);color:var(--text);border:1px solid var(--border);
+    .pop input,.pop select{width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--border);
       border-radius:6px;padding:.35rem .5rem;font-size:.75rem;margin-bottom:.35rem;}
     .pop .go{background:var(--accent,#4fd1c5);color:#062321;border:none;font-weight:700;border-radius:6px;
       padding:.4rem .6rem;font-size:.75rem;cursor:pointer;width:100%;}
@@ -802,6 +802,9 @@
     // camera-screen actions: talk/ask scoped by cameraParam(); quick popovers.
     function closePops(){ document.querySelectorAll(".pop").forEach(p=>p.classList.remove("show")); }
     function togglePop(id){ const el=$(id.slice(1)); const show=!el.classList.contains("show"); closePops(); if(show) el.classList.add("show"); }
+    // Click anywhere outside the actions row closes an open popover —
+    // an armed transparent-looking leftover popover was a reported bug.
+    document.addEventListener("click",(e)=>{ if(!e.target.closest(".acts")) closePops(); });
     async function loadCamScoped(cam){
       const el=$("camScoped"); const bits=[];
       try{ const d=await (await fetch("/monitors")).json();

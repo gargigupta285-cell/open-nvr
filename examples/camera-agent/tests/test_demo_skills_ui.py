@@ -180,3 +180,14 @@ def test_camera_strip_peek_and_camera_screen_wired(script: str, html: str) -> No
     )
     # scoping: on a camera screen every ask/talk goes to that camera
     assert "_camScreenCam" in script and "function cameraParam" in script
+
+
+def test_all_css_variables_are_defined(html: str) -> None:
+    # The camera-screen popover shipped transparent because its CSS used
+    # the MAIN app's token names (--bg-1/--text-dim), which this page
+    # never defines — var() then resolves to nothing. Guard: every
+    # var(--x) used without a fallback must be defined in :root.
+    defined = set(re.findall(r"(--[a-z0-9-]+)\s*:", html))
+    used_no_fallback = set(re.findall(r"var\((--[a-z0-9-]+)\)", html))
+    missing = sorted(used_no_fallback - defined)
+    assert not missing, f"CSS variables used but never defined: {missing}"
