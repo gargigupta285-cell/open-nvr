@@ -172,6 +172,8 @@
       padding:0 10px;height:28px;font-size:.7rem;cursor:pointer;font-weight:700;}
     .livebtn.on{background:var(--panel2);color:var(--muted);border:1px solid var(--border);font-weight:400;}
     .tnote{font-size:.66rem;color:var(--muted);margin-top:.2rem;}
+    .askrow input{transition:box-shadow .18s ease,border-color .18s ease;}
+    .askrow.pulse input{border-color:var(--accent);box-shadow:0 0 0 3px rgba(94,179,246,.28);}
     .acts{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.55rem;position:relative;}
     .apill{background:transparent;border:1px solid var(--border);color:var(--text);border-radius:999px;
       padding:.35rem .75rem;font-size:.75rem;cursor:pointer;}
@@ -723,6 +725,7 @@
       addMsg("Focused on "+cam+" — talk or type, everything is scoped to this camera. ‹ Back returns to all cameras.","sys"); }
     function closeCamScreen(push=true){
       window._camScreenCam=null;
+      const inp=$("askInput"); if(inp) inp.placeholder="Type a question, e.g. how many people on cam1?";
       if(_liveTimer){clearInterval(_liveTimer);_liveTimer=null;}
       if(_stepTimer){clearInterval(_stepTimer);_stepTimer=null;}
       $("camScreen").hidden=true; $("mainScreen").hidden=false;
@@ -818,7 +821,15 @@
       el.textContent=bits.join("  ·  "); }
     (function(){
       const t=$("camTalk"); if(t) t.addEventListener("click",()=>{ closePops(); const tb=$("talk"); if(tb) tb.click(); });
-      const a=$("camAsk"); if(a) a.addEventListener("click",()=>{ closePops(); $("askInput").focus(); });
+      const a=$("camAsk"); if(a) a.addEventListener("click",()=>{ closePops();
+        // Ask has no dialog of its own — it hands you to the type box.
+        // Make that VISIBLE (scoped placeholder + a brief pulse) so the
+        // pill never reads as a dead button.
+        const inp=$("askInput"), row=inp.closest(".askrow");
+        inp.placeholder="Ask about "+(window._camScreenCam||"this camera")+" — e.g. what do you see right now?";
+        inp.scrollIntoView({block:"center",behavior:"smooth"}); inp.focus();
+        if(row){ row.classList.remove("pulse"); void row.offsetWidth; row.classList.add("pulse");
+          setTimeout(()=>row.classList.remove("pulse"),1400); } });
       const w=$("camWatch"); if(w) w.addEventListener("click",()=>togglePop("#popWatch"));
       const al=$("camAlarm"); if(al) al.addEventListener("click",()=>togglePop("#popAlarm"));
       const wg=$("pwGo"); if(wg) wg.addEventListener("click",async()=>{
