@@ -709,3 +709,88 @@ class PiperClient(_ReusableClientMixin):
             "or read failures"
         )
         return b""
+
+
+class OpennvrAuthClient(_ReusableClientMixin):
+    """The agent's auth delegation to the main OpenNVR server — the agent
+    never mints or stores credentials of its own (no second user table,
+    revocation and MFA stay the server's job, and a future Android app
+    speaks the exact same bearer contract).
+
+    Three calls against ``{base}/api/v1/auth``:
+
+    * :meth:`login`   → ``POST /login-json`` (username/password [+ TOTP]) —
+      passthrough of the server's token pair, so the demo page and any
+      mobile client get access **and refresh** tokens from one origin.
+    * :meth:`refresh` → ``POST /refresh`` — new pair from a refresh token.
+    * :meth:`me`      → ``GET /me`` with the presented bearer token —
+      the validation path, cached per token for ``ttl_seconds`` so a
+      page full of polling widgets costs ~one upstream call a minute,
+      not one per request. 401 → None (cached briefly too, so a bad
+      token can't hammer the server through the agent).
+    """
+
+    def __init__(self, *, base_url: str, ttl_seconds: float = 60.0,
+                 timeout_seconds: float = 5.0) -> None:
+        self._base = f"{base_url.rstrip('/')}/api/v1/auth"
+        self._ttl = ttl_seconds
+        self._timeout = timeout_seconds
+        # token -> (checked_at_monotonic, user_payload_or_None)
+        self._cache: dict[str, tuple[float, dict | None]] = {}
+        self._cache_max = 256   # bound: distinct tokens seen per TTL window
+
+    async def login(self, username: str, password: str,
+                    totp_code: str | None = None) -> tuple[int, dict]:
+        """Proxy a login. Returns (status_code, response_json) verbatim —
+        the caller relays both, so setup-required / MFA / bad-credential
+        semantics stay exactly the server's."""
+        body: dict = {"username": username, "password": password}
+        if totp_code:
+            body["totp_code"] = totp_code
+        try:
+            resp = await self._client().post(f"{self._base}/login-json", json=body)
+            try:
+                data = resp.json()
+            except Exception:
+                data = {"detail": resp.text[:200]}
+            return resp.status_code, data
+        except Exception as exc:
+            logger.warning("auth: login proxy failed: %s", exc)
+            return 502, {"detail": "OpenNVR server unreachable"}
+
+    async def refresh(self, refresh_token: str) -> tuple[int, dict]:
+        try:
+            resp = await self._client().post(
+                f"{self._base}/refresh", json={"refresh_token": refresh_token})
+            try:
+                data = resp.json()
+            except Exception:
+                data = {"detail": resp.text[:200]}
+            return resp.status_code, data
+        except Exception as exc:
+            logger.warning("auth: refresh proxy failed: %s", exc)
+            return 502, {"detail": "OpenNVR server unreachable"}
+
+    async def me(self, token: str) -> dict | None:
+        """Validate a bearer token → the server's user payload, or None.
+        Cached per token (positive AND negative) for the TTL."""
+        now = time.monotonic()
+        hit = self._cache.get(token)
+        if hit is not None and now - hit[0] < self._ttl:
+            return hit[1]
+        user: dict | None = None
+        try:
+            resp = await self._client().get(
+                f"{self._base}/me",
+                headers={"Authorization": f"Bearer {token}"})
+            if resp.status_code == 200:
+                user = resp.json()
+        except Exception as exc:
+            logger.warning("auth: /me validation failed: %s", exc)
+            # Unreachable server → treat as invalid but DON'T cache long:
+            # drop through with user=None; the short negative cache below
+            # limits retry pressure while letting recovery be quick.
+        if len(self._cache) >= self._cache_max:
+            self._cache.clear()   # crude but bounded; refills within a TTL
+        self._cache[token] = (now, user)
+        return user

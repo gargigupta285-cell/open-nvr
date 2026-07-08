@@ -144,6 +144,15 @@
     /* NOTE: a display: rule beats the hidden attribute, so [hidden] must
        win explicitly or flex containers leak open on load. */
     [hidden]{display:none !important;}
+    #loginOverlay{position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:100;
+      display:flex;align-items:center;justify-content:center;padding:1rem;}
+    .login-card{background:var(--panel);border:1px solid var(--border);border-radius:12px;
+      width:min(340px,94vw);padding:1.1rem;display:flex;flex-direction:column;gap:.5rem;}
+    .login-card h2{margin:0;font-size:1rem;}
+    .login-card input{background:var(--panel2);color:var(--text);border:1px solid var(--border);
+      border-radius:7px;padding:.5rem .6rem;font-size:.85rem;}
+    .login-card input:focus{outline:none;border-color:var(--accent);}
+    .login-err{color:#f87171;font-size:.75rem;}
     .camlbl{font-size:.7rem;color:var(--muted);margin:.2rem 0 .1rem;}
     /* per-camera screen (in-page navigation; URL = /demo/camera/{id}) */
     .ctop{display:flex;align-items:center;gap:.6rem;margin-bottom:.5rem;}
@@ -411,8 +420,82 @@
     </div>
   </div>
 
+  <!-- Login overlay (auth_mode="opennvr"): the agent proxies OpenNVR's
+       login, so tokens are the server's own — one origin, mobile-same
+       bearer contract, revocation/MFA stay the server's job. -->
+  <div id="loginOverlay" hidden>
+    <div class="login-card">
+      <h2>Sign in to OpenNVR</h2>
+      <div class="empty-note">This agent uses your OpenNVR account.</div>
+      <input id="loginUser" type="text" placeholder="Username" autocomplete="username">
+      <input id="loginPass" type="password" placeholder="Password" autocomplete="current-password">
+      <input id="loginTotp" type="text" inputmode="numeric" placeholder="MFA code (if enabled)" autocomplete="one-time-code">
+      <div id="loginErr" class="login-err" hidden></div>
+      <button class="ghost primary" id="loginGo" type="button">Sign in</button>
+    </div>
+  </div>
+
   <script>
     const $ = (id) => document.getElementById(id);
+
+    // ── auth: bearer-token plumbing (auth_mode="opennvr") ───────────
+    // One fetch wrapper instead of touching ~40 call sites: attaches the
+    // token to every same-origin request, and on a 401 tries ONE silent
+    // refresh before raising the login overlay. Tokens live in
+    // sessionStorage — survives reload, dies with the tab.
+    let _authMode="none";
+    let _token=sessionStorage.getItem("agent_token")||"";
+    let _refreshTok=sessionStorage.getItem("agent_refresh")||"";
+    const _rawFetch=window.fetch.bind(window);
+    let _refreshing=null;
+    async function _tryRefresh(){
+      if(!_refreshTok) return false;
+      if(_refreshing) return _refreshing;   // collapse concurrent 401s
+      _refreshing=(async()=>{
+        try{ const r=await _rawFetch("/auth/refresh",{method:"POST",
+            headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({refresh_token:_refreshTok})});
+          if(!r.ok) return false;
+          const d=await r.json();
+          if(!d.access_token) return false;
+          _token=d.access_token; sessionStorage.setItem("agent_token",_token);
+          if(d.refresh_token){ _refreshTok=d.refresh_token; sessionStorage.setItem("agent_refresh",_refreshTok); }
+          return true;
+        }catch{ return false; } finally{ setTimeout(()=>{_refreshing=null;},0); }
+      })();
+      return _refreshing;
+    }
+    window.fetch=async function(url,opts={}){
+      const local=typeof url==="string"&&url.startsWith("/")&&!url.startsWith("/auth/");
+      const send=()=>{ const o={...opts};
+        if(local&&_token) o.headers={...(o.headers||{}),"Authorization":"Bearer "+_token};
+        return _rawFetch(url,o); };
+      let r=await send();
+      if(r.status===401&&local&&_authMode==="opennvr"){
+        if(await _tryRefresh()) r=await send();
+        if(r.status===401) showLogin();
+      }
+      return r;
+    };
+    function showLogin(){ const ov=$("loginOverlay"); if(ov&&ov.hidden){ ov.hidden=false; const u=$("loginUser"); if(u) u.focus(); } }
+    (function(){ const go=$("loginGo");
+      async function doLogin(){
+        const err=$("loginErr"); err.hidden=true;
+        const body={username:$("loginUser").value.trim(),password:$("loginPass").value};
+        const totp=$("loginTotp").value.trim(); if(totp) body.totp_code=totp;
+        if(!body.username||!body.password){ err.textContent="Username and password are required."; err.hidden=false; return; }
+        try{ const r=await _rawFetch("/auth/login",{method:"POST",
+            headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+          const d=await r.json().catch(()=>({}));
+          if(!r.ok||!d.access_token){ err.textContent=d.detail||d.error||("Sign-in failed (HTTP "+r.status+")"); err.hidden=false; return; }
+          sessionStorage.setItem("agent_token",d.access_token);
+          if(d.refresh_token) sessionStorage.setItem("agent_refresh",d.refresh_token);
+          location.reload();   // clean re-boot with the token attached
+        }catch(e2){ err.textContent="Sign-in failed: "+e2.message; err.hidden=false; }
+      }
+      if(go) go.addEventListener("click",doLogin);
+      for(const id of ["loginUser","loginPass","loginTotp"]){ const el=$(id);
+        if(el) el.addEventListener("keydown",e=>{ if(e.key==="Enter") doLogin(); }); } })();
     const talkBtn=$("talk"), resetBtn=$("reset"), statusEl=$("status"), logEl=$("log");
     const camboxEl=$("cambox"), ramEl=$("ram"), workingEl=$("working");
     const alarmbarEl=$("alarmbar"), alarmTextEl=$("alarmText"), silenceBtn=$("silence");
@@ -591,6 +674,8 @@
       workingEl.hidden=false; workingTimer=setTimeout(()=>{workingEl.hidden=true;},6000); }
 
     async function loadAgent(){ try{ const a=await (await fetch("/agent")).json();
+      _authMode=a.auth_mode||"none";
+      if(_authMode==="opennvr"&&!_token) showLogin();
       window._opennvrUi=a.opennvr_ui_url||"";            // deep-link base for recordings
       if(a.avatar_video===false) disableAvatarVideo();   // operator turned the video avatar off
       if(a.text_mode){

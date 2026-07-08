@@ -114,6 +114,14 @@ class User(Base):
 
     # Relationships
     role = relationship("Role", back_populates="users")
+
+    @property
+    def role_name(self) -> str | None:
+        """The role's name, for API responses (clients — e.g. the camera
+        agent's auth delegation — map permission tiers by NAME; the raw
+        role_id would force every client to also read the roles table,
+        which is superuser-only)."""
+        return self.role.name if self.role is not None else None
     cameras = relationship("Camera", back_populates="owner")
     recordings = relationship("Recording", back_populates="created_by")
     cloud_credentials = relationship("CloudProviderCredential", back_populates="user")

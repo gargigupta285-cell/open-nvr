@@ -487,6 +487,9 @@ class UserResponse(UserBase):
     email: str
     id: int
     role_id: int
+    # Role NAME alongside the id: permission-tier mapping by name, without
+    # needing the (superuser-only) roles endpoints. Additive.
+    role_name: str | None = None
     is_superuser: bool
     password_set: bool
     mfa_enabled: bool

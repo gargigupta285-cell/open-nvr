@@ -191,3 +191,16 @@ def test_all_css_variables_are_defined(html: str) -> None:
     used_no_fallback = set(re.findall(r"var\((--[a-z0-9-]+)\)", html))
     missing = sorted(used_no_fallback - defined)
     assert not missing, f"CSS variables used but never defined: {missing}"
+
+
+def test_auth_login_overlay_wired(script: str, html: str) -> None:
+    # auth_mode="opennvr": one fetch wrapper attaches the bearer token to
+    # every same-origin call, tries ONE silent refresh on a 401, then
+    # raises the login overlay (which proxies OpenNVR's login).
+    for eid in ("loginOverlay", "loginUser", "loginPass", "loginTotp",
+                "loginErr", "loginGo"):
+        assert f'id="{eid}"' in html, f"login element missing: {eid!r}"
+    assert "window.fetch=" in script.replace(" ", ""), "fetch wrapper missing"
+    assert '"/auth/login"' in script and '"/auth/refresh"' in script
+    assert "function showLogin" in script
+    assert "sessionStorage" in script, "tokens must survive reload (mobile-parity contract)"

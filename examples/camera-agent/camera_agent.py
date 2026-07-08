@@ -54,6 +54,7 @@ from adapter_clients import (
     KaicCapabilitiesClient,
     OllamaClient,
     OpenAILLMClient,
+    OpennvrAuthClient,
     PiperClient,
     SyntheticDetectionClient,
     WhisperClient,
@@ -189,6 +190,16 @@ class AppConfig:
     # here — it never enables / disables / configures an app (that stays an
     # operator action; the agent guides). Unset → no app skills, cleanly.
     opennvr_api_url: str | None = None
+
+    # Authentication for the agent's own HTTP surface. "none" (default) =
+    # today's open loopback demo. "opennvr" = every non-page endpoint
+    # requires an OpenNVR-issued bearer token, validated against
+    # {opennvr_api_url}/api/v1/auth/me and mapped to tiers by role NAME:
+    # superuser/admin -> admin, operator -> operator, else viewer. The
+    # agent never mints tokens of its own — the login endpoints are thin
+    # proxies, so revocation/MFA stay the server's job and a mobile app
+    # speaks the identical bearer contract. See AGENT_DESIGN.md.
+    auth_mode: str = "none"
 
     # Optional base URL of the main OpenNVR UI (e.g. "https://nvr.example"),
     # used only to build a deep link into the AI Adapters view when a skill is
@@ -2118,6 +2129,12 @@ def load_config(path: str | Path) -> AppConfig:
     for required in ("kaic_url", "kaic_api_key"):
         if not raw.get(required):
             raise SystemExit(f"config: {required} is required")
+    _auth_mode = str(raw.get("auth_mode") or "none").strip().lower()
+    if _auth_mode not in ("none", "opennvr"):
+        raise SystemExit("config: auth_mode must be 'none' or 'opennvr'")
+    if _auth_mode == "opennvr" and not (raw.get("opennvr_api_url") or raw.get("opennvr_base_url")):
+        raise SystemExit("config: auth_mode 'opennvr' requires opennvr_api_url "
+                         "(the server that validates tokens)")
 
     cameras_raw = raw.get("cameras") or []
     cameras: list[CameraSpec] = []
@@ -2244,6 +2261,7 @@ def load_config(path: str | Path) -> AppConfig:
         opennvr_api_key=raw.get("opennvr_api_key"),
         opennvr_api_url=_opennvr_api_url,
         opennvr_ui_url=_opennvr_ui_url,
+        auth_mode=str(raw.get("auth_mode") or "none").strip().lower(),
         emergency_contacts=(
             dict(raw["emergency_contacts"])
             if isinstance(raw.get("emergency_contacts"), dict) else None
@@ -2473,6 +2491,11 @@ class CameraAgentRuntime:
         self.faces = FaceClient(url=cfg.faces_url, token=cfg.faces_token) if cfg.faces_url else None
         self.notifier = Notifier(self, webhooks=cfg.notify_webhooks, events=cfg.notify_events,
                                  apprise_urls=cfg.notify_apprise)
+        # Auth delegation to the main OpenNVR server (auth_mode="opennvr").
+        # Constructed whenever the server URL is known so tests can exercise
+        # it; only the middleware consults auth_mode.
+        self.auth = (OpennvrAuthClient(base_url=cfg.opennvr_api_url)
+                     if cfg.opennvr_api_url else None)
         self.tasks = TaskManager(self)
         self.monitors = MonitorManager(self)
         self.alarms = AlarmManager(self)
@@ -2518,6 +2541,19 @@ class CameraAgentRuntime:
         ) if keep(t)]
         self.background_tool_definitions = base
         self.tool_definitions = base + control
+        # Viewer tier: look but not touch — read tools plus the READ-ONLY
+        # control verbs (app door + face listing); every mutating verb
+        # (arm alarms, create watches/tasks/reports, enroll/forget faces)
+        # is operator+. Enforced at the TOOLSET so a viewer's chat can't
+        # talk the agent into arming anything.
+        _viewer_safe = {"list_apps", "app_status", "recent_app_alerts", "list_people"}
+        self.viewer_tool_definitions = base + [
+            t for t in control if t["function"]["name"] in _viewer_safe]
+
+    def tools_for_tier(self, tier: str) -> list[dict[str, Any]]:
+        """The toolset a caller of this permission tier may drive."""
+        return (self.viewer_tool_definitions if tier == "viewer"
+                else self.tool_definitions)
 
     # ── skills: capabilities the agent carries (toggle → reconfigure) ──
     def skill_requirement_met(self, req: str) -> bool:
@@ -3357,6 +3393,8 @@ class CameraAgentRuntime:
         ]
         if self.faces:
             closers.append(self.faces.aclose())
+        if self.auth:
+            closers.append(self.auth.aclose())
         if self.app_registry:
             closers.append(self.app_registry.aclose())
         await asyncio.gather(*closers, return_exceptions=True)
@@ -3574,6 +3612,95 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
     async def _shutdown() -> None:
         await runtime.shutdown()
 
+    # ── Auth gate (auth_mode="opennvr") ────────────────────────────
+    # One HTTP middleware instead of per-route dependencies: a single
+    # place to read, and no signature churn across ~40 endpoints. Tier
+    # ranks: viewer < operator < admin. The PAGE SHELL stays open (it
+    # renders the login overlay); every data/action endpoint is gated.
+    _TIER_RANK = {"viewer": 0, "operator": 1, "admin": 2}
+    _OPEN_PATHS = {"/health", "/auth/login", "/auth/refresh", "/agent"}
+
+    def _user_tier(user: dict[str, Any]) -> str:
+        if user.get("is_superuser"):
+            return "admin"
+        role = str(user.get("role_name") or "").lower()
+        if role == "admin":
+            return "admin"
+        if role == "operator":
+            return "operator"
+        return "viewer"
+
+    def _required_tier(method: str, path: str) -> str:
+        if method == "POST" and (path.startswith("/skills/")
+                                 or path == "/notify/test"):
+            return "admin"          # governance surface
+        if method in ("POST", "DELETE") and (
+            path.startswith(("/monitors", "/alarms", "/tasks", "/reports"))
+            or path in ("/devices/use", "/reset")
+        ):
+            return "operator"       # arm/create/ack/remove verbs
+        return "viewer"             # look + chat (/ask, /converse, /say, GETs)
+
+    @app.middleware("http")
+    async def _auth_gate(request: Request, call_next):
+        if runtime.cfg.auth_mode != "opennvr":
+            return await call_next(request)
+        path = request.url.path
+        if path in _OPEN_PATHS or path == "/demo" or path.startswith("/demo/"):
+            return await call_next(request)
+        authz = request.headers.get("authorization", "")
+        token = authz[7:].strip() if authz.lower().startswith("bearer ") else ""
+        user = await runtime.auth.me(token) if (token and runtime.auth) else None
+        if user is None:
+            return JSONResponse({"error": "authentication required"},
+                                status_code=401)
+        tier = _user_tier(user)
+        need = _required_tier(request.method, path)
+        if _TIER_RANK[tier] < _TIER_RANK[need]:
+            return JSONResponse(
+                {"error": f"requires the {need} role (you are {tier})"},
+                status_code=403)
+        request.state.agent_user = user
+        request.state.agent_tier = tier
+        return await call_next(request)
+
+    @app.post("/auth/login")
+    async def _auth_login(request: Request) -> JSONResponse:
+        """Thin proxy to OpenNVR's /api/v1/auth/login-json — ONE origin
+        for the page and future mobile app; status + body pass through
+        verbatim so MFA / setup-required semantics stay the server's."""
+        if runtime.cfg.auth_mode != "opennvr" or runtime.auth is None:
+            return JSONResponse({"error": "auth is not enabled on this agent"},
+                                status_code=404)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        username = str((body or {}).get("username") or "")
+        password = str((body or {}).get("password") or "")
+        if not username or not password:
+            return JSONResponse({"error": "username and password are required"},
+                                status_code=400)
+        status, data = await runtime.auth.login(
+            username, password, totp_code=(body or {}).get("totp_code"))
+        return JSONResponse(data, status_code=status)
+
+    @app.post("/auth/refresh")
+    async def _auth_refresh(request: Request) -> JSONResponse:
+        if runtime.cfg.auth_mode != "opennvr" or runtime.auth is None:
+            return JSONResponse({"error": "auth is not enabled on this agent"},
+                                status_code=404)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        rt_token = str((body or {}).get("refresh_token") or "")
+        if not rt_token:
+            return JSONResponse({"error": "refresh_token is required"},
+                                status_code=400)
+        status, data = await runtime.auth.refresh(rt_token)
+        return JSONResponse(data, status_code=status)
+
     @app.get("/health")
     async def _health() -> dict[str, Any]:
         return {
@@ -3688,7 +3815,10 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 "avatar_video": runtime.cfg.avatar_video,
                 # Deep-link base for the main OpenNVR UI (recordings /
                 # playback live there, not in this agent). "" = unset.
-                "opennvr_ui_url": runtime.cfg.opennvr_ui_url or ""}
+                "opennvr_ui_url": runtime.cfg.opennvr_ui_url or "",
+                # "none" | "opennvr" — the page shows its login overlay
+                # (and every client must send bearer tokens) when "opennvr".
+                "auth_mode": runtime.cfg.auth_mode}
 
     @app.get("/skills")
     async def _skills() -> dict[str, Any]:
@@ -4030,7 +4160,9 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             pin_token = runtime.context.pin_frame(camera_hint, pinned_jpeg)
         try:
             reply = await _run_conversation_turn(
-                runtime, demo_history, text, preferred_camera=camera_hint
+                runtime, demo_history, text, preferred_camera=camera_hint,
+                tool_definitions=runtime.tools_for_tier(
+                    getattr(request.state, "agent_tier", "admin")),
             )
             # Capture "what I saw" while the pin is still visible — a
             # racing thumbnail fetch may have overwritten the cache seed,
@@ -4161,7 +4293,9 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             runtime.context.invalidate_frame_cache()
             try:
                 reply = await _run_conversation_turn(
-                    runtime, demo_history, question, preferred_camera=camera_hint
+                    runtime, demo_history, question, preferred_camera=camera_hint,
+                    tool_definitions=runtime.tools_for_tier(
+                        getattr(request.state, "agent_tier", "admin")),
                 )
             except Exception:
                 logger.exception("converse: LLM turn failed")
@@ -4198,6 +4332,15 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         # The ``websocket: WebSocket`` annotation is REQUIRED — without it
         # FastAPI treats ``websocket`` as a query parameter and rejects the
         # handshake with 403 Forbidden before this handler runs.
+        # WebSockets bypass the HTTP auth middleware, so the streaming
+        # voice channel checks its own token (?token=<bearer>) — same
+        # OpenNVR-issued token, viewer tier suffices (voice = chat).
+        if runtime.cfg.auth_mode == "opennvr":
+            _tok = websocket.query_params.get("token", "")
+            _user = await runtime.auth.me(_tok) if (_tok and runtime.auth) else None
+            if _user is None:
+                await websocket.close(code=4401)   # 4401 = auth required
+                return
         # Lazy-imported so the module loads without Pipecat installed.
         from pipecat.transports.network.fastapi_websocket import (
             FastAPIWebsocketParams,

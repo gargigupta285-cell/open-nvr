@@ -207,3 +207,12 @@ system_prompt: |
 #   - mailto://user:app-password@gmail.com
 #   - ntfy://opennvr-alerts
 # notify_events: [alarm, notify]   # add: task, report
+
+# Authentication for the agent's own endpoints (see AGENT_DESIGN.md).
+# "none" (default): open — for loopback demos ONLY. "opennvr": every data
+# and action endpoint requires an OpenNVR-issued bearer token (the demo
+# page shows a login; a mobile app sends the same tokens). Tiers by role
+# name: admin/superuser = govern skills + notifications; operator = arm
+# alarms/watches/tasks/reports; anyone else = view + chat only (their
+# chat toolset physically excludes the arming verbs).
+# auth_mode: opennvr        # requires opennvr_api_url / opennvr_base_url
