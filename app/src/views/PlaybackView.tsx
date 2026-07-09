@@ -607,14 +607,8 @@ export function PlaybackView() {
                   <Play size={18} className="text-[var(--accent)]" />
                 )}
                 <div>
-                  <h3 className="font-medium flex items-center gap-2">
+                  <h3 className="font-medium">
                     {playingRecording?.camera || 'Playback'}
-                    {playbackMode === 'hls' && hlsPlaybackUrl && (
-                      <span className="text-xs bg-green-500/20 text-green-400 px-1.5 py-0.5 rounded">HLS</span>
-                    )}
-                    {playbackMode === 'mp4' && playbackUrl && (
-                      <span className="text-xs bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded">MP4</span>
-                    )}
                   </h3>
                   {playingRecording && (
                     <p className="text-xs text-[var(--text-dim)]">
@@ -671,18 +665,6 @@ export function PlaybackView() {
                   <Clock size={14} />
                   {playingRecording ? formatDuration(playingRecording.duration) : 'N/A'}
                 </span>
-                {playbackMode === 'hls' && hlsPlaybackUrl && (
-                  <span className="flex items-center gap-1.5 text-green-400">
-                    <PlayCircle size={14} />
-                    HLS VOD (5s segments)
-                  </span>
-                )}
-                {playbackMode === 'mp4' && (
-                  <span className="flex items-center gap-1.5 text-blue-400">
-                    <Film size={14} />
-                    Direct MP4
-                  </span>
-                )}
                 {playbackError && (
                   <span className="flex items-center gap-1.5 text-amber-400">
                     <AlertCircle size={14} />
