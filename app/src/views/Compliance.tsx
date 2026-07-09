@@ -17,7 +17,7 @@
  */
 
 import { useEffect, useState, useCallback } from 'react'
-import { Download, RefreshCw, FileText, Activity, Camera, Database, HardDrive, AlertTriangle } from 'lucide-react'
+import { Download, RefreshCw, FileText, Activity, Camera, Database, HardDrive, AlertTriangle, ShieldAlert, ShieldCheck, ExternalLink } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { Card, CardHeader, CardTitle, CardContent, Skeleton } from '../components/ui'
 
@@ -67,6 +67,21 @@ interface AccessAudit {
   days: number
 }
 
+interface SecurityFlag { code: string; severity: 'high' | 'medium' | 'low'; label: string }
+interface SecurityCameraRow {
+  id: number; name: string; ip: string; manufacturer: string; model: string
+  covered: { parent: string; kind: string } | null
+  flags: SecurityFlag[]
+}
+interface SecurityCheck {
+  posture: 'ok' | 'attention' | 'covered_vendor'
+  covered_vendor_found: boolean
+  summary: { cameras: number; covered_vendor: number; internet_exposed: number; plaintext_stream: number; weak_credentials: number }
+  cameras: SecurityCameraRow[]
+  note: string
+  generated_at?: string
+}
+
 function Badge({ children, variant = 'neutral' }: { children: React.ReactNode; variant?: 'success' | 'warning' | 'destructive' | 'neutral' | 'info' }) {
   const styles = {
     success: 'bg-green-900/50 text-green-400',
@@ -111,10 +126,108 @@ function KpiCard({ icon, label, value, tone = 'neutral' }: { icon: React.ReactNo
   )
 }
 
+function SecuritySection({ data }: { data: SecurityCheck | null }) {
+  if (!data) return null
+  const covered = data.covered_vendor_found
+  const s = data.summary
+  const flagged = data.cameras.filter((c) => c.flags.length > 0)
+  const sevVariant = (sev: string) =>
+    sev === 'high' ? 'destructive' : sev === 'medium' ? 'warning' : 'neutral'
+  const stats: [string, number, string][] = [
+    ['Covered-vendor', s.covered_vendor, s.covered_vendor ? 'text-red-400' : 'text-[var(--text)]'],
+    ['Internet-exposed', s.internet_exposed, s.internet_exposed ? 'text-red-400' : 'text-[var(--text)]'],
+    ['Plaintext stream', s.plaintext_stream, s.plaintext_stream ? 'text-yellow-400' : 'text-[var(--text)]'],
+    ['Default username', s.weak_credentials, s.weak_credentials ? 'text-yellow-400' : 'text-[var(--text)]'],
+  ]
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            {covered ? (
+              <ShieldAlert size={18} className="text-red-400" />
+            ) : data.posture === 'attention' ? (
+              <ShieldAlert size={18} className="text-yellow-400" />
+            ) : (
+              <ShieldCheck size={18} className="text-green-400" />
+            )}
+            <CardTitle>Security &amp; §889 Compliance</CardTitle>
+          </div>
+          <Badge variant={covered ? 'destructive' : data.posture === 'attention' ? 'warning' : 'success'}>
+            {covered ? 'Covered vendor found' : data.posture === 'attention' ? 'Needs attention' : 'No issues found'}
+          </Badge>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {covered && (
+          <div className="mb-4 rounded border border-red-500/50 bg-red-900/20 p-4">
+            <div className="text-sm font-medium text-red-300 mb-1">
+              NDAA §889 covered-vendor cameras detected ({s.covered_vendor}).
+            </div>
+            <p className="text-xs text-[var(--text-dim)] mb-3">
+              Running federal or state contracts? Covered equipment (Hikvision/Dahua and their
+              affiliate brands) may require rip-and-replace and a signed §889 attestation.
+            </p>
+            <a
+              href="https://opennvr.org/contact"
+              target="_blank"
+              rel="noopener"
+              className="inline-flex items-center gap-1.5 rounded bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500"
+            >
+              Get a formal §889 assessment <ExternalLink size={14} />
+            </a>
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          {stats.map(([label, val, cls]) => (
+            <div key={label} className="rounded border border-neutral-800 bg-[var(--panel-2)] p-3">
+              <div className={`text-xl font-semibold ${cls}`}>{val}</div>
+              <div className="mt-0.5 text-[11px] text-[var(--text-dim)]">{label}</div>
+            </div>
+          ))}
+        </div>
+
+        {flagged.length > 0 ? (
+          <div className="space-y-2">
+            {flagged.map((c) => (
+              <div
+                key={c.id}
+                className="flex items-start justify-between gap-3 rounded border border-neutral-800 bg-[var(--panel-2)] p-2.5"
+              >
+                <div className="min-w-0">
+                  <div className="truncate text-sm text-[var(--text)]">
+                    {c.name} <span className="text-[var(--text-dim)]">· {c.ip}</span>
+                  </div>
+                  <div className="text-xs text-[var(--text-dim)]">
+                    {[c.manufacturer, c.model].filter(Boolean).join(' ') || 'unidentified'}
+                  </div>
+                </div>
+                <div className="flex flex-wrap justify-end gap-1">
+                  {c.flags.map((f, i) => (
+                    <Badge key={i} variant={sevVariant(f.severity)}>{f.label}</Badge>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="text-sm text-green-400">
+            No covered-vendor or high-risk cameras found in your inventory.
+          </div>
+        )}
+
+        <p className="mt-3 text-[11px] text-[var(--text-dim)]">{data.note}</p>
+      </CardContent>
+    </Card>
+  )
+}
+
 export function Compliance() {
   const [summary, setSummary] = useState<ComplianceSummary | null>(null)
   const [coverage, setCoverage] = useState<RecordingCoverage | null>(null)
   const [accessAudit, setAccessAudit] = useState<AccessAudit | null>(null)
+  const [securityCheck, setSecurityCheck] = useState<SecurityCheck | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [coverageDays, setCoverageDays] = useState(30)
@@ -134,6 +247,14 @@ export function Compliance() {
       setSummary(summaryRes.data)
       setCoverage(coverageRes.data)
       setAccessAudit(auditRes.data)
+      // Lite §889/security check — independent so an older server (no endpoint)
+      // never blanks the rest of the page.
+      try {
+        const scRes = await apiService.getSecurityCheck()
+        setSecurityCheck(scRes.data)
+      } catch {
+        setSecurityCheck(null)
+      }
     } catch (error: any) {
       console.error('Error fetching compliance data:', error)
       setError(error?.response?.data?.detail || error?.message || 'Failed to load compliance data')
@@ -212,6 +333,9 @@ export function Compliance() {
           <strong>Error:</strong> {error}
         </div>
       )}
+
+      {/* Security & §889 lite check */}
+      <SecuritySection data={securityCheck} />
 
       {/* KPI Cards */}
       {summary ? (
