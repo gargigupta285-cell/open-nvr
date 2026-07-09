@@ -17,7 +17,7 @@
  */
 
 import { useEffect, useState, useCallback } from 'react'
-import { Download, RefreshCw, FileText, Activity, Camera, Database, HardDrive, AlertTriangle, ShieldAlert, ShieldCheck, ExternalLink } from 'lucide-react'
+import { Download, RefreshCw, FileText, Activity, Camera, Database, HardDrive, AlertTriangle, ShieldAlert, ShieldCheck, Mail } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { Card, CardHeader, CardTitle, CardContent, Skeleton } from '../components/ui'
 
@@ -168,14 +168,21 @@ function SecuritySection({ data }: { data: SecurityCheck | null }) {
               Running federal or state contracts? Covered equipment (Hikvision/Dahua and their
               affiliate brands) may require rip-and-replace and a signed §889 attestation.
             </p>
-            <a
-              href="https://opennvr.org/contact"
-              target="_blank"
-              rel="noopener"
-              className="inline-flex items-center gap-1.5 rounded bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500"
-            >
-              Get a formal §889 assessment <ExternalLink size={14} />
-            </a>
+            <div className="text-xs text-[var(--text-dim)] mb-2">
+              Get a formal §889 assessment — OpenNVR is offline-first, so reach us directly:
+            </div>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+              <a
+                href="mailto:contact@cryptovoip.in?subject=OpenNVR%20%C2%A7889%20assessment%20request"
+                className="inline-flex items-center gap-1.5 rounded bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500"
+              >
+                <Mail size={14} /> contact@cryptovoip.in
+              </a>
+              <span className="text-xs text-[var(--text-dim)]">
+                or, from a connected device, visit{' '}
+                <span className="text-[var(--text)]">opennvr.org/contact</span>
+              </span>
+            </div>
           </div>
         )}
 
