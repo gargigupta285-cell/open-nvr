@@ -168,7 +168,7 @@ function SecuritySection({ data }: { data: SecurityCheck | null }) {
             <div>
               <CardTitle>Security &amp; §889 Compliance</CardTitle>
               <div className="text-[11px] text-[var(--text-dim)] mt-0.5">
-                Lite self-check — not a formal assessment
+                Instant self-check · not an official §889 attestation
               </div>
             </div>
           </div>
@@ -179,9 +179,9 @@ function SecuritySection({ data }: { data: SecurityCheck | null }) {
       </CardHeader>
       <CardContent>
         <div className="mb-4 text-[11px] leading-relaxed text-[var(--text-dim)]">
-          Reads what OpenNVR already knows about your cameras — no active scan, no data leaves this box.
-          It checks the <span className="text-[var(--text)]">public</span> covered-vendor list and a few obvious risks; it is
-          <span className="text-[var(--text)]"> not</span> a formal §889 assessment.
+          A fast, automated snapshot from the cameras OpenNVR already manages — private (nothing leaves this box).
+          It surfaces the <span className="text-[var(--text)]">obvious</span> covered-vendor and configuration risks.
+          It is <span className="text-[var(--text)]">not</span> an official §889 attestation — the full OpenNVR assessment below is.
         </div>
         {covered && (
           <div className="mb-4 rounded border border-red-500/50 bg-red-900/20 p-4">
@@ -193,7 +193,7 @@ function SecuritySection({ data }: { data: SecurityCheck | null }) {
               affiliate brands) may require rip-and-replace and a signed §889 attestation.
             </p>
             <div className="text-xs text-[var(--text-dim)] mb-2">
-              Get a formal §889 assessment — OpenNVR is offline-first, so reach us directly:
+              Get your official §889 assessment &amp; signed attestation — OpenNVR is offline-first, so reach us directly:
             </div>
             <div className="flex flex-wrap items-center gap-4">
               {qrUrl && (
@@ -262,18 +262,21 @@ function SecuritySection({ data }: { data: SecurityCheck | null }) {
           </div>
         )}
 
-        <div className="mt-4 rounded border border-neutral-800 bg-[var(--panel-2)] p-3">
-          <div className="mb-2 text-xs font-medium text-[var(--text)]">
-            The full OpenNVR Scout assessment goes well beyond this lite check — it adds:
+        <div className="mt-4 rounded border border-cyan-500/30 bg-[var(--panel-2)] p-3.5">
+          <div className="text-sm font-semibold text-[var(--text)]">The full OpenNVR §889 Security Assessment</div>
+          <div className="mt-0.5 mb-2.5 text-xs text-[var(--text-dim)]">
+            A complete, expert-backed assessment of every camera on your network — far beyond this snapshot —
+            ending in a signed report your contracting officer accepts.
           </div>
           <ul className="grid grid-cols-1 gap-x-4 gap-y-1 sm:grid-cols-2 text-xs text-[var(--text-dim)]">
             {[
-              'Detects hidden OEM rebrands (unlabelled Hikvision/Dahua)',
-              'Cross-references known CVEs and the CISA KEV list',
-              'Active TLS, stream-auth and network-exposure probes',
-              'A signed, audit-ready §889 attestation (PDF)',
-              'Continuous monitoring and re-attestation',
-              'Assesses every camera on the network, across sites',
+              'Our deep automated Scout scan — 40+ checks across 12 categories, on every device',
+              'Forensic OEM-rebrand detection — unmasks Hikvision/Dahua hidden behind other brands',
+              'Live CVE & CISA-KEV threat intelligence on each device',
+              'Active security testing — encryption, stream auth, network exposure & more',
+              'A signed, audit-ready §889 attestation (PDF) auditors accept',
+              'Continuous monitoring, drift alerts & re-attestation each cycle',
+              'An expert remediation roadmap to a compliant, sovereign estate',
             ].map((t) => (
               <li key={t} className="flex gap-1.5">
                 <span className="text-cyan-400">+</span>
@@ -281,6 +284,9 @@ function SecuritySection({ data }: { data: SecurityCheck | null }) {
               </li>
             ))}
           </ul>
+          <div className="mt-2.5 text-xs text-cyan-300">
+            …and much more — a defensible compliance package, not just a scan.
+          </div>
         </div>
       </CardContent>
     </Card>
