@@ -313,7 +313,12 @@ export function PlaybackView() {
         setQueuedDayKey((current) => (current === dayKey ? null : current))
       }, 6000)
     } catch (err: any) {
-      showError(err?.data?.detail || err?.message || 'Failed to queue cloud upload')
+      const detail = err?.data?.detail || err?.message || ''
+      showError(
+        /deployment_mode=offline|not configured|no cloud|refused/i.test(detail)
+          ? 'Cloud server not configured — cloud upload is unavailable.'
+          : detail || 'Failed to queue cloud upload'
+      )
     } finally {
       setQueueingDayKey((current) => (current === dayKey ? null : current))
     }
@@ -445,7 +450,7 @@ export function PlaybackView() {
       )}
 
       {/* Main content - accordion style camera list */}
-      {user?.is_superuser && cloudUploadStatus && (cloudUploadStatus.worker_running || cloudUploadStatus.queue_size > 0 || !!cloudUploadStatus.active_file) && (
+      {user?.is_superuser && cloudUploadConfigured && cloudUploadStatus && (cloudUploadStatus.worker_running || cloudUploadStatus.queue_size > 0) && (
         <div className="bg-[var(--panel)] border border-neutral-700 p-3">
           <div className="flex items-center justify-between text-sm">
             <div className="font-medium">Cloud Upload Status</div>
@@ -463,12 +468,6 @@ export function PlaybackView() {
           {cloudUploadStatus.active_file && (
             <div className="mt-2 text-xs text-[var(--text-dim)] truncate">
               Uploading: {cloudUploadStatus.active_file}
-            </div>
-          )}
-
-          {!!cloudUploadStatus.stats?.last_error?.message && (
-            <div className="mt-2 text-xs text-red-400 truncate" title={cloudUploadStatus.stats?.last_error?.message || ''}>
-              Last error: {cloudUploadStatus.stats?.last_error?.message}
             </div>
           )}
         </div>
