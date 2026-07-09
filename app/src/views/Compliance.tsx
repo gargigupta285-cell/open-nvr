@@ -165,7 +165,12 @@ function SecuritySection({ data }: { data: SecurityCheck | null }) {
             ) : (
               <ShieldCheck size={18} className="text-green-400" />
             )}
-            <CardTitle>Security &amp; §889 Compliance</CardTitle>
+            <div>
+              <CardTitle>Security &amp; §889 Compliance</CardTitle>
+              <div className="text-[11px] text-[var(--text-dim)] mt-0.5">
+                Lite self-check — not a formal assessment
+              </div>
+            </div>
           </div>
           <Badge variant={covered ? 'destructive' : data.posture === 'attention' ? 'warning' : 'success'}>
             {covered ? 'Covered vendor found' : data.posture === 'attention' ? 'Needs attention' : 'No issues found'}
@@ -173,6 +178,11 @@ function SecuritySection({ data }: { data: SecurityCheck | null }) {
         </div>
       </CardHeader>
       <CardContent>
+        <div className="mb-4 text-[11px] leading-relaxed text-[var(--text-dim)]">
+          Reads what OpenNVR already knows about your cameras — no active scan, no data leaves this box.
+          It checks the <span className="text-[var(--text)]">public</span> covered-vendor list and a few obvious risks; it is
+          <span className="text-[var(--text)]"> not</span> a formal §889 assessment.
+        </div>
         {covered && (
           <div className="mb-4 rounded border border-red-500/50 bg-red-900/20 p-4">
             <div className="text-sm font-medium text-red-300 mb-1">
@@ -252,7 +262,26 @@ function SecuritySection({ data }: { data: SecurityCheck | null }) {
           </div>
         )}
 
-        <p className="mt-3 text-[11px] text-[var(--text-dim)]">{data.note}</p>
+        <div className="mt-4 rounded border border-neutral-800 bg-[var(--panel-2)] p-3">
+          <div className="mb-2 text-xs font-medium text-[var(--text)]">
+            The full OpenNVR Scout assessment goes well beyond this lite check — it adds:
+          </div>
+          <ul className="grid grid-cols-1 gap-x-4 gap-y-1 sm:grid-cols-2 text-xs text-[var(--text-dim)]">
+            {[
+              'Detects hidden OEM rebrands (unlabelled Hikvision/Dahua)',
+              'Cross-references known CVEs and the CISA KEV list',
+              'Active TLS, stream-auth and network-exposure probes',
+              'A signed, audit-ready §889 attestation (PDF)',
+              'Continuous monitoring and re-attestation',
+              'Assesses every camera on the network, across sites',
+            ].map((t) => (
+              <li key={t} className="flex gap-1.5">
+                <span className="text-cyan-400">+</span>
+                <span>{t}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
       </CardContent>
     </Card>
   )
