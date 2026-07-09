@@ -265,11 +265,13 @@ function SecuritySection({ data }: { data: SecurityCheck | null }) {
         <div className="mt-4 rounded border border-cyan-500/30 bg-[var(--panel-2)] p-3.5">
           <div className="text-sm font-semibold text-[var(--text)]">The full OpenNVR §889 Security Assessment</div>
           <div className="mt-0.5 mb-2.5 text-xs text-[var(--text-dim)]">
-            A complete, expert-backed assessment of every camera on your network — far beyond this snapshot —
-            ending in a signed report your contracting officer accepts.
+            A hands-on engagement led by our security team — not a self-serve scan. We assess every camera on
+            your network, meet with your people, and deliver a signed report your contracting officer accepts.
           </div>
           <ul className="grid grid-cols-1 gap-x-4 gap-y-1 sm:grid-cols-2 text-xs text-[var(--text-dim)]">
             {[
+              'A dedicated OpenNVR security SPOC — your single point of contact from kickoff to attestation',
+              'Live working sessions with our expert team — findings walkthrough, remediation planning & Q&A',
               'Our deep automated Scout scan — 40+ checks across 12 categories, on every device',
               'Forensic OEM-rebrand detection — unmasks Hikvision/Dahua hidden behind other brands',
               'Live CVE & CISA-KEV threat intelligence on each device',
