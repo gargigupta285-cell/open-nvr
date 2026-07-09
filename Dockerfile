@@ -73,7 +73,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     supervisor \
     curl \
-    ffmpeg \
     gosu \
     libpq5 \
     libgl1 \

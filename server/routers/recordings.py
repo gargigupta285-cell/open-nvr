@@ -31,6 +31,7 @@ This router provides:
 import json
 import os
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from urllib.parse import urlencode
 
 import requests as http_client
@@ -59,6 +60,38 @@ from services.storage_service import (
 from services.stream_service import _build_stream_name
 
 router = APIRouter(prefix="/recordings", tags=["recordings"])
+
+
+def _parse_byte_range(range_header: str | None, file_size: int) -> tuple[int, int] | None:
+    """Parse a single HTTP ``Range: bytes=start-end`` header.
+
+    Returns an inclusive ``(start, end)`` byte range clamped to the file, or
+    None when the header is absent/unparseable/unsatisfiable (caller then
+    serves the whole file with 200). Only the first range of a set is honoured,
+    which is all hls.js ever requests.
+    """
+    if not range_header or not range_header.startswith("bytes="):
+        return None
+    spec = range_header[len("bytes="):].split(",")[0].strip()
+    if "-" not in spec:
+        return None
+    lo, hi = spec.split("-", 1)
+    try:
+        if lo == "":
+            # Suffix form: bytes=-N -> last N bytes.
+            n = int(hi)
+            if n <= 0:
+                return None
+            start = max(0, file_size - n)
+            end = file_size - 1
+        else:
+            start = int(lo)
+            end = int(hi) if hi else file_size - 1
+    except ValueError:
+        return None
+    if start < 0 or start >= file_size or start > end:
+        return None
+    return start, min(end, file_size - 1)
 
 
 @router.post(
@@ -717,6 +750,7 @@ async def create_hls_session(
             camera_path=camera_path,
             start_time=start_time,
             end_time=end_time,
+            db=db,
         )
     except Exception as e:
         recording_logger.error(f"Failed to create HLS session: {e}")
@@ -800,6 +834,76 @@ async def get_hls_init_segment(
         content=init_data,
         media_type="video/mp4",
         headers={"Cache-Control": "max-age=3600", "Access-Control-Allow-Origin": "*"},
+    )
+
+
+@router.get("/playback/hls/{session_id}/media")
+async def get_hls_media(
+    session_id: str,
+    request: Request = None,
+):
+    """
+    Serve byte ranges of the single on-disk recording file (fast-seek path).
+
+    The byte-range HLS manifest points its init segment and every media
+    segment at this endpoint; hls.js requests each as an HTTP Range, so a seek
+    is a direct ranged read from disk with no MediaMTX re-scan.
+
+    Security: session_id acts as the auth token (same as the other playback
+    routes). The file was resolved under the recordings base at session
+    creation (V-005), so no request-supplied path reaches the filesystem here.
+    """
+    from fastapi.responses import StreamingResponse
+
+    from services.hls_playback_service import HlsPlaybackService
+
+    session = await HlsPlaybackService.get_session(session_id)
+    if not session or not session.file_path:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+
+    path = Path(session.file_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Recording file not available")
+
+    file_size = path.stat().st_size
+    range_header = request.headers.get("range") if request else None
+
+    start = 0
+    end = file_size - 1
+    status_code = 200
+    parsed = _parse_byte_range(range_header, file_size)
+    if parsed is not None:
+        start, end = parsed
+        status_code = 206
+
+    length = end - start + 1
+
+    def _iter_file():
+        with open(path, "rb") as fh:
+            fh.seek(start)
+            remaining = length
+            chunk = 64 * 1024
+            while remaining > 0:
+                data = fh.read(min(chunk, remaining))
+                if not data:
+                    break
+                remaining -= len(data)
+                yield data
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(length),
+        "Cache-Control": "max-age=86400",
+        "Access-Control-Allow-Origin": "*",
+    }
+    if status_code == 206:
+        headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+
+    return StreamingResponse(
+        _iter_file(),
+        status_code=status_code,
+        media_type="video/mp4",
+        headers=headers,
     )
 
 
