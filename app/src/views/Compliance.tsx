@@ -18,6 +18,10 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { Download, RefreshCw, FileText, Activity, Camera, Database, HardDrive, AlertTriangle, ShieldAlert, ShieldCheck, Mail } from 'lucide-react'
+import { toDataURL } from 'qrcode'
+
+// Where a phone that scans the panel's QR lands. `ref` tags the lead source.
+const ASSESSMENT_URL = 'https://opennvr.org/contact?ref=nvr-889'
 import { apiService } from '../lib/apiService'
 import { Card, CardHeader, CardTitle, CardContent, Skeleton } from '../components/ui'
 
@@ -127,6 +131,16 @@ function KpiCard({ icon, label, value, tone = 'neutral' }: { icon: React.ReactNo
 }
 
 function SecuritySection({ data }: { data: SecurityCheck | null }) {
+  // QR is rendered locally (no network) — encodes the assessment URL so an
+  // operator on an offline box can scan it with their (connected) phone.
+  const [qrUrl, setQrUrl] = useState<string>('')
+  useEffect(() => {
+    let alive = true
+    toDataURL(ASSESSMENT_URL, { width: 160, margin: 1, color: { dark: '#000000', light: '#ffffff' } })
+      .then((u) => { if (alive) setQrUrl(u) })
+      .catch(() => {})
+    return () => { alive = false }
+  }, [])
   if (!data) return null
   const covered = data.covered_vendor_found
   const s = data.summary
@@ -171,17 +185,31 @@ function SecuritySection({ data }: { data: SecurityCheck | null }) {
             <div className="text-xs text-[var(--text-dim)] mb-2">
               Get a formal §889 assessment — OpenNVR is offline-first, so reach us directly:
             </div>
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-              <a
-                href="mailto:contact@cryptovoip.in?subject=OpenNVR%20%C2%A7889%20assessment%20request"
-                className="inline-flex items-center gap-1.5 rounded bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500"
-              >
-                <Mail size={14} /> contact@cryptovoip.in
-              </a>
-              <span className="text-xs text-[var(--text-dim)]">
-                or, from a connected device, visit{' '}
-                <span className="text-[var(--text)]">opennvr.org/contact</span>
-              </span>
+            <div className="flex flex-wrap items-center gap-4">
+              {qrUrl && (
+                <div className="shrink-0 text-center">
+                  <img
+                    src={qrUrl}
+                    alt="Scan to reach OpenNVR about a §889 assessment"
+                    width={92}
+                    height={92}
+                    className="rounded bg-white p-1"
+                  />
+                  <div className="mt-1 text-[10px] text-[var(--text-dim)]">Scan from your phone</div>
+                </div>
+              )}
+              <div className="flex flex-col gap-1.5">
+                <a
+                  href="mailto:contact@cryptovoip.in?subject=OpenNVR%20%C2%A7889%20assessment%20request"
+                  className="inline-flex w-fit items-center gap-1.5 rounded bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500"
+                >
+                  <Mail size={14} /> contact@cryptovoip.in
+                </a>
+                <span className="text-xs text-[var(--text-dim)]">
+                  or, from a connected device, visit{' '}
+                  <span className="text-[var(--text)]">opennvr.org/contact</span>
+                </span>
+              </div>
             </div>
           </div>
         )}
