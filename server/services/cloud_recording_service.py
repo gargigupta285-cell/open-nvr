@@ -217,11 +217,9 @@ class CloudRecordingService:
         relative_path: str,
     ) -> dict[str, Any]:
         """Upload a recording file to another NVR instance with BYOK certificate support."""
-        # V-009 (M1a) defense-in-depth: the router-level gate already 403s
-        # the /cloud-upload/day endpoint, but background retry-loops and the
-        # queue worker can re-enter this method after a runtime mode flip.
-        # Refuse here too so an in-flight queue cannot leak data after the
-        # operator switches to offline mode.
+        # Defense-in-depth: the router gate 403s the endpoint, but a background
+        # retry/queue worker could re-enter after a runtime mode flip, so
+        # re-check here too. See V-009.
         from core.policy import cloud_outbound_allowed
 
         if not cloud_outbound_allowed():

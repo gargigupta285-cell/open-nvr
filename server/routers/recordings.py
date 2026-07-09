@@ -63,8 +63,8 @@ router = APIRouter(prefix="/recordings", tags=["recordings"])
 
 @router.post(
     "/cloud-upload/day",
-    # V-009 (M1a): queueing recordings to the cloud opens an outbound HTTP
-    # path (httpx to a remote NVR or boto3 to S3). Refused in offline mode.
+    # Queueing to the cloud opens an outbound HTTP path (remote NVR or S3);
+    # refused in offline mode. See V-009.
     dependencies=[Depends(require_outbound_allowed)],
 )
 async def queue_cloud_upload_for_day(
@@ -150,13 +150,9 @@ async def queue_cloud_upload_for_day(
         norm = raw_path.replace("\\", "/")
         lower = norm.lower()
 
-        # H-1 reviewer finding: previously, an absolute DB-poisoned path like
-        # "/etc/passwd" would silently fall through the prefix-stripping
-        # below to a relative lookup "etc/passwd" under the recordings base.
-        # That's not strong enough — if an attacker can ALSO write to the
-        # recordings base (which they can, since MediaMTX writes there), they
-        # win the exfiltration. Refuse outright any absolute path that does
-        # not name our recordings subtree.
+        # Refuse any absolute path that isn't inside the recordings subtree —
+        # otherwise a DB-poisoned "/etc/passwd" could fall through to a lookup
+        # under the recordings base (which MediaMTX can write to). See V-005.
         is_absolute = os.path.isabs(norm) or (
             len(norm) >= 2 and norm[1] == ":"  # Windows drive letter
         )
@@ -556,9 +552,8 @@ async def list_recordings(
 
         recordings = response.json()
 
-        # ISSUE-4 v2: playback_base_url is returned to the browser;
-        # must use the external fallback chain. Same shape as
-        # get_playback_url and get_playback_config.
+        # Returned to the browser, so use the external fallback chain
+        # (matches get_playback_url / get_playback_config).
         browser_playback_base = (
             settings.mediamtx_external_playback_url
             or settings.mediamtx_playback_url
@@ -643,13 +638,9 @@ async def get_playback_url(
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    # Build the playback URL that the BROWSER will fetch. Must use the
-    # external fallback chain (ISSUE-6 v8): the browser cannot reach
-    # `http://mediamtx:9996/...` directly — that's the Docker-bridge
-    # internal URL, only routable from inside the compose. The
-    # external URL is TLS-fronted by nginx and reachable from LAN.
-    # See server/routers/streams.py for the same fallback pattern;
-    # any divergence between the two should be treated as a bug.
+    # Build the playback URL the BROWSER fetches — use the external fallback
+    # chain (the browser can't reach the Docker-internal mediamtx host; the
+    # external URL is nginx-TLS-fronted). Mirrors streams.py's pattern.
     playback_base = (
         settings.mediamtx_external_playback_url
         or settings.mediamtx_playback_url
@@ -885,12 +876,8 @@ async def get_playback_config(
     """
     from services.hls_playback_service import HlsPlaybackService
 
-    # ISSUE-4 v2: this URL is returned to the BROWSER, so it must use
-    # the external fallback chain — not the Docker-bridge internal URL
-    # `http://mediamtx:9996/...`. Same shape as get_playback_url above
-    # and streams.py's WHEP/HLS/RTSPS URL generation. AST contract
-    # test in tests/host-hardening/test_url_fallback_chain.py locks
-    # this so a future "simplification" can't revert it.
+    # Returned to the browser, so use the external fallback chain (not the
+    # Docker-internal mediamtx host). Locked by test_url_fallback_chain.py.
     playback_url = (
         settings.mediamtx_external_playback_url
         or settings.mediamtx_playback_url
@@ -936,13 +923,9 @@ async def get_today_segments(
         settings.mediamtx_stream_prefix, camera.id, camera.ip_address
     )
 
-    # ISSUE-4 v2: the LIST call below stays on the internal URL
-    # because the backend is the caller (inside the Docker bridge).
-    # But every URL we return TO THE BROWSER below must use the
-    # external fallback chain — same rationale as get_playback_url
-    # and get_playback_config. AST contract test in
-    # tests/host-hardening/test_url_fallback_chain.py locks the
-    # browser-facing fields against regression.
+    # The LIST call below stays internal (backend is the caller), but every URL
+    # returned TO THE BROWSER uses the external fallback chain. Locked by
+    # test_url_fallback_chain.py.
     browser_playback_base = (
         settings.mediamtx_external_playback_url
         or settings.mediamtx_playback_url
@@ -1062,9 +1045,8 @@ def _group_segments_by_date(segments: list, path: str) -> list:
         first_start = day_segments[0].get("start")
         last_segment = day_segments[-1]
 
-        # Build playback URL for the entire day - URL-encode the start
-        # time. ISSUE-4 v2: this URL is returned to the BROWSER in the
-        # aggregated result, so it must use the external fallback chain.
+        # URL-encode the start time. Returned to the browser, so use the
+        # external fallback chain.
         encoded_start = quote(first_start, safe="")
         browser_playback_base = (
             settings.mediamtx_external_playback_url
