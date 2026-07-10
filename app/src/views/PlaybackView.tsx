@@ -313,7 +313,12 @@ export function PlaybackView() {
         setQueuedDayKey((current) => (current === dayKey ? null : current))
       }, 6000)
     } catch (err: any) {
-      showError(err?.data?.detail || err?.message || 'Failed to queue cloud upload')
+      const detail = err?.data?.detail || err?.message || ''
+      showError(
+        /deployment_mode=offline|not configured|no cloud|refused/i.test(detail)
+          ? 'Cloud server not configured — cloud upload is unavailable.'
+          : detail || 'Failed to queue cloud upload'
+      )
     } finally {
       setQueueingDayKey((current) => (current === dayKey ? null : current))
     }
@@ -445,7 +450,7 @@ export function PlaybackView() {
       )}
 
       {/* Main content - accordion style camera list */}
-      {user?.is_superuser && cloudUploadStatus && (cloudUploadStatus.worker_running || cloudUploadStatus.queue_size > 0 || !!cloudUploadStatus.active_file) && (
+      {user?.is_superuser && cloudUploadConfigured && cloudUploadStatus && (cloudUploadStatus.worker_running || cloudUploadStatus.queue_size > 0) && (
         <div className="bg-[var(--panel)] border border-neutral-700 p-3">
           <div className="flex items-center justify-between text-sm">
             <div className="font-medium">Cloud Upload Status</div>
@@ -463,12 +468,6 @@ export function PlaybackView() {
           {cloudUploadStatus.active_file && (
             <div className="mt-2 text-xs text-[var(--text-dim)] truncate">
               Uploading: {cloudUploadStatus.active_file}
-            </div>
-          )}
-
-          {!!cloudUploadStatus.stats?.last_error?.message && (
-            <div className="mt-2 text-xs text-red-400 truncate" title={cloudUploadStatus.stats?.last_error?.message || ''}>
-              Last error: {cloudUploadStatus.stats?.last_error?.message}
             </div>
           )}
         </div>
@@ -607,14 +606,8 @@ export function PlaybackView() {
                   <Play size={18} className="text-[var(--accent)]" />
                 )}
                 <div>
-                  <h3 className="font-medium flex items-center gap-2">
+                  <h3 className="font-medium">
                     {playingRecording?.camera || 'Playback'}
-                    {playbackMode === 'hls' && hlsPlaybackUrl && (
-                      <span className="text-xs bg-green-500/20 text-green-400 px-1.5 py-0.5 rounded">HLS</span>
-                    )}
-                    {playbackMode === 'mp4' && playbackUrl && (
-                      <span className="text-xs bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded">MP4</span>
-                    )}
                   </h3>
                   {playingRecording && (
                     <p className="text-xs text-[var(--text-dim)]">
@@ -671,18 +664,6 @@ export function PlaybackView() {
                   <Clock size={14} />
                   {playingRecording ? formatDuration(playingRecording.duration) : 'N/A'}
                 </span>
-                {playbackMode === 'hls' && hlsPlaybackUrl && (
-                  <span className="flex items-center gap-1.5 text-green-400">
-                    <PlayCircle size={14} />
-                    HLS VOD (5s segments)
-                  </span>
-                )}
-                {playbackMode === 'mp4' && (
-                  <span className="flex items-center gap-1.5 text-blue-400">
-                    <Film size={14} />
-                    Direct MP4
-                  </span>
-                )}
                 {playbackError && (
                   <span className="flex items-center gap-1.5 text-amber-400">
                     <AlertCircle size={14} />
