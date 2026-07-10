@@ -305,7 +305,16 @@
     .ctop .recl{margin-left:auto; text-decoration:none; display:inline-flex; align-items:center; font-size:0.75rem;}
     .player{position:relative; border-radius:var(--radius-sm); overflow:hidden; border:1px solid var(--stroke);
       background:#05080f; cursor:pointer; min-height:120px; flex:0 0 auto;}
-    .player img{display:block; width:100%; aspect-ratio:16/9; object-fit:cover;}
+    /* Small, viewport-safe stream window: cap the media height so the
+       transport + action pills below always stay on screen (the page is
+       fixed-vh). ⛶ goes full screen for a big view. */
+    .player img{display:block; width:100%; aspect-ratio:16/9; max-height:44vh; object-fit:contain;}
+    .fsbtn{position:absolute; bottom:8px; right:8px; z-index:2; width:32px; height:28px;
+      background:rgba(0,0,0,0.55); border:none; color:#fff; border-radius:7px; cursor:pointer;
+      font-size:0.85rem; line-height:1;}
+    .fsbtn:hover{background:rgba(0,0,0,0.78);}
+    .player:fullscreen{display:flex; align-items:center; justify-content:center; background:#000; border:none;}
+    .player:fullscreen img,.player:fullscreen video{max-height:100vh; width:100%; height:100%; object-fit:contain;}
     .player .ovl{position:absolute; top:7px; left:8px; font-size:0.72rem; color:#fff; background:rgba(0,0,0,0.55);
       padding:2px 7px; border-radius:6px; font-variant-numeric:tabular-nums;}
     .modepill{position:absolute; top:7px; right:8px; font-size:0.65rem; color:#fff; background:rgba(0,0,0,0.55);
@@ -383,7 +392,7 @@
     .rec-seg small{display:block; color:var(--faint); font-size:0.62rem;}
     .rec-seg:hover,.rec-seg.on{border-color:var(--accent); color:var(--accent);}
     .rec-note{font-size:0.7rem; color:var(--faint); padding:0.3rem 0;}
-    .player video{display:block; width:100%; aspect-ratio:16/9; object-fit:contain; background:#000;}
+    .player video{display:block; width:100%; aspect-ratio:16/9; max-height:44vh; object-fit:contain; background:#000;}
 
     /* ── events feed ─────────────────────────────────────────────────── */
     .evt{display:flex; align-items:flex-start; gap:0.45rem; padding:0.4rem 0.5rem; background:var(--glass2);
@@ -498,6 +507,7 @@
               <div id="camNoFrame" class="empty-note" hidden>No frame — camera off or unreachable.</div>
               <span class="ovl" id="camTs"></span>
               <span class="modepill" id="camMode"><span class="mdot"></span><span id="camModeText">LIVE</span></span>
+              <button class="fsbtn" id="camFs" type="button" title="Full screen" aria-label="Full screen">⛶</button>
             </div>
             <div class="transport">
               <button class="pbtn" id="camPlay" title="Play / pause">⏸</button>
@@ -1121,11 +1131,12 @@
 
     function fmtClock(ts){ const d=new Date(ts*1000);
       return ("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2)+":"+("0"+d.getSeconds()).slice(-2); }
-    async function refreshPlayerLive(){ const cam=window._camScreenCam; if(!cam||_pc) return;
+    async function refreshPlayerLive(){ const cam=window._camScreenCam; if(!cam||_pc||_playback) return;
       const gen=_viewGen, img=$("camImg"), off=$("camNoFrame");
       try{ const r=await fetch("/frame/"+encodeURIComponent(cam)+"?t="+Date.now());
         if(gen!==_viewGen||cam!==window._camScreenCam) return;   // view moved on
         if(!r.ok) throw new Error();
+        const v=$("camVideo"); if(v) v.hidden=true;   // snapshot mode owns the player
         setBlobSrc(img,await r.blob()); img.hidden=false; off.hidden=true;
         $("camTs").textContent=fmtClock(Date.now()/1000);
       }catch{ if(gen===_viewGen){ img.hidden=true; off.hidden=false; } } }
@@ -1143,7 +1154,9 @@
     function stopWebrtc(){
       if(_pc){ try{ _pc.close(); }catch{} _pc=null; }
       if(_whepResource){ fetch(_whepResource,{method:"DELETE"}).catch(()=>{}); _whepResource=null; }
-      const v=$("camVideo"); if(v&&v.srcObject){ v.srcObject=null; } }
+      // Hide the video surface too — leaving it visible stacks a dead
+      // <video> above the snapshot <img> and doubles the player height.
+      const v=$("camVideo"); if(v&&v.srcObject){ v.srcObject=null; v.hidden=true; } }
     // The same WebRTC (WHEP) the OpenNVR Live view plays — that's why its
     // streams are smooth while snapshot polling looks 'laggy/buffering'.
     // Returns true when the stream is up; false → caller falls back.
@@ -1170,7 +1183,11 @@
         const resp=await fetch(d.whep_url,{method:"POST",
           headers:{"Content-Type":"application/sdp"},body:offer.sdp||""});
         if(!(resp.status===200||resp.status===201)) throw new Error("WHEP "+resp.status);
-        _whepResource=resp.headers.get("Location");
+        // MediaMTX returns Location as a relative path — resolve it against
+        // the WHEP URL's origin, or the teardown DELETE hits the agent (404)
+        // and prints the ?jwt= token into the agent's access log.
+        const loc=resp.headers.get("Location");
+        _whepResource=loc?new URL(loc,d.whep_url).href:null;
         await pc.setRemoteDescription({type:"answer",sdp:await resp.text()});
         // give ICE a moment; if no track arrives, treat as failed
         const ok=await Promise.race([gotTrack,new Promise(r=>setTimeout(()=>r(false),6000))]);
@@ -1233,10 +1250,14 @@
           const nxt=+s2.value+1; if(nxt>=+s2.max){ goLive(); } else { s2.value=nxt; reviewAt(nxt); } },1000); }
         if(!_playing&&_stepTimer){ clearInterval(_stepTimer); _stepTimer=null; } });
       const player=$("camPlayer");
-      if(player) player.addEventListener("click",(e)=>{ if(e.target.closest(".modepill,.ovl")) return;
+      if(player) player.addEventListener("click",(e)=>{ if(e.target.closest(".modepill,.ovl,.fsbtn")) return;
         if(_playback) return;               // recorded playback has its own controls
         const cam=window._camScreenCam; if(!cam) return;
-        pinFrame(cam,_revTs||undefined); }); })();
+        pinFrame(cam,_revTs||undefined); });
+      const fs=$("camFs");
+      if(fs) fs.addEventListener("click",(e)=>{ e.stopPropagation();
+        if(document.fullscreenElement){ document.exitFullscreen().catch(()=>{}); }
+        else if(player&&player.requestFullscreen){ player.requestFullscreen().catch(()=>{}); } }); })();
 
     // ── Events: ONE what-happened feed (alarms + watches + app alerts).
     // Clicking an event opens the camera AND jumps to the moment: review
