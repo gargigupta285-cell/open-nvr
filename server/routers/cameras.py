@@ -888,8 +888,17 @@ async def provision_camera_mediamtx(
     current_user: User = Depends(get_current_active_user),
     request: Request = None,
 ):
-    """Manually provision camera in MediaMTX with optional recording configuration."""
+    """Manually provision a camera in MediaMTX.
+
+    NVR policy: recording is mandatory, so ``enable_recording`` is forced on here
+    regardless of the query param — a `curl` with ``?enable_recording=false``
+    still provisions with recording enabled. Enforcement also lives at the
+    service choke point (push_rtsp_stream); this keeps the response/logs honest.
+    """
     from services.mediamtx_admin_service import MediaMtxAdminService
+
+    # Recording cannot be opted out of on an NVR. See docstring.
+    enable_recording = True
 
     _log_provision_start(
         current_user.id,
