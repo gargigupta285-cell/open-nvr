@@ -1042,7 +1042,14 @@ def _update_camera_recording_config(db: Session, camera_id: int, enable: bool):
     db.commit()
 
 
-@router.post("/{camera_id}/toggle-recording")
+# DISABLED — this is a Network Video RECORDER: recording is automatic and must
+# not be switchable off by anyone, including via the API. The route is
+# intentionally commented out so a direct `curl` cannot enable/disable
+# recording. Recording is turned on once at camera-configure time (see
+# CameraService, enable_recording=True). The handler is kept (not deleted) so
+# the behaviour can be restored by re-enabling the decorator if the product
+# decision ever changes.
+# @router.post("/{camera_id}/toggle-recording")
 async def toggle_camera_recording(
     camera_id: int,
     enable: bool,
@@ -1050,7 +1057,7 @@ async def toggle_camera_recording(
     current_user: User = Depends(get_current_active_user),
     request: Request = None,
 ):
-    """Toggle recording for a camera."""
+    """Enable/disable recording for a camera. (Route disabled — see note above.)"""
     # Check permissions
     if not CameraService.user_has_permission(
         db, camera_id, current_user.id, require_manage=True

@@ -40,6 +40,12 @@ interface PlaybackTimelineProps {
   /** Wheel zoom: `anchorMs` is the time under the cursor (kept fixed), `factor`
    *  < 1 zooms in (shrinks the visible span), > 1 zooms out. */
   onZoomAt?: (anchorMs: number, factor: number) => void
+  /** 'seek' (default): drag scrubs. 'clip': drag paints an export selection. */
+  mode?: 'seek' | 'clip'
+  /** Current clip selection (epoch ms), shown as a highlighted band. */
+  selection?: { inMs: number; outMs: number } | null
+  /** Fired as the selection is painted (null while empty). */
+  onSelectionChange?: (sel: { inMs: number; outMs: number } | null) => void
   className?: string
 }
 
@@ -85,10 +91,14 @@ export function PlaybackTimeline({
   onSeek,
   onScrubPreview,
   onZoomAt,
+  mode = 'seek',
+  selection,
+  onSelectionChange,
   className = '',
 }: PlaybackTimelineProps) {
   const trackRef = useRef<HTMLDivElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
+  const selAnchorRef = useRef<number | null>(null)
   const [dragging, setDragging] = useState(false)
   const [hoverMs, setHoverMs] = useState<number | null>(null)
   const [hoverX, setHoverX] = useState(0)
@@ -181,27 +191,44 @@ export function PlaybackTimeline({
   const handleDown = (e: React.MouseEvent) => {
     setDragging(true)
     setHover(e.clientX)
-    onScrubPreview?.(snap(xToMs(e.clientX)))
+    if (mode === 'clip') {
+      const t = xToMs(e.clientX)
+      selAnchorRef.current = t
+      onSelectionChange?.({ inMs: t, outMs: t })
+    } else {
+      onScrubPreview?.(snap(xToMs(e.clientX)))
+    }
   }
   const handleMove = (e: React.MouseEvent) => {
     setHover(e.clientX)
-    if (dragging) onScrubPreview?.(snap(xToMs(e.clientX)))
-  }
-  const commit = (clientX: number) => {
-    onSeek(snap(xToMs(clientX)))
-    onScrubPreview?.(null)
+    if (!dragging) return
+    if (mode === 'clip' && selAnchorRef.current != null) {
+      const t = xToMs(e.clientX)
+      const a = selAnchorRef.current
+      onSelectionChange?.({ inMs: Math.min(a, t), outMs: Math.max(a, t) })
+    } else if (mode === 'seek') {
+      onScrubPreview?.(snap(xToMs(e.clientX)))
+    }
   }
   const handleUp = (e: React.MouseEvent) => {
-    if (dragging) {
-      setDragging(false)
-      commit(e.clientX)
+    if (!dragging) return
+    setDragging(false)
+    if (mode === 'clip') {
+      const a = selAnchorRef.current
+      selAnchorRef.current = null
+      const t = xToMs(e.clientX)
+      if (a == null || Math.abs(t - a) < 1000) onSelectionChange?.(null) // a click clears
+      else onSelectionChange?.({ inMs: Math.min(a, t), outMs: Math.max(a, t) })
+    } else {
+      onSeek(snap(xToMs(e.clientX)))
+      onScrubPreview?.(null)
     }
   }
   const handleLeave = () => {
     setHoverMs(null)
     if (dragging) {
       setDragging(false)
-      onScrubPreview?.(null)
+      if (mode === 'seek') onScrubPreview?.(null)
     }
   }
 
@@ -226,7 +253,9 @@ export function PlaybackTimeline({
       {/* Track */}
       <div
         ref={trackRef}
-        className="relative h-9 bg-neutral-800 cursor-pointer overflow-hidden rounded-sm"
+        className={`relative h-9 bg-neutral-800 overflow-hidden rounded-sm ${
+          mode === 'clip' ? 'cursor-crosshair' : 'cursor-pointer'
+        }`}
         onMouseDown={handleDown}
         onMouseMove={handleMove}
         onMouseUp={handleUp}
@@ -240,6 +269,17 @@ export function PlaybackTimeline({
             style={{ left: `${b.left}%`, width: `${b.width}%`, background: '#dc2626' }}
           />
         ))}
+
+        {/* Clip selection band */}
+        {selection && selection.outMs > selection.inMs && (
+          <div
+            className="absolute top-0 bottom-0 bg-[var(--accent)]/35 border-x-2 border-[var(--accent)] pointer-events-none"
+            style={{
+              left: `${toPct(selection.inMs)}%`,
+              width: `${toPct(selection.outMs) - toPct(selection.inMs)}%`,
+            }}
+          />
+        )}
 
         {/* Ticks */}
         {ticks.map((t, i) => (

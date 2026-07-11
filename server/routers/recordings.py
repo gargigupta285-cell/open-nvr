@@ -485,13 +485,18 @@ async def update_retention(
 # =============================================================================
 
 
-@router.post("/start/{camera_id}")
+# DISABLED — recording is automatic on this NVR and cannot be started/stopped
+# on demand, including via the API. Route intentionally commented out so a
+# direct `curl` cannot control recording. Recording is enabled at camera-
+# configure time (see CameraService). Re-enable the decorator only if the
+# product decision changes. See also cameras.toggle_camera_recording.
+# @router.post("/start/{camera_id}")
 async def start_recording(
     camera_id: int,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_superuser),
 ):
-    """Start recording for a camera via MediaMTX."""
+    """Start recording for a camera via MediaMTX. (Route disabled — see above.)"""
     try:
         result = await MediaMtxAdminService.enable_recording(camera_id)
         recording_logger.info(
@@ -503,13 +508,16 @@ async def start_recording(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/stop/{camera_id}")
+# DISABLED — recording is automatic and cannot be stopped on demand, including
+# via the API. Route intentionally commented out so a direct `curl` cannot stop
+# recording. Re-enable the decorator only if the product decision changes.
+# @router.post("/stop/{camera_id}")
 async def stop_recording(
     camera_id: int,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_superuser),
 ):
-    """Stop recording for a camera via MediaMTX."""
+    """Stop recording for a camera via MediaMTX. (Route disabled — see above.)"""
     try:
         result = await MediaMtxAdminService.disable_recording(camera_id)
         recording_logger.info(

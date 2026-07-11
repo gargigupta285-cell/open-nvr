@@ -32,6 +32,8 @@ import {
   Loader2,
   X,
   AlertCircle,
+  Scissors,
+  Download,
 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { PlaybackTimeline, type TimelineSegment } from './PlaybackTimeline'
@@ -66,10 +68,30 @@ const ZOOMS: { label: string; span: number }[] = [
   { label: '2m', span: 120_000 },
 ]
 
-const SPEEDS = [0.5, 1, 2, 4, 8]
+const SPEEDS = [0.25, 0.5, 1, 2, 4, 8, 16]
+const RATE_1X = 2 // index of 1x in SPEEDS
 const FRAME_STEP = 1 / 25 // ~1 frame at 25fps
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v))
+
+function parseSegments(raw: RawSegment[]): Seg[] {
+  return raw
+    .map((r) => {
+      const startMs = Date.parse(r.start)
+      return {
+        startMs,
+        endMs: startMs + (r.duration || 0) * 1000,
+        startIso: r.start,
+        duration: r.duration || 0,
+      }
+    })
+    .filter((s) => Number.isFinite(s.startMs))
+    .sort((a, b) => a.startMs - b.startMs)
+}
+
+const sameSegs = (a: Seg[], b: Seg[]) =>
+  a.length === b.length &&
+  a.every((s, i) => s.startMs === b[i].startMs && s.endMs === b[i].endMs)
 
 export function PlaybackConsole({ cameraId, cameraName, date, onClose }: PlaybackConsoleProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -84,10 +106,16 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
   // native (hls.js fetches the right byte-range fragment → instant); only
   // crossing into another clip spins up a new session.
   const loadedClipRef = useRef<{ startMs: number; endMs: number } | null>(null)
+  // Latest segments, mirrored to a ref so the poll loop reads them without
+  // re-subscribing every update.
+  const segsRef = useRef<Seg[]>([])
 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [segs, setSegs] = useState<Seg[]>([])
+  // MediaMTX browser-reachable playback base + path, for clip export.
+  const [base, setBase] = useState('')
+  const [path, setPath] = useState('')
 
   const [dayStart, setDayStart] = useState(0)
   const [dayEnd, setDayEnd] = useState(0)
@@ -97,10 +125,15 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
   const [currentMs, setCurrentMs] = useState(0)
   const [previewMs, setPreviewMs] = useState<number | null>(null)
   const [isPlaying, setIsPlaying] = useState(false)
-  const [rateIdx, setRateIdx] = useState(1) // 1x
+  const [rateIdx, setRateIdx] = useState(RATE_1X)
   const [muted, setMuted] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [buffering, setBuffering] = useState(false)
+
+  // Clip-export state.
+  const [clipMode, setClipMode] = useState(false)
+  const [selection, setSelection] = useState<{ inMs: number; outMs: number } | null>(null)
+  const [exporting, setExporting] = useState(false)
 
   const timelineSegs: TimelineSegment[] = useMemo(
     () => segs.map((s) => ({ startMs: s.startMs, endMs: s.endMs })),
@@ -116,20 +149,10 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
       .getSegments(cameraId, date)
       .then((res: any) => {
         if (cancelled) return
-        const raw: RawSegment[] = res.data?.segments || []
-        const parsed: Seg[] = raw
-          .map((r) => {
-            const startMs = Date.parse(r.start)
-            return {
-              startMs,
-              endMs: startMs + (r.duration || 0) * 1000,
-              startIso: r.start,
-              duration: r.duration || 0,
-            }
-          })
-          .filter((s) => Number.isFinite(s.startMs))
-          .sort((a, b) => a.startMs - b.startMs)
+        const parsed = parseSegments(res.data?.segments || [])
 
+        setBase((res.data?.playback_base_url || '').replace(/\/$/, ''))
+        setPath(res.data?.path || '')
         setSegs(parsed)
 
         if (parsed.length === 0) {
@@ -160,6 +183,37 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
       cancelled = true
     }
   }, [cameraId, date])
+
+  // Mirror segments to a ref for the poll loop.
+  useEffect(() => {
+    segsRef.current = segs
+  }, [segs])
+
+  // Live-follow: while the player is open on a still-recording day, re-fetch the
+  // segment list so the timeline's red blocks grow as new footage lands — no
+  // manual reload. Auto-stops once the newest footage is well in the past.
+  useEffect(() => {
+    if (loading || error) return
+    let stopped = false
+    const id = setInterval(async () => {
+      const cur = segsRef.current
+      const lastEnd = cur.length ? cur[cur.length - 1].endMs : 0
+      // Static (past) day → nothing more will be written; stop polling.
+      if (lastEnd && Date.now() - lastEnd > 15 * 60_000) return
+      try {
+        const res: any = await apiService.getSegments(cameraId, date)
+        if (stopped) return
+        const parsed = parseSegments(res.data?.segments || [])
+        if (parsed.length && !sameSegs(segsRef.current, parsed)) setSegs(parsed)
+      } catch {
+        /* transient — try again next tick */
+      }
+    }, 10_000)
+    return () => {
+      stopped = true
+      clearInterval(id)
+    }
+  }, [loading, error, cameraId, date])
 
   // ---- Clip loading via per-clip byte-range HLS session ---------------------
   const teardownHls = useCallback(() => {
@@ -272,8 +326,15 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
     const onPlaying = () => setBuffering(false)
     const onCanPlay = () => setBuffering(false)
     const onEnded = () => {
-      // Advance to the next clip (skips the grey gap).
       const after = loadedClipRef.current?.endMs ?? windowStartRef.current + (el.duration || 0) * 1000
+      // The current clip may have grown since we loaded it (live recording) —
+      // reload it from where we stopped to play into the newly-written tail.
+      const grown = segs.find((s) => s.startMs <= after && after < s.endMs - 500)
+      if (grown) {
+        loadClip(grown, Math.max(0, (after - grown.startMs) / 1000), true)
+        return
+      }
+      // Otherwise advance to the next clip (skips the grey gap).
       const next = segs.find((s) => s.startMs >= after - 500)
       if (next) loadClip(next, 0, true)
       else setIsPlaying(false)
@@ -377,6 +438,50 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
     else containerRef.current?.requestFullscreen?.()
   }
 
+  // ---- Clip export ----------------------------------------------------------
+  const toggleClipMode = () => {
+    setClipMode((on) => {
+      if (!on) videoRef.current?.pause() // entering clip mode: pause for precision
+      setSelection(null)
+      return !on
+    })
+  }
+
+  const stamp = (ms: number) =>
+    new Date(ms).toISOString().replace('T', '_').replace(/[:.]/g, '-').slice(0, 19)
+
+  const exportClip = async () => {
+    if (!selection || selection.outMs <= selection.inMs || !base || !path) return
+    setExporting(true)
+    try {
+      const startIso = new Date(selection.inMs).toISOString()
+      const durationSec = Math.max(1, (selection.outMs - selection.inMs) / 1000)
+      const url = `${base}/get?path=${path}&start=${encodeURIComponent(startIso)}&duration=${durationSec}`
+      const res = await fetch(url)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const blob = await res.blob()
+      const href = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = href
+      a.download = `${cameraName.replace(/\s+/g, '-')}_${stamp(selection.inMs)}.mp4`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(href)
+      setClipMode(false)
+      setSelection(null)
+    } catch (e) {
+      console.error('[Playback] Clip export failed:', e)
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  const selectionSeconds =
+    selection && selection.outMs > selection.inMs
+      ? Math.round((selection.outMs - selection.inMs) / 1000)
+      : 0
+
   const applyZoom = (idx: number) => {
     const span = ZOOMS[idx].span
     setZoomIdx(idx)
@@ -411,13 +516,21 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
   const effectiveCurrent = previewMs ?? currentMs
 
   return (
-    <div className="fixed inset-0 bg-black/85 flex items-center justify-center z-50 p-4">
+    <div
+      className={`fixed inset-0 bg-black/85 flex items-center justify-center z-50 ${
+        isFullscreen ? '' : 'p-4'
+      }`}
+    >
       <div
         ref={containerRef}
-        className="bg-[var(--panel)] border border-neutral-700 w-full max-w-5xl flex flex-col"
+        className={`flex flex-col ${
+          isFullscreen
+            ? 'bg-black w-screen h-screen'
+            : 'bg-[var(--panel)] border border-neutral-700 w-full max-w-5xl'
+        }`}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-2.5 border-b border-neutral-700 bg-[var(--panel-2)]">
+        <div className="shrink-0 flex items-center justify-between px-4 py-2.5 border-b border-neutral-700 bg-[var(--panel-2)]">
           <div className="flex items-center gap-2 min-w-0">
             <Play size={16} className="text-[var(--accent)] shrink-0" />
             <span className="font-medium truncate">{cameraName}</span>
@@ -433,7 +546,11 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
         </div>
 
         {/* Video */}
-        <div className="relative bg-black aspect-video flex items-center justify-center">
+        <div
+          className={`relative bg-black flex items-center justify-center ${
+            isFullscreen ? 'flex-1 min-h-0' : 'aspect-video'
+          }`}
+        >
           {error ? (
             <div className="text-center p-8">
               <AlertCircle size={48} className="mx-auto mb-3 text-amber-400 opacity-70" />
@@ -459,7 +576,7 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
 
         {/* Toolbar */}
         {!error && (
-          <div className="flex items-center gap-1 px-3 py-2 bg-[var(--panel-2)] border-t border-neutral-700">
+          <div className="shrink-0 flex items-center gap-1 px-3 py-2 bg-[var(--panel-2)] border-t border-neutral-700">
             <IconBtn title="Previous frame" onClick={() => stepFrame(-1)}>
               <SkipBack size={16} />
             </IconBtn>
@@ -485,6 +602,18 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
             <IconBtn title={muted ? 'Unmute' : 'Mute'} onClick={toggleMute}>
               {muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
             </IconBtn>
+
+            <button
+              title={clipMode ? 'Exit clip mode' : 'Clip / export'}
+              onClick={toggleClipMode}
+              className={`p-1.5 rounded transition-colors ${
+                clipMode
+                  ? 'bg-[var(--accent)] text-white'
+                  : 'text-[var(--text)] hover:bg-[var(--panel)]'
+              }`}
+            >
+              <Scissors size={16} />
+            </button>
 
             <div className="flex-1" />
 
@@ -514,9 +643,36 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
           </div>
         )}
 
+        {/* Clip action bar */}
+        {!error && clipMode && (
+          <div className="shrink-0 flex items-center gap-3 px-3 py-2 bg-[var(--accent)]/10 border-t border-[var(--accent)]/30 text-sm">
+            <Scissors size={14} className="text-[var(--accent)] shrink-0" />
+            <span className="text-[var(--text-dim)]">
+              {selectionSeconds > 0
+                ? `Selection: ${selectionSeconds}s`
+                : 'Drag across the timeline to select a range to export'}
+            </span>
+            <div className="flex-1" />
+            <button
+              onClick={exportClip}
+              disabled={selectionSeconds <= 0 || exporting}
+              className="flex items-center gap-1.5 px-3 py-1 rounded bg-[var(--accent)] text-white text-xs font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition-opacity"
+            >
+              {exporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+              {exporting ? 'Exporting…' : 'Export clip'}
+            </button>
+            <button
+              onClick={toggleClipMode}
+              className="px-3 py-1 rounded border border-neutral-600 text-xs text-[var(--text-dim)] hover:bg-[var(--panel)] transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+
         {/* Timeline */}
         {!error && segs.length > 0 && view.end > view.start && (
-          <div className="px-3 pt-1 pb-3 bg-[var(--panel-2)]">
+          <div className="shrink-0 px-3 pt-1 pb-3 bg-[var(--panel-2)]">
             <PlaybackTimeline
               segments={timelineSegs}
               viewStart={view.start}
@@ -525,6 +681,9 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
               onSeek={seekTo}
               onScrubPreview={setPreviewMs}
               onZoomAt={zoomAt}
+              mode={clipMode ? 'clip' : 'seek'}
+              selection={clipMode ? selection : null}
+              onSelectionChange={setSelection}
             />
           </div>
         )}
