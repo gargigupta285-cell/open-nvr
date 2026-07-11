@@ -16,7 +16,7 @@
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 export interface TimelineSegment {
   /** epoch ms */
@@ -37,6 +37,9 @@ interface PlaybackTimelineProps {
   onSeek: (ms: number) => void
   /** Live preview ms while dragging; null on release / mouse-leave. */
   onScrubPreview?: (ms: number | null) => void
+  /** Wheel zoom: `anchorMs` is the time under the cursor (kept fixed), `factor`
+   *  < 1 zooms in (shrinks the visible span), > 1 zooms out. */
+  onZoomAt?: (anchorMs: number, factor: number) => void
   className?: string
 }
 
@@ -81,6 +84,7 @@ export function PlaybackTimeline({
   currentTime,
   onSeek,
   onScrubPreview,
+  onZoomAt,
   className = '',
 }: PlaybackTimelineProps) {
   const trackRef = useRef<HTMLDivElement>(null)
@@ -151,6 +155,22 @@ export function PlaybackTimeline({
     }
     return out
   }, [span, viewStart, viewEnd, toPct])
+
+  // Wheel zoom — native non-passive listener so we can preventDefault the page
+  // scroll. Anchored on the cursor so the time under the pointer stays put.
+  useEffect(() => {
+    const el = trackRef.current
+    if (!el || !onZoomAt) return
+    const handler = (e: WheelEvent) => {
+      e.preventDefault()
+      const rect = el.getBoundingClientRect()
+      const ratio = clamp((e.clientX - rect.left) / rect.width, 0, 1)
+      const anchor = viewStart + ratio * span
+      onZoomAt(anchor, e.deltaY < 0 ? 0.8 : 1.25)
+    }
+    el.addEventListener('wheel', handler, { passive: false })
+    return () => el.removeEventListener('wheel', handler)
+  }, [onZoomAt, viewStart, span])
 
   const setHover = (clientX: number) => {
     const rect = wrapRef.current?.getBoundingClientRect()

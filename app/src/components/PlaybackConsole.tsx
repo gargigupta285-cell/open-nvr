@@ -75,6 +75,12 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
   const containerRef = useRef<HTMLDivElement>(null)
   // Wall-clock instant (epoch ms) the currently-loaded MediaMTX /get window began at.
   const windowStartRef = useRef<number>(0)
+  // The clip currently loaded into the <video>. Seeks that land inside it are
+  // done natively (instant, from buffer); only crossing into another clip hits
+  // the network. Null until the first clip loads.
+  const loadedClipRef = useRef<{ startMs: number; endMs: number } | null>(null)
+  // Offset (seconds) to seek to once the freshly-loaded clip has metadata.
+  const pendingSeekSecRef = useRef<number | null>(null)
 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -163,37 +169,35 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
     [base, path]
   )
 
-  /** Load a MediaMTX window starting at wall-clock `ms` and (optionally) play. */
+  /**
+   * Load the WHOLE clip that contains `ms` (or the next clip if `ms` is in a
+   * gap) as one MediaMTX /get window, then seek to the `ms` offset once it has
+   * metadata. Loading the whole clip is what lets subsequent in-clip seeks be
+   * native (buffer) reads instead of a fresh server request each time.
+   */
   const loadFrom = useCallback(
     (ms: number, play: boolean) => {
       const el = videoRef.current
       if (!el || segs.length === 0) return
 
-      const containing = segs.find((s) => ms >= s.startMs && ms < s.endMs)
-      let winStart: number
-      let startIso: string
-      let durationSec: number
-
-      if (containing) {
-        const atStart = Math.abs(ms - containing.startMs) < 500
-        winStart = atStart ? containing.startMs : ms
-        startIso = atStart ? containing.startIso : new Date(ms).toISOString()
-        durationSec = Math.max(1, (containing.endMs - winStart) / 1000 + 0.5)
-      } else {
-        // In a gap → jump to the next available clip.
+      let clip = segs.find((s) => ms >= s.startMs && ms < s.endMs)
+      let seekMs = ms
+      if (!clip) {
+        // In a gap → jump to the next available clip's start.
         const next = segs.find((s) => s.startMs >= ms)
         if (!next) {
           el.pause()
           return
         }
-        winStart = next.startMs
-        startIso = next.startIso
-        durationSec = Math.max(1, next.duration + 0.5)
+        clip = next
+        seekMs = next.startMs
       }
 
-      windowStartRef.current = winStart
-      setCurrentMs(winStart)
-      el.src = buildUrl(startIso, durationSec)
+      windowStartRef.current = clip.startMs
+      loadedClipRef.current = { startMs: clip.startMs, endMs: clip.endMs }
+      pendingSeekSecRef.current = Math.max(0, (seekMs - clip.startMs) / 1000)
+      setCurrentMs(seekMs)
+      el.src = buildUrl(clip.startIso, Math.max(1, clip.duration + 0.5))
       el.load()
       el.playbackRate = SPEEDS[rateIdx]
       el.muted = muted
@@ -217,6 +221,18 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
     const onPlay = () => setIsPlaying(true)
     const onPause = () => setIsPlaying(false)
     const onTime = () => setCurrentMs(windowStartRef.current + el.currentTime * 1000)
+    const onLoadedMeta = () => {
+      // Apply the deferred in-clip seek now that the media is seekable.
+      const off = pendingSeekSecRef.current
+      pendingSeekSecRef.current = null
+      if (off != null && off > 0.05) {
+        try {
+          el.currentTime = off
+        } catch {
+          /* not seekable yet — playback still starts at clip head */
+        }
+      }
+    }
     const onWaiting = () => setBuffering(true)
     const onPlaying = () => setBuffering(false)
     const onCanPlay = () => setBuffering(false)
@@ -233,6 +249,7 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
     el.addEventListener('play', onPlay)
     el.addEventListener('pause', onPause)
     el.addEventListener('timeupdate', onTime)
+    el.addEventListener('loadedmetadata', onLoadedMeta)
     el.addEventListener('waiting', onWaiting)
     el.addEventListener('playing', onPlaying)
     el.addEventListener('canplay', onCanPlay)
@@ -241,6 +258,7 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
       el.removeEventListener('play', onPlay)
       el.removeEventListener('pause', onPause)
       el.removeEventListener('timeupdate', onTime)
+      el.removeEventListener('loadedmetadata', onLoadedMeta)
       el.removeEventListener('waiting', onWaiting)
       el.removeEventListener('playing', onPlaying)
       el.removeEventListener('canplay', onCanPlay)
@@ -287,7 +305,20 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
     else el.pause()
   }
 
-  const seekTo = (ms: number) => loadFrom(ms, isPlaying || true)
+  const seekTo = (ms: number) => {
+    const el = videoRef.current
+    const c = loadedClipRef.current
+    // Target is inside the already-loaded clip → native seek (instant, no
+    // network). Only fall back to a fresh /get when crossing clips or when the
+    // element isn't ready yet.
+    if (el && c && ms >= c.startMs && ms < c.endMs && el.readyState >= 1) {
+      el.currentTime = clamp((ms - c.startMs) / 1000, 0, el.duration || 0)
+      setCurrentMs(ms)
+      if (isPlaying) el.play().catch(() => {})
+    } else {
+      loadFrom(ms, isPlaying)
+    }
+  }
 
   const stepFrame = (dir: 1 | -1) => {
     const el = videoRef.current
@@ -326,6 +357,24 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
     const start = clamp(center - span / 2, dayStart, dayEnd - span)
     setView({ start, end: start + span })
   }
+
+  // Continuous wheel zoom, anchored so the time under the cursor stays fixed.
+  const zoomAt = useCallback(
+    (anchorMs: number, factor: number) => {
+      setZoomIdx(-1) // no preset exactly matches a free-form zoom
+      setView((v) => {
+        const span = v.end - v.start
+        const total = dayEnd - dayStart
+        const MIN_SPAN = 10_000 // don't zoom tighter than 10s
+        const newSpan = clamp(span * factor, MIN_SPAN, total)
+        if (newSpan >= total) return { start: dayStart, end: dayEnd }
+        const rel = span > 0 ? (anchorMs - v.start) / span : 0.5
+        const start = clamp(anchorMs - rel * newSpan, dayStart, dayEnd - newSpan)
+        return { start, end: start + newSpan }
+      })
+    },
+    [dayStart, dayEnd]
+  )
 
   const effectiveCurrent = previewMs ?? currentMs
 
@@ -443,6 +492,7 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
               currentTime={effectiveCurrent}
               onSeek={seekTo}
               onScrubPreview={setPreviewMs}
+              onZoomAt={zoomAt}
             />
           </div>
         )}
