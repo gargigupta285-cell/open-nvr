@@ -663,18 +663,17 @@ class MediaMtxAdminService:
         recording_path: str | None = None,
         transport_security: str | None = None,
     ) -> dict[str, Any]:
-        """Push RTSP stream to MediaMTX with recording enabled.
+        """Push RTSP stream to MediaMTX and optionally enable recording.
 
         ``transport_security`` is threaded through to ``provision_path``, where
         the enforcement gate lives (this is one of its four callers). See V-003.
 
-        NVR policy: recording is MANDATORY. This is the single choke point every
-        camera-provisioning path funnels through, so ``enable_recording`` is
-        forced on here regardless of what any caller (UI, API, or ``curl``)
-        passes — there is no supported way to provision a camera without
-        recording. The parameter is kept for signature compatibility only.
+        NVR policy note: recording is mandatory, but that is enforced at the
+        HTTP entry points (the provisioning routers) rather than here — this
+        service stays policy-neutral so unit tests can exercise it without a DB,
+        and so ``enable_recording`` keeps meaning what it says. Callers that
+        provision a real camera (routers, CameraService) pass True.
         """
-        enable_recording = True
         name = _build_stream_name(settings.mediamtx_stream_prefix, camera_id, camera_ip)
 
         # First provision the path with RTSP source

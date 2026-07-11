@@ -174,7 +174,14 @@ async def push_rtsp_stream(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_superuser),
 ):
-    """Push RTSP stream to MediaMTX."""
+    """Push RTSP stream to MediaMTX.
+
+    NVR policy: recording is mandatory, so ``enable_recording`` is forced on
+    here regardless of the query param — a `curl` cannot provision a camera
+    without recording. Enforced at the HTTP entry point (not in the shared
+    service, which stays policy-neutral and DB-free for unit tests).
+    """
+    enable_recording = True  # NVR: recording can't be opted out of
     cam = db.query(Camera).filter(Camera.id == camera_id).first()
     if not cam:
         raise HTTPException(status_code=404, detail="Camera not found")
