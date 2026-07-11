@@ -17,6 +17,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import Hls from 'hls.js'
 import {
   Play,
   Pause,
@@ -73,20 +74,20 @@ const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v
 export function PlaybackConsole({ cameraId, cameraName, date, onClose }: PlaybackConsoleProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
-  // Wall-clock instant (epoch ms) the currently-loaded MediaMTX /get window began at.
+  const hlsRef = useRef<Hls | null>(null)
+  const sessionIdRef = useRef<string | null>(null)
+  // Guards against out-of-order async loads: only the latest load token wins.
+  const loadTokenRef = useRef(0)
+  // Wall-clock instant (epoch ms) the loaded clip begins at, for time mapping.
   const windowStartRef = useRef<number>(0)
-  // The clip currently loaded into the <video>. Seeks that land inside it are
-  // done natively (instant, from buffer); only crossing into another clip hits
-  // the network. Null until the first clip loads.
+  // Bounds of the clip currently loaded into the <video>. Seeks inside it are
+  // native (hls.js fetches the right byte-range fragment → instant); only
+  // crossing into another clip spins up a new session.
   const loadedClipRef = useRef<{ startMs: number; endMs: number } | null>(null)
-  // Offset (seconds) to seek to once the freshly-loaded clip has metadata.
-  const pendingSeekSecRef = useRef<number | null>(null)
 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [segs, setSegs] = useState<Seg[]>([])
-  const [base, setBase] = useState('')
-  const [path, setPath] = useState('')
 
   const [dayStart, setDayStart] = useState(0)
   const [dayEnd, setDayEnd] = useState(0)
@@ -129,8 +130,6 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
           .filter((s) => Number.isFinite(s.startMs))
           .sort((a, b) => a.startMs - b.startMs)
 
-        setBase((res.data?.playback_base_url || '').replace(/\/$/, ''))
-        setPath(res.data?.path || '')
         setSegs(parsed)
 
         if (parsed.length === 0) {
@@ -162,54 +161,102 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
     }
   }, [cameraId, date])
 
-  // ---- Source loading -------------------------------------------------------
-  const buildUrl = useCallback(
-    (startIso: string, durationSec: number) =>
-      `${base}/get?path=${path}&start=${encodeURIComponent(startIso)}&duration=${durationSec}`,
-    [base, path]
-  )
+  // ---- Clip loading via per-clip byte-range HLS session ---------------------
+  const teardownHls = useCallback(() => {
+    if (hlsRef.current) {
+      hlsRef.current.destroy()
+      hlsRef.current = null
+    }
+    const prev = sessionIdRef.current
+    sessionIdRef.current = null
+    if (prev) apiService.deleteHlsPlaybackSession(prev).catch(() => {})
+  }, [])
 
   /**
-   * Load the WHOLE clip that contains `ms` (or the next clip if `ms` is in a
-   * gap) as one MediaMTX /get window, then seek to the `ms` offset once it has
-   * metadata. Loading the whole clip is what lets subsequent in-clip seeks be
-   * native (buffer) reads instead of a fresh server request each time.
+   * Load `clip` and seek to `offsetSec` within it. Each clip gets its own HLS
+   * session whose manifest is a #EXT-X-BYTERANGE playlist over the single
+   * on-disk file — so hls.js seeks with ranged reads (instant), and gaps
+   * between clips are never crossed in one stream.
    */
-  const loadFrom = useCallback(
-    (ms: number, play: boolean) => {
+  const loadClip = useCallback(
+    async (clip: Seg, offsetSec: number, play: boolean) => {
       const el = videoRef.current
-      if (!el || segs.length === 0) return
+      if (!el) return
+      const token = ++loadTokenRef.current
 
-      let clip = segs.find((s) => ms >= s.startMs && ms < s.endMs)
-      let seekMs = ms
-      if (!clip) {
-        // In a gap → jump to the next available clip's start.
-        const next = segs.find((s) => s.startMs >= ms)
-        if (!next) {
-          el.pause()
-          return
-        }
-        clip = next
-        seekMs = next.startMs
-      }
+      teardownHls()
 
       windowStartRef.current = clip.startMs
       loadedClipRef.current = { startMs: clip.startMs, endMs: clip.endMs }
-      pendingSeekSecRef.current = Math.max(0, (seekMs - clip.startMs) / 1000)
-      setCurrentMs(seekMs)
-      el.src = buildUrl(clip.startIso, Math.max(1, clip.duration + 0.5))
-      el.load()
-      el.playbackRate = SPEEDS[rateIdx]
-      el.muted = muted
-      if (play) el.play().catch(() => {})
+      setCurrentMs(clip.startMs + offsetSec * 1000)
+      setBuffering(true)
+
+      let manifestUrl: string
+      try {
+        const res: any = await apiService.createHlsPlaybackSession({
+          camera_id: cameraId,
+          start: clip.startIso,
+          end: new Date(clip.endMs).toISOString(),
+        })
+        if (token !== loadTokenRef.current) return // superseded by a newer load
+        manifestUrl = res.data?.manifest_url
+        sessionIdRef.current = res.data?.session_id || null
+        if (!manifestUrl) throw new Error('No manifest returned')
+      } catch {
+        if (token === loadTokenRef.current) {
+          setBuffering(false)
+          setError('Failed to start playback for this clip.')
+        }
+        return
+      }
+
+      const startAtOffset = () => {
+        if (token !== loadTokenRef.current) return
+        el.playbackRate = SPEEDS[rateIdx]
+        el.muted = muted
+        if (offsetSec > 0.05) {
+          try {
+            el.currentTime = offsetSec
+          } catch {
+            /* seekable range not ready; starts at head */
+          }
+        }
+        if (play) el.play().catch(() => {})
+        setBuffering(false)
+      }
+
+      if (Hls.isSupported()) {
+        const hls = new Hls({
+          enableWorker: true,
+          lowLatencyMode: false,
+          backBufferLength: 30,
+          maxBufferLength: 60,
+          maxMaxBufferLength: 120,
+        })
+        hlsRef.current = hls
+        hls.loadSource(manifestUrl)
+        hls.attachMedia(el)
+        hls.on(Hls.Events.MANIFEST_PARSED, startAtOffset)
+        hls.on(Hls.Events.ERROR, (_evt, data) => {
+          if (!data.fatal) return
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError()
+          else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad()
+        })
+      } else if (el.canPlayType('application/vnd.apple.mpegurl')) {
+        el.src = manifestUrl
+        el.addEventListener('loadedmetadata', startAtOffset, { once: true })
+      } else {
+        setBuffering(false)
+        setError('HLS is not supported in this browser.')
+      }
     },
-    [segs, buildUrl, rateIdx, muted]
+    [cameraId, rateIdx, muted, teardownHls]
   )
 
-  // Start playback once segments are ready.
+  // Start playback at the first clip once segments are ready.
   useEffect(() => {
-    if (!loading && segs.length > 0 && videoRef.current && !videoRef.current.src) {
-      loadFrom(segs[0].startMs, true)
+    if (!loading && segs.length > 0 && !sessionIdRef.current && !loadedClipRef.current) {
+      loadClip(segs[0], 0, true)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, segs])
@@ -221,35 +268,19 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
     const onPlay = () => setIsPlaying(true)
     const onPause = () => setIsPlaying(false)
     const onTime = () => setCurrentMs(windowStartRef.current + el.currentTime * 1000)
-    const onLoadedMeta = () => {
-      // Apply the deferred in-clip seek now that the media is seekable.
-      const off = pendingSeekSecRef.current
-      pendingSeekSecRef.current = null
-      if (off != null && off > 0.05) {
-        try {
-          el.currentTime = off
-        } catch {
-          /* not seekable yet — playback still starts at clip head */
-        }
-      }
-    }
     const onWaiting = () => setBuffering(true)
     const onPlaying = () => setBuffering(false)
     const onCanPlay = () => setBuffering(false)
     const onEnded = () => {
-      // Advance to the next clip after the current window (skips the gap).
-      const after = windowStartRef.current + (el.duration || 0) * 1000
+      // Advance to the next clip (skips the grey gap).
+      const after = loadedClipRef.current?.endMs ?? windowStartRef.current + (el.duration || 0) * 1000
       const next = segs.find((s) => s.startMs >= after - 500)
-      if (next) {
-        loadFrom(next.startMs, true)
-      } else {
-        setIsPlaying(false)
-      }
+      if (next) loadClip(next, 0, true)
+      else setIsPlaying(false)
     }
     el.addEventListener('play', onPlay)
     el.addEventListener('pause', onPause)
     el.addEventListener('timeupdate', onTime)
-    el.addEventListener('loadedmetadata', onLoadedMeta)
     el.addEventListener('waiting', onWaiting)
     el.addEventListener('playing', onPlaying)
     el.addEventListener('canplay', onCanPlay)
@@ -258,17 +289,17 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
       el.removeEventListener('play', onPlay)
       el.removeEventListener('pause', onPause)
       el.removeEventListener('timeupdate', onTime)
-      el.removeEventListener('loadedmetadata', onLoadedMeta)
       el.removeEventListener('waiting', onWaiting)
       el.removeEventListener('playing', onPlaying)
       el.removeEventListener('canplay', onCanPlay)
       el.removeEventListener('ended', onEnded)
     }
-  }, [segs, loadFrom])
+  }, [segs, loadClip])
 
   // Cleanup on unmount.
   useEffect(() => {
     return () => {
+      teardownHls()
       const el = videoRef.current
       if (el) {
         el.pause()
@@ -276,7 +307,7 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
         el.load()
       }
     }
-  }, [])
+  }, [teardownHls])
 
   // Fullscreen tracking.
   useEffect(() => {
@@ -308,16 +339,17 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
   const seekTo = (ms: number) => {
     const el = videoRef.current
     const c = loadedClipRef.current
-    // Target is inside the already-loaded clip → native seek (instant, no
-    // network). Only fall back to a fresh /get when crossing clips or when the
-    // element isn't ready yet.
-    if (el && c && ms >= c.startMs && ms < c.endMs && el.readyState >= 1) {
-      el.currentTime = clamp((ms - c.startMs) / 1000, 0, el.duration || 0)
+    // Inside the loaded clip → native seek. hls.js turns this into a ranged
+    // fragment fetch, so it's instant both directions.
+    if (el && c && ms >= c.startMs && ms < c.endMs) {
+      el.currentTime = clamp((ms - c.startMs) / 1000, 0, el.duration || Number.MAX_SAFE_INTEGER)
       setCurrentMs(ms)
       if (isPlaying) el.play().catch(() => {})
-    } else {
-      loadFrom(ms, isPlaying)
+      return
     }
+    // Otherwise resolve the target clip (or the next one across a gap) and load.
+    const clip = segs.find((s) => ms >= s.startMs && ms < s.endMs) || segs.find((s) => s.startMs >= ms)
+    if (clip) loadClip(clip, Math.max(0, (ms - clip.startMs) / 1000), isPlaying)
   }
 
   const stepFrame = (dir: 1 | -1) => {
