@@ -667,6 +667,12 @@ class MediaMtxAdminService:
 
         ``transport_security`` is threaded through to ``provision_path``, where
         the enforcement gate lives (this is one of its four callers). See V-003.
+
+        NVR policy note: recording is mandatory, but that is enforced at the
+        HTTP entry points (the provisioning routers) rather than here — this
+        service stays policy-neutral so unit tests can exercise it without a DB,
+        and so ``enable_recording`` keeps meaning what it says. Callers that
+        provision a real camera (routers, CameraService) pass True.
         """
         name = _build_stream_name(settings.mediamtx_stream_prefix, camera_id, camera_ip)
 

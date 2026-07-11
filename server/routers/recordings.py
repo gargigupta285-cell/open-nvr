@@ -485,13 +485,18 @@ async def update_retention(
 # =============================================================================
 
 
-@router.post("/start/{camera_id}")
+# DISABLED — recording is automatic on this NVR and cannot be started/stopped
+# on demand, including via the API. Route intentionally commented out so a
+# direct `curl` cannot control recording. Recording is enabled at camera-
+# configure time (see CameraService). Re-enable the decorator only if the
+# product decision changes. See also cameras.toggle_camera_recording.
+# @router.post("/start/{camera_id}")
 async def start_recording(
     camera_id: int,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_superuser),
 ):
-    """Start recording for a camera via MediaMTX."""
+    """Start recording for a camera via MediaMTX. (Route disabled — see above.)"""
     try:
         result = await MediaMtxAdminService.enable_recording(camera_id)
         recording_logger.info(
@@ -503,13 +508,16 @@ async def start_recording(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/stop/{camera_id}")
+# DISABLED — recording is automatic and cannot be stopped on demand, including
+# via the API. Route intentionally commented out so a direct `curl` cannot stop
+# recording. Re-enable the decorator only if the product decision changes.
+# @router.post("/stop/{camera_id}")
 async def stop_recording(
     camera_id: int,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_superuser),
 ):
-    """Stop recording for a camera via MediaMTX."""
+    """Stop recording for a camera via MediaMTX. (Route disabled — see above.)"""
     try:
         result = await MediaMtxAdminService.disable_recording(camera_id)
         recording_logger.info(
@@ -1101,6 +1109,112 @@ async def get_today_segments(
     except Exception as e:
         recording_logger.error(
             f"Failed to get today's segments for camera {camera_id}: {e}"
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/segments/{camera_id}")
+async def get_day_segments(
+    camera_id: int,
+    date: str | None = Query(
+        default=None, description="Day in YYYY-MM-DD (UTC). Defaults to today."
+    ),
+    request: Request = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Get the raw per-clip recording segments for a camera on a given day.
+
+    Unlike ``/list`` (which aggregates a whole day into one entry), this returns
+    every continuous MediaMTX recording as its own segment with an absolute
+    ``start``, ``duration`` and a browser-reachable ``playback_url``. The DVR
+    playback timeline uses this to draw footage/gap blocks and to seek to any
+    wall-clock instant via ``playback_base_url``/``path``.
+    """
+    from datetime import datetime
+    from urllib.parse import quote
+
+    user_obj = await _authenticate_request(request, db)
+    if not user_obj:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    camera = (
+        db.query(Camera)
+        .filter(Camera.id == camera_id, Camera.is_active == True)
+        .first()
+    )
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    # Default to today (UTC) — same basis MediaMTX labels its segment starts on.
+    target_date = date or datetime.now(UTC).strftime("%Y-%m-%d")
+
+    path = _build_stream_name(
+        settings.mediamtx_stream_prefix, camera.id, camera.ip_address
+    )
+
+    # The LIST call stays internal; every URL handed to the browser uses the
+    # external fallback chain (matches the other playback routes).
+    browser_playback_base = (
+        settings.mediamtx_external_playback_url
+        or settings.mediamtx_playback_url
+        or "http://127.0.0.1:9996"
+    ).rstrip("/")
+
+    empty = {
+        "segments": [],
+        "camera_id": camera_id,
+        "camera_name": camera.name or f"Camera {camera_id}",
+        "path": path,
+        "date": target_date,
+        "total_duration": 0,
+        "segment_count": 0,
+        "playback_base_url": browser_playback_base,
+    }
+
+    try:
+        url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
+        response = http_client.get(url, timeout=10)
+        if response.status_code != 200:
+            return empty
+
+        all_segments = response.json() or []
+        day_segments = []
+        for seg in all_segments:
+            start_str = seg.get("start", "")
+            if not start_str:
+                continue
+            try:
+                dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+            except Exception:
+                continue
+            # Match the UTC date basis used by /list's day grouping so the
+            # timeline shows exactly the clips behind the card the user clicked.
+            if dt.strftime("%Y-%m-%d") != target_date:
+                continue
+
+            duration = seg.get("duration", 0)
+            encoded_start = quote(start_str, safe="")
+            day_segments.append(
+                {
+                    "start": start_str,
+                    "duration": duration,
+                    "playback_url": (
+                        f"{browser_playback_base}/get?path={path}"
+                        f"&start={encoded_start}&duration={duration}"
+                    ),
+                }
+            )
+
+        day_segments.sort(key=lambda s: s.get("start", ""))
+        result = dict(empty)
+        result["segments"] = day_segments
+        result["total_duration"] = sum(s.get("duration", 0) for s in day_segments)
+        result["segment_count"] = len(day_segments)
+        return result
+    except Exception as e:
+        recording_logger.error(
+            f"Failed to get day segments for camera {camera_id}: {e}"
         )
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -107,13 +107,15 @@ class CameraService:
             # Auto-provision if RTSP URL is present
             if db_camera.rtsp_url:
                 try:
-                    # Default settings for auto-provisioning
-                    # Recording disabled by default, TCP transport, 5 min segments
+                    # Default settings for auto-provisioning.
+                    # This is a Network Video RECORDER: recording is always on by
+                    # default the moment a camera is configured — it is not an
+                    # operator opt-in. TCP transport, configured segment length.
                     provision_result = await MediaMtxAdminService.push_rtsp_stream(
                         camera_id=db_camera.id,
                         camera_ip=db_camera.ip_address,
                         rtsp_url=db_camera.rtsp_url,
-                        enable_recording=False,
+                        enable_recording=True,
                         rtsp_transport="tcp",
                         recording_segment_seconds=settings.recording_segment_seconds,
                     )
@@ -155,7 +157,7 @@ class CameraService:
                                 camera_id=db_camera.id,
                                 stream_protocol="rtsp",
                                 source_url=db_camera.rtsp_url,
-                                recording_enabled=False,
+                                recording_enabled=True,
                                 rtsp_transport="tcp",
                                 recording_segment_seconds=settings.recording_segment_seconds,
                                 last_provisioned_at=func.now(),

@@ -37,6 +37,7 @@ import {
 } from 'lucide-react'
 import { useSnackbar } from '../components/Snackbar'
 import { VideoPlayer } from '../components/VideoPlayer/VideoPlayer'
+import { PlaybackConsole } from '../components/PlaybackConsole'
 
 // Daily recording - one entry per camera per day
 interface DailyRecording {
@@ -108,6 +109,8 @@ export function PlaybackView() {
   const [hlsSessionId, setHlsSessionId] = useState<string | null>(null)
   const [playbackMode, setPlaybackMode] = useState<'hls' | 'mp4'>('hls')
   const [playingRecording, setPlayingRecording] = useState<{ camera: string; date: string; duration: number; cameraId: number; firstStart: string } | null>(null)
+  // DVR playback console target (preferred path when MediaMTX is available).
+  const [consoleTarget, setConsoleTarget] = useState<{ cameraId: number; cameraName: string; date: string } | null>(null)
   const [playbackError, setPlaybackError] = useState<string | null>(null)
   const [playbackLoading, setPlaybackLoading] = useState(false)
   const [cloudUploadStatus, setCloudUploadStatus] = useState<CloudUploadStatus | null>(null)
@@ -249,51 +252,16 @@ export function PlaybackView() {
       setShowPlayer(true)
       return
     }
-    
-    setPlaybackError(null)
-    setPlaybackLoading(true)
-    setPlaybackMode('hls')
-    setPlayingRecording({
-      camera: camera.camera_name,
-      date: recording.date,
-      duration: recording.total_duration,
+
+    // MediaMTX is available → open the full DVR playback console (timeline,
+    // scrubbing, per-clip seeking, gap-aware auto-advance). The console fetches
+    // the day's raw segments itself.
+    setConsoleTarget({
       cameraId: camera.camera_id,
-      firstStart: recording.first_start,
+      cameraName: camera.camera_name,
+      date: recording.date,
     })
     setShowPlayer(true)
-    
-    try {
-      // Calculate end time from first_start + total_duration
-      const startDate = new Date(recording.first_start)
-      const endDate = new Date(startDate.getTime() + (recording.total_duration * 1000))
-      
-      // Request HLS session from backend
-      const response = await apiService.createHlsPlaybackSession({
-        camera_id: camera.camera_id,
-        start: recording.first_start,
-        end: endDate.toISOString(),
-      })
-      
-      if (response.data && response.data.manifest_url) {
-        const session = response.data as HlsPlaybackSession
-        setHlsSessionId(session.session_id)
-        setHlsPlaybackUrl(session.manifest_url)
-        setPlaybackUrl(recording.playback_url) // Keep MP4 URL for fallback
-        console.log('[Playback] HLS session created:', session.session_id)
-      } else {
-        // Fallback to MP4 if HLS session fails
-        console.warn('[Playback] HLS session creation returned empty, falling back to MP4')
-        setPlaybackMode('mp4')
-        setPlaybackUrl(recording.playback_url)
-      }
-    } catch (err: any) {
-      console.warn('[Playback] HLS session creation failed, falling back to MP4:', err?.message)
-      // Fallback to direct MP4 URL
-      setPlaybackMode('mp4')
-      setPlaybackUrl(recording.playback_url)
-    } finally {
-      setPlaybackLoading(false)
-    }
   }
 
   const uploadRecordingDay = async (camera: CameraWithRecordings, recording: DailyRecording) => {
@@ -351,6 +319,7 @@ export function PlaybackView() {
     setHlsPlaybackUrl(null)
     setHlsSessionId(null)
     setPlayingRecording(null)
+    setConsoleTarget(null)
     setPlaybackMode('hls')
     if (videoRef.current) {
       videoRef.current.pause()
@@ -593,8 +562,18 @@ export function PlaybackView() {
         )}
       </div>
 
-      {/* Video Player Modal */}
-      {showPlayer && (playbackUrl || hlsPlaybackUrl || playbackError) && (
+      {/* DVR Playback Console (preferred — MediaMTX available) */}
+      {showPlayer && consoleTarget && (
+        <PlaybackConsole
+          cameraId={consoleTarget.cameraId}
+          cameraName={consoleTarget.cameraName}
+          date={consoleTarget.date}
+          onClose={closePlayer}
+        />
+      )}
+
+      {/* Video Player Modal (fallback — MediaMTX offline / error) */}
+      {showPlayer && !consoleTarget && (playbackUrl || hlsPlaybackUrl || playbackError) && (
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
           <div className="bg-[var(--panel)] border border-neutral-700 w-full max-w-5xl">
             {/* Header */}
